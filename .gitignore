@@ -8,3 +8,6 @@ tags
 cscope.out
 pandora/linux
 tools/generate_cc_lut
+JC4880P443C_I_W/
+build/
+managed_components/

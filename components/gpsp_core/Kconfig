@@ -1,0 +1,27 @@
+menu "gpSP GBA Emulator"
+
+    config GPSP_DYNAREC
+        bool "Enable Dynamic Recompilation (Dynarec)"
+        default n
+        help
+            Enable ARM→RISC-V dynamic recompilation for higher performance.
+            Requires executable PSRAM regions. Disable this for interpreter-only mode.
+
+    config GPSP_SMALL_TRANSLATION_CACHE
+        bool "Use small translation cache"
+        default y
+        depends on GPSP_DYNAREC
+        help
+            Use smaller JIT code caches (2MB ROM / 384KB RAM instead of 10MB/512KB).
+            Recommended for ESP32-P4 to conserve PSRAM.
+
+    config GPSP_ROM_BUFFER_SIZE
+        int "ROM buffer size (MB)"
+        default 4
+        range 1 32
+        help
+            Maximum ROM buffer size in megabytes.
+            Larger values allow bigger games but consume more PSRAM.
+            Recommended: 4 MB for 8MB PSRAM, 8 MB for 16MB PSRAM.
+
+endmenu

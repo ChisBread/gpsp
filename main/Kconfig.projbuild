@@ -1,0 +1,113 @@
+menu "gpSP ESP32-P4 Platform (JC4880P443C_I_W)"
+
+    menu "Display"
+        config GPSP_LCD_H_RES
+            int "LCD horizontal resolution"
+            default 480
+            help
+                Horizontal resolution of the ST7701 panel (480 for JC4880).
+
+        config GPSP_LCD_V_RES
+            int "LCD vertical resolution"
+            default 800
+            help
+                Vertical resolution of the ST7701 panel (800 for JC4880).
+
+        config GPSP_USE_PPA_SCALING
+            bool "Use PPA hardware scaling"
+            default y
+            help
+                Use the Pixel Processing Accelerator to scale the GBA
+                framebuffer (240x160) to LCD resolution.
+
+        config GPSP_NUM_FB
+            int "Number of DPI framebuffers (1 or 2)"
+            default 1
+            range 1 2
+            help
+                Number of DPI framebuffers. 2 enables double buffering
+                but uses more PSRAM.
+
+        config GPSP_LCD_BRIGHTNESS
+            int "Default backlight brightness (%)"
+            default 80
+            range 0 100
+            help
+                Initial LCD backlight brightness percentage.
+    endmenu
+
+    menu "Audio (ES8311 Codec)"
+        config GPSP_AUDIO_SAMPLE_RATE
+            int "Audio sample rate (Hz)"
+            default 32768
+            range 22050 48000
+            help
+                Audio output sample rate. 32768 Hz matches GBA native
+                and avoids resampling.
+
+        config GPSP_AUDIO_VOLUME
+            int "Default volume (%)"
+            default 70
+            range 0 100
+            help
+                Initial speaker volume percentage.
+    endmenu
+
+    menu "Input (GPIO buttons)"
+        comment "JC4880 has S1-S4 onboard + JP1 expansion connector."
+        comment "Use expansion pins (GPIO28-35, GPIO49-52) for external buttons."
+        comment "Set to -1 to disable a button."
+
+        config GPSP_GPIO_A
+            int "Button A GPIO"
+            default -1
+        config GPSP_GPIO_B
+            int "Button B GPIO"
+            default -1
+        config GPSP_GPIO_SELECT
+            int "Button SELECT GPIO"
+            default -1
+        config GPSP_GPIO_START
+            int "Button START GPIO"
+            default -1
+        config GPSP_GPIO_RIGHT
+            int "D-pad RIGHT GPIO"
+            default -1
+        config GPSP_GPIO_LEFT
+            int "D-pad LEFT GPIO"
+            default -1
+        config GPSP_GPIO_UP
+            int "D-pad UP GPIO"
+            default -1
+        config GPSP_GPIO_DOWN
+            int "D-pad DOWN GPIO"
+            default -1
+        config GPSP_GPIO_R
+            int "Button R GPIO"
+            default -1
+        config GPSP_GPIO_L
+            int "Button L GPIO"
+            default -1
+    endmenu
+
+    config GPSP_ROM_PATH
+        string "Default ROM file path"
+        default "/sdcard/game.gba"
+        help
+            Path to the GBA ROM file to load on startup.
+
+    config GPSP_EMULATION_CORE
+        int "Emulation core (0=Core0, 1=Core1)"
+        default 1
+        range 0 1
+        help
+            CPU core to run the GBA emulation loop on.
+            Core 1 recommended to keep Core 0 for system tasks.
+
+    config GPSP_EMU_TASK_STACK_SIZE
+        int "Emulation task stack size (bytes)"
+        default 32768
+        help
+            Stack size for the main emulation task.
+
+endmenu
