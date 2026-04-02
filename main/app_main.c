@@ -54,7 +54,7 @@ void netpacket_poll_receive(void) { }
 void netpacket_send(uint16_t client_id, const void *buf, size_t len) { (void)client_id; (void)buf; (void)len; }
 
 /* Framebuffer pointer used by gpsp video.cc */
-static u16 gba_screen_buffer[GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
+static GPSP_EXTRAM_BSS u16 gba_screen_buffer[GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
 
 /* Audio buffer for outputting to I2S */
 #define AUDIO_SAMPLES_PER_FRAME  (CONFIG_GPSP_AUDIO_SAMPLE_RATE / 60)

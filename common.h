@@ -41,6 +41,13 @@
   #define function_cc
 #endif
 
+/* Place large buffers in PSRAM on ESP32-P4 */
+#ifdef ESP_PLATFORM
+  #define GPSP_EXTRAM_BSS __attribute__((section(".ext_ram.bss")))
+#else
+  #define GPSP_EXTRAM_BSS
+#endif
+
 #ifdef ARM_ARCH
 
 #define _BSD_SOURCE // sync
