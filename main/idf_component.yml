@@ -1,0 +1,13 @@
+dependencies:
+  espressif/esp_hosted:
+    version: "*"
+    rules:
+    - if: target in [esp32p4]
+
+  espressif/esp_wifi_remote:
+    version: "*"
+    rules:
+    - if: target in [esp32p4]
+
+  idf:
+    version: ">=6.0.0"

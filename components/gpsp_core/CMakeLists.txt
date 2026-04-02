@@ -68,7 +68,6 @@ idf_component_register(
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     INLINE=inline
     _GNU_SOURCE
-    USE_XBGR1555_FORMAT
 )
 
 if(CONFIG_GPSP_DYNAREC)

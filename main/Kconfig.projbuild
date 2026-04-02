@@ -39,11 +39,13 @@ menu "gpSP ESP32-P4 Platform (JC4880P443C_I_W)"
     menu "Audio (ES8311 Codec)"
         config GPSP_AUDIO_SAMPLE_RATE
             int "Audio sample rate (Hz)"
-            default 32768
-            range 22050 48000
+            default 65536
+            range 32000 96000
             help
-                Audio output sample rate. 32768 Hz matches GBA native
-                and avoids resampling.
+                gpsp core currently produces 16-bit stereo PCM at 65536 Hz.
+                The ESP32-P4 port feeds the codec at that native rate, so
+                values other than 65536 are currently ignored unless a
+                resampler is added.
 
         config GPSP_AUDIO_VOLUME
             int "Default volume (%)"
@@ -109,5 +111,66 @@ menu "gpSP ESP32-P4 Platform (JC4880P443C_I_W)"
         default 32768
         help
             Stack size for the main emulation task.
+
+    menu "ESP32-C6 Remote Connectivity"
+        config GPSP_ENABLE_C6_REMOTE
+            bool "Enable ESP32-C6 remote link bring-up"
+            default n
+            help
+                Initialize the P4-side remote Wi-Fi stack through esp_wifi_remote.
+                This validates host-to-slave communication by initializing
+                ESP-Hosted, reading the slave firmware version, bringing up a
+                station interface, and performing a Wi-Fi scan.
+                The vendor example uses esp_hosted over SDIO with P4 GPIO18/19
+                and GPIO14-17, plus GPIO54 as the C6 reset line.
+
+        config GPSP_C6_SCAN_LIST_SIZE
+            int "ESP32-C6 scan result log limit"
+            default 10
+            range 1 32
+            depends on GPSP_ENABLE_C6_REMOTE
+            help
+                Maximum number of scanned access points to log during the
+                hosted Wi-Fi smoke test.
+
+        config GPSP_C6_CONNECT_TEST
+            bool "Run hosted STA connect smoke test"
+            default n
+            depends on GPSP_ENABLE_C6_REMOTE
+            help
+                After the remote scan succeeds, try connecting the remote C6
+                station to the SSID configured below and wait for an IP.
+
+        config GPSP_C6_CONNECT_SSID
+            string "Hosted STA test SSID"
+            default ""
+            depends on GPSP_C6_CONNECT_TEST
+
+        config GPSP_C6_CONNECT_PASSWORD
+            string "Hosted STA test password"
+            default ""
+            depends on GPSP_C6_CONNECT_TEST
+
+        config GPSP_C6_CONNECT_TIMEOUT_MS
+            int "Hosted STA connect timeout (ms)"
+            default 15000
+            range 1000 60000
+            depends on GPSP_C6_CONNECT_TEST
+
+        config GPSP_C6_CONNECT_MAX_RETRIES
+            int "Hosted STA connect retries"
+            default 5
+            range 1 20
+            depends on GPSP_C6_CONNECT_TEST
+
+        config GPSP_C6_HEALTH_LOG_PERIOD_MS
+            int "ESP32-C6 health log period (ms)"
+            default 10000
+            range 1000 60000
+            depends on GPSP_ENABLE_C6_REMOTE
+            help
+                Period for the background connectivity task to log that the
+                remote C6 control path is still alive.
+    endmenu
 
 endmenu

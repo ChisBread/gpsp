@@ -56,6 +56,27 @@
 
 - 4-bit 总线宽度，高速模式
 
+## 板载 ESP32-C6 通信（示例工程配置）
+
+下面这组引脚来自板厂附带的 `xiaozhi-esp32` ESP-IDF 示例工程配置，
+用于 ESP32-P4 作为 host、ESP32-C6 作为 slave 的 `esp_hosted` over SDIO。
+
+| 功能 | GPIO | 说明 |
+|------|------|------|
+| SDIO CLK | GPIO18 | P4 -> C6 时钟 |
+| SDIO CMD | GPIO19 | P4 <-> C6 命令线 |
+| SDIO D0 | GPIO14 | 数据线 0 |
+| SDIO D1 | GPIO15 | 数据线 1 |
+| SDIO D2 | GPIO16 | 数据线 2 |
+| SDIO D3 | GPIO17 | 数据线 3 |
+| C6 Reset | GPIO54 | 高电平有效复位配置 |
+
+- Host 接口：SDIO Slot 1
+- 总线宽度：4-bit
+- 时钟：40 MHz
+- Reset 极性：active high
+- 来源：`JC4880P443C_I_W/1-Demo/idf_examples/ESP-IDF/xiaozhi-esp32/sdkconfig`
+
 ## USB
 
 | 功能 | GPIO | 说明 |
@@ -111,6 +132,7 @@
 | 11 | PA 使能 | 输出 |
 | 12 | I2S BCLK | 输出 |
 | 13 | I2S MCLK | 输出 |
+| 14-19 | 板载 C6 SDIO | 双向/输出 |
 | 23 | LCD 背光 PWM | 输出 |
 | 24 | USB D+ | 双向 |
 | 25 | USB D- | 双向 |
@@ -120,3 +142,4 @@
 | 44 | SD CMD | 双向 |
 | 48 | I2S DIN | 输入 |
 | 49-52 | JP1 扩展 (可用) | 输入 |
+| 54 | 板载 C6 Reset | 输出 |
