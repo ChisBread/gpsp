@@ -247,7 +247,7 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
                  int force_rtc, int force_rumble, int force_serial);
 s32 load_bios(char *name);
 void init_memory(void);
-void init_gamepak_buffer(void);
+u32 init_gamepak_buffer(void);
 bool gamepak_must_swap(void);
 void memory_term(void);
 u8 *load_gamepak_page(u32 physical_index);

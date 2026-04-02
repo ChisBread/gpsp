@@ -33,16 +33,6 @@ extern "C" {
 esp_err_t storage_init(void);
 
 /**
- * Load a ROM file into a buffer allocated in PSRAM.
- */
-esp_err_t storage_load_rom(const char *path, uint8_t **rom_out, size_t *size_out);
-
-/**
- * Load the GBA BIOS file.
- */
-esp_err_t storage_load_bios(uint8_t **bios_out);
-
-/**
  * Save battery-backed RAM to a file.
  */
 esp_err_t storage_write_save(const char *rom_name, const void *data, size_t size);

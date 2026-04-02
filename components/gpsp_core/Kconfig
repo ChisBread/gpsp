@@ -17,11 +17,12 @@ menu "gpSP GBA Emulator"
 
     config GPSP_ROM_BUFFER_SIZE
         int "ROM buffer size (MB)"
-        default 4
+        default 32
         range 1 32
         help
             Maximum ROM buffer size in megabytes.
-            Larger values allow bigger games but consume more PSRAM.
-            Recommended: 4 MB for 8MB PSRAM, 8 MB for 16MB PSRAM.
+            Allocation is graceful: if PSRAM is insufficient, fewer blocks are allocated
+            and the LRU paging mechanism loads remaining pages from SD on demand.
+            With 32MB PSRAM, set to 32 to cache most ROMs entirely.
 
 endmenu

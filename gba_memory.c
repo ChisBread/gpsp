@@ -20,6 +20,10 @@
 #include "common.h"
 #include "streams/file_stream.h"
 
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#endif
+
 /* Sound */
 #define gbc_sound_tone_control_low(channel, regn)                             \
 {                                                                             \
@@ -2205,14 +2209,19 @@ u8 *load_gamepak_page(u32 physical_index)
   return swap_location;
 }
 
-void init_gamepak_buffer(void)
+u32 init_gamepak_buffer(void)
 {
   unsigned i;
   // Try to allocate up to 32 blocks of 1MB each
   gamepak_buffer_count = 0;
   while (gamepak_buffer_count < ROM_BUFFER_SIZE)
   {
+#ifdef ESP_PLATFORM
+    // On ESP32-P4, allocate ROM buffers in PSRAM explicitly
+    void *ptr = heap_caps_malloc(gamepak_buffer_blocksize, MALLOC_CAP_SPIRAM);
+#else
     void *ptr = malloc(gamepak_buffer_blocksize);
+#endif
     if (!ptr)
       break;
     gamepak_buffers[gamepak_buffer_count++] = (u8*)ptr;
@@ -2227,6 +2236,8 @@ void init_gamepak_buffer(void)
 
   gamepak_lru_head = 0;
   gamepak_lru_tail = 32 * gamepak_buffer_count - 1;
+
+  return gamepak_buffer_count;
 }
 
 bool gamepak_must_swap(void)
@@ -2309,7 +2320,11 @@ void memory_term(void)
 
   while (gamepak_buffer_count)
   {
+#ifdef ESP_PLATFORM
+    heap_caps_free(gamepak_buffers[--gamepak_buffer_count]);
+#else
     free(gamepak_buffers[--gamepak_buffer_count]);
+#endif
   }
 }
 

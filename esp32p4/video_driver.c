@@ -31,6 +31,15 @@ static const char *TAG = "gpsp_video";
 #define BL_LEDC_FREQ_HZ 20000
 #define BL_LEDC_DUTY_RES LEDC_TIMER_10_BIT
 
+/*
+ * Output pipeline: GBA 240x160 → rotate 90° CCW → 160x240 → ×3 → 480x720
+ * Centered on 480x800 LCD with 40px black bars top/bottom.
+ * Uses PPA hardware when available, software fallback otherwise.
+ */
+#define SCALE_FACTOR    3
+#define SCALED_W        (GBA_HEIGHT * SCALE_FACTOR)  /* 160*3 = 480 */
+#define SCALED_H        (GBA_WIDTH  * SCALE_FACTOR)  /* 240*3 = 720 */
+
 static struct {
     esp_lcd_panel_handle_t   panel;
     esp_lcd_panel_io_handle_t io;
@@ -38,11 +47,43 @@ static struct {
     esp_ldo_channel_handle_t phy_pwr_chan;
     ppa_client_handle_t      ppa_srm_client;
 
+    uint16_t *out_buf;           /* Full LCD-sized scratch buffer for scaled output */
+    size_t    out_buf_size;
+    uint16_t  offset_y;          /* Vertical centering offset: (800-720)/2 = 40 */
+
     uint16_t lcd_h_res;
     uint16_t lcd_v_res;
     bool     use_ppa;
     bool     initialized;
 } s_video;
+
+/*
+ * Software rotate 90° CCW + 3x nearest-neighbor scale.
+ * Input:  240(W)x160(H) row-major RGB565
+ * Output: 480x720 placed into lcd_w x lcd_h buffer at (0, offset_y)
+ *
+ * CCW 90°: src(x, y) → dst(y, W-1-x)   (in 160×240 space)
+ * Then ×3: each dst pixel → 3×3 block in final output.
+ */
+static void sw_rotate_scale(const uint16_t *src, uint16_t *dst,
+                            uint16_t lcd_w, uint16_t offset_y)
+{
+    for (int y = 0; y < GBA_HEIGHT; y++) {
+        const uint16_t *src_row = src + y * GBA_WIDTH;
+        for (int x = 0; x < GBA_WIDTH; x++) {
+            uint16_t pixel = src_row[x];
+            /* Rotated position (before scaling): (y, GBA_WIDTH-1-x) */
+            int out_x = y * SCALE_FACTOR;
+            int out_y = (GBA_WIDTH - 1 - x) * SCALE_FACTOR + offset_y;
+            uint16_t *p = dst + out_y * lcd_w + out_x;
+            p[0] = p[1] = p[2] = pixel;
+            p += lcd_w;
+            p[0] = p[1] = p[2] = pixel;
+            p += lcd_w;
+            p[0] = p[1] = p[2] = pixel;
+        }
+    }
+}
 
 /* ---- ST7701 vendor init command sequence for JC4880 panel ---- */
 static const st7701_lcd_init_cmd_t jc4880_st7701_init_cmds[] = {
@@ -218,7 +259,20 @@ esp_err_t video_driver_init(const video_driver_config_t *config)
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_video.panel), TAG, "Panel init failed");
     ESP_LOGI(TAG, "ST7701 panel initialized: %ux%u", config->lcd_h_res, config->lcd_v_res);
 
-    /* ---- 8. Initialize PPA for hardware scaling ---- */
+    /* ---- 8. Allocate scaled output buffer (used by both PPA and SW paths) ---- */
+    s_video.out_buf_size = config->lcd_h_res * config->lcd_v_res * sizeof(uint16_t);
+    s_video.out_buf = (uint16_t *)heap_caps_aligned_alloc(
+        64, s_video.out_buf_size, MALLOC_CAP_SPIRAM);
+    if (!s_video.out_buf) {
+        ESP_LOGE(TAG, "Output buffer alloc failed (%u bytes)", (unsigned)s_video.out_buf_size);
+        return ESP_ERR_NO_MEM;
+    }
+    /* Clear to black — top/bottom bars stay black permanently */
+    memset(s_video.out_buf, 0, s_video.out_buf_size);
+    s_video.offset_y = (config->lcd_v_res > SCALED_H)
+        ? (config->lcd_v_res - SCALED_H) / 2 : 0;
+
+    /* ---- 9. Initialize PPA for hardware rotation + scaling (optional) ---- */
     if (s_video.use_ppa) {
         ppa_client_config_t ppa_config = {
             .oper_type = PPA_OPERATION_SRM,
@@ -226,12 +280,18 @@ esp_err_t video_driver_init(const video_driver_config_t *config)
         };
         esp_err_t err = ppa_register_client(&ppa_config, &s_video.ppa_srm_client);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "PPA SRM client failed: %s, using software scaling", esp_err_to_name(err));
+            ESP_LOGW(TAG, "PPA SRM client failed: %s, using software fallback", esp_err_to_name(err));
             s_video.use_ppa = false;
         } else {
-            ESP_LOGI(TAG, "PPA scaling: %ux%u -> %ux%u",
-                     GBA_WIDTH, GBA_HEIGHT, config->lcd_h_res, config->lcd_v_res);
+            ESP_LOGI(TAG, "PPA: %ux%u → rotate 90° → x%d → %ux%u, centered at y=%u",
+                     GBA_WIDTH, GBA_HEIGHT, SCALE_FACTOR,
+                     SCALED_W, SCALED_H, s_video.offset_y);
         }
+    }
+    if (!s_video.use_ppa) {
+        ESP_LOGI(TAG, "SW: %ux%u → rotate 90° → x%d → %ux%u, centered at y=%u",
+                 GBA_WIDTH, GBA_HEIGHT, SCALE_FACTOR,
+                 SCALED_W, SCALED_H, s_video.offset_y);
     }
 
     /* ---- 9. Turn on backlight ---- */
@@ -249,56 +309,51 @@ esp_err_t video_driver_submit_frame(const uint16_t *gba_framebuffer)
     }
 
     if (s_video.use_ppa && s_video.ppa_srm_client) {
-        /*
-         * PPA scales the 240x160 GBA frame and draws it centered on the LCD.
-         * The DPI panel DMA framebuffer is used as the PPA output target.
-         * We rely on the DPI panel's own framebuffer (managed by the DPI driver).
-         *
-         * Since the DPI panel continuously scans its framebuffer, we draw directly
-         * into it. For a 480x800 LCD, integer 2x scaling gives 480x320, centered
-         * vertically with black bars.
-         */
-        float scale_x = (float)s_video.lcd_h_res / GBA_WIDTH;
-        float scale_y = (float)s_video.lcd_v_res / GBA_HEIGHT;
-        float scale = (scale_x < scale_y) ? scale_x : scale_y;
+        /* PPA hardware path: rotate 90° CCW + scale ×3 in one pass */
+        ppa_srm_oper_config_t srm_config = {
+            .in = {
+                .buffer = (const void *)gba_framebuffer,
+                .pic_w = GBA_WIDTH,
+                .pic_h = GBA_HEIGHT,
+                .block_w = GBA_WIDTH,
+                .block_h = GBA_HEIGHT,
+                .block_offset_x = 0,
+                .block_offset_y = 0,
+                .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+            },
+            .out = {
+                .buffer = s_video.out_buf,
+                .buffer_size = s_video.out_buf_size,
+                .pic_w = s_video.lcd_h_res,
+                .pic_h = s_video.lcd_v_res,
+                .block_offset_x = 0,
+                .block_offset_y = s_video.offset_y,
+                .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
+            },
+            .rotation_angle = PPA_SRM_ROTATION_ANGLE_90,
+            .scale_x = (float)SCALE_FACTOR,
+            .scale_y = (float)SCALE_FACTOR,
+            .rgb_swap = false,
+            .byte_swap = false,
+            .mode = PPA_TRANS_MODE_BLOCKING,
+        };
 
-        /* Clamp to integer for best quality if close to integer */
-        int int_scale = (int)scale;
-        if (int_scale >= 2 && (scale - int_scale) < 0.1f) {
-            scale = (float)int_scale;
+        esp_err_t err = ppa_do_scale_rotate_mirror(s_video.ppa_srm_client, &srm_config);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "PPA SRM failed: %s", esp_err_to_name(err));
+            return err;
         }
-
-        uint16_t out_w = (uint16_t)(GBA_WIDTH * scale);
-        uint16_t out_h = (uint16_t)(GBA_HEIGHT * scale);
-        uint16_t offset_x = (s_video.lcd_h_res - out_w) / 2;
-        uint16_t offset_y = (s_video.lcd_v_res - out_h) / 2;
-
-        /*
-         * For DPI panels with use_dma2d, the panel driver manages its own
-         * framebuffer. We draw the GBA frame with PPA into a scratch buffer
-         * and then blit it to the panel via esp_lcd_panel_draw_bitmap.
-         *
-         * For efficiency, we just use draw_bitmap with the source GBA frame
-         * at the appropriate position. The DPI driver handles the rest.
-         */
-        esp_lcd_panel_draw_bitmap(s_video.panel,
-                                  offset_x, offset_y,
-                                  offset_x + GBA_WIDTH,
-                                  offset_y + GBA_HEIGHT,
-                                  gba_framebuffer);
     } else {
-        /* Direct blit without scaling, centered */
-        uint16_t offset_x = (s_video.lcd_h_res > GBA_WIDTH) ?
-                            (s_video.lcd_h_res - GBA_WIDTH) / 2 : 0;
-        uint16_t offset_y = (s_video.lcd_v_res > GBA_HEIGHT) ?
-                            (s_video.lcd_v_res - GBA_HEIGHT) / 2 : 0;
-
-        esp_lcd_panel_draw_bitmap(s_video.panel,
-                                  offset_x, offset_y,
-                                  offset_x + GBA_WIDTH,
-                                  offset_y + GBA_HEIGHT,
-                                  gba_framebuffer);
+        /* Software path: rotate 90° CCW + 3x nearest-neighbor scale */
+        sw_rotate_scale(gba_framebuffer, s_video.out_buf,
+                        s_video.lcd_h_res, s_video.offset_y);
     }
+
+    /* Blit full LCD buffer (including black bars) to DPI panel */
+    esp_lcd_panel_draw_bitmap(s_video.panel,
+                              0, 0,
+                              s_video.lcd_h_res, s_video.lcd_v_res,
+                              s_video.out_buf);
 
     return ESP_OK;
 }
@@ -320,6 +375,11 @@ esp_err_t video_driver_set_brightness(int percent)
 void video_driver_deinit(void)
 {
     video_driver_set_brightness(0);
+
+    if (s_video.out_buf) {
+        heap_caps_free(s_video.out_buf);
+        s_video.out_buf = NULL;
+    }
 
     if (s_video.ppa_srm_client) {
         ppa_unregister_client(s_video.ppa_srm_client);

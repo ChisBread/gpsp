@@ -142,7 +142,6 @@ static esp_err_t load_and_init_gba(const char *rom_path)
 {
     /* Initialize gpsp core systems */
     init_main();
-    init_gamepak_buffer();
     init_sound();
 
     /* Set up screen pixel buffer */
@@ -162,6 +161,11 @@ static esp_err_t load_and_init_gba(const char *rom_path)
         memcpy(bios_rom, open_gba_bios_rom, sizeof(bios_rom));
         ESP_LOGI(TAG, "Using built-in HLE BIOS");
     }
+
+    /* Allocate ROM buffers last — this consumes all remaining PSRAM.
+     * init_gamepak_buffer() gracefully stops when PSRAM is exhausted. */
+    u32 rom_buf_count = init_gamepak_buffer();
+    ESP_LOGI(TAG, "ROM buffers: %u MB in PSRAM", (unsigned)rom_buf_count);
 
     /* Load ROM via gpsp core (uses libretro VFS → standard fopen) */
     memset(gamepak_backup, 0xFF, sizeof(gamepak_backup));
