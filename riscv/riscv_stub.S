@@ -1,173 +1,728 @@
-/*
- * gpsp RISC-V Dynamic Recompiler — Runtime Stub
- *
- * This file contains the assembly glue between C code and JIT-compiled
- * RISC-V code blocks. It handles:
- *   - Entry into translated blocks (execute_arm_translate / execute_thumb)
- *   - Return from translated blocks back to C
- *   - Register save/restore across JIT boundaries
- *
- * STATUS: STUB — Minimal framework, to be implemented alongside riscv_emit.h
- *
- * Calling convention: RISC-V ILP32 (standard ESP-IDF toolchain)
- *   a0-a7:  argument/return registers (caller-saved)
- *   t0-t6:  temporary registers (caller-saved)
- *   s0-s11: callee-saved registers (used for GBA register cache)
- *   ra:     return address
- *   sp:     stack pointer
- *   gp:     global pointer (repurposed: GBA reg[] base pointer)
- *   tp:     thread pointer (repurposed: memory map table pointer)
- */
+#include "../gpsp_config.h"
 
-    .text
-    .align 2
+#define defsymbl(symbol) \
+.align 2;                \
+.type symbol, %function ;\
+.global symbol ;         \
+.global _##symbol ;      \
+symbol:                  \
+_##symbol:
 
-/* ================================================================
- * GBA register ↔ RISC-V host register mapping (must match riscv_emit.h)
- *
- *   s0  = GBA R0         s7  = GBA R15 (PC)
- *   s1  = GBA R1         s8  = CPSR N flag
- *   s2  = GBA R6         s9  = CPSR Z flag
- *   s3  = GBA R9         s10 = CPSR C flag
- *   s4  = GBA R10        s11 = CPSR V flag
- *   s5  = GBA R12
- *   s6  = GBA R14 (LR)
- *   gp  = reg[] base address
- *   tp  = memory map table
- * ================================================================ */
+#define defobj(symbol)    \
+.align 6;                 \
+.type symbol, %object ;   \
+.global symbol ;          \
+.global _##symbol ;       \
+symbol:                   \
+_##symbol:
+
+        .text
+        .align 2
+
+#define REG_R0             (0 * 4)
+#define REG_R1             (1 * 4)
+#define REG_R2             (2 * 4)
+#define REG_R3             (3 * 4)
+#define REG_R4             (4 * 4)
+#define REG_R5             (5 * 4)
+#define REG_R6             (6 * 4)
+#define REG_R7             (7 * 4)
+#define REG_R8             (8 * 4)
+#define REG_R9             (9 * 4)
+#define REG_R10            (10 * 4)
+#define REG_R11            (11 * 4)
+#define REG_R12            (12 * 4)
+#define REG_R13            (13 * 4)
+#define REG_R14            (14 * 4)
+#define REG_PC             (15 * 4)
+#define REG_CPSR           (16 * 4)
+#define CPU_MODE           (17 * 4)
+#define CPU_HALT_STATE     (18 * 4)
+#define REG_BUS_VALUE      (19 * 4)
+#define REG_N_FLAG         (20 * 4)
+#define REG_Z_FLAG         (21 * 4)
+#define REG_C_FLAG         (22 * 4)
+#define REG_V_FLAG         (23 * 4)
+#define REG_SAVE           (26 * 4)
+#define REG_SAVE2          (27 * 4)
+#define REG_SAVE3          (28 * 4)
+#define REG_SAVE4          (29 * 4)
+#define REG_SAVE5          (30 * 4)
+#define REG_SAVE6          (31 * 4)
+
+#define MODE_SUPERVISOR    0x13
+#define SPSR_RAM_OFF       0x100
+#define REGMODE_RAM_OFF    0x118
+#define SUPERVISOR_SPSR    (SPSR_RAM_OFF + 3 * 4)
+#define SUPERVISOR_LR      (REGMODE_RAM_OFF + (3 * (7 * 4)) + (6 * 4))
 
 /* Stack frame layout (bytes from sp):
- *   0:   ra
- *   4:   s0
- *   8:   s1
- *  12:   s2
- *  16:   s3
- *  20:   s4
- *  24:   s5
- *  28:   s6
- *  32:   s7
- *  36:   s8
- *  40:   s9
- *  44:   s10
- *  48:   s11
- *  52:   gp (original, to restore)
- *  56:   tp (original, to restore)
- *  Total: 64 bytes (16-byte aligned)
+ *   0:  ra
+ *   4:  s0
+ *   8:  s1
+ *  12:  s2
+ *  16:  s3
+ *  20:  s4
+ *  24:  s5
+ *  28:  s6
+ *  32:  s7
+ *  36:  s8
+ *  40:  s9
+ *  44:  s10
+ *  48:  s11
+ *  52:  gp
+ *  56:  tp
+ *  60:  jit tp (cycles)
+ *  64:  jit gp (reg base)
  */
-#define FRAME_SIZE  64
+#define FRAME_SIZE         72
 
-/* ================================================================
- * execute_arm_translate(u32 cycles, void *reg_ptr, void *mem_table)
- *
- * Entry from C into the JIT execution engine.
- *   a0 = number of cycles to execute
- *   a1 = pointer to reg[] (GBA register file)
- *   a2 = pointer to memory access table
- *
- * Returns remaining cycles in a0.
- * ================================================================ */
+#define load_registers()                        \
+    lw s0,  REG_R0(gp);                          \
+    lw s1,  REG_R1(gp);                          \
+    lw a3,  REG_R2(gp);                          \
+    lw a4,  REG_R3(gp);                          \
+    lw a5,  REG_R4(gp);                          \
+    lw a6,  REG_R5(gp);                          \
+    lw s2,  REG_R6(gp);                          \
+    lw a7,  REG_R7(gp);                          \
+    lw t4,  REG_R8(gp);                          \
+    lw s3,  REG_R9(gp);                          \
+    lw s4,  REG_R10(gp);                         \
+    lw t5,  REG_R11(gp);                         \
+    lw s5,  REG_R12(gp);                         \
+    lw t6,  REG_R13(gp);                         \
+    lw s6,  REG_R14(gp);                         \
+    lw s7,  REG_PC(gp)
 
-    .globl execute_arm_translate
-    .type  execute_arm_translate, @function
-execute_arm_translate:
-    /* ---- Save callee-saved registers ---- */
-    addi    sp, sp, -FRAME_SIZE
-    sw      ra,   0(sp)
-    sw      s0,   4(sp)
-    sw      s1,   8(sp)
-    sw      s2,  12(sp)
-    sw      s3,  16(sp)
-    sw      s4,  20(sp)
-    sw      s5,  24(sp)
-    sw      s6,  28(sp)
-    sw      s7,  32(sp)
-    sw      s8,  36(sp)
-    sw      s9,  40(sp)
-    sw      s10, 44(sp)
-    sw      s11, 48(sp)
-    sw      gp,  52(sp)
-    sw      tp,  56(sp)
+#define store_registers()                       \
+    sw s0,  REG_R0(gp);                          \
+    sw s1,  REG_R1(gp);                          \
+    sw a3,  REG_R2(gp);                          \
+    sw a4,  REG_R3(gp);                          \
+    sw a5,  REG_R4(gp);                          \
+    sw a6,  REG_R5(gp);                          \
+    sw s2,  REG_R6(gp);                          \
+    sw a7,  REG_R7(gp);                          \
+    sw t4,  REG_R8(gp);                          \
+    sw s3,  REG_R9(gp);                          \
+    sw s4,  REG_R10(gp);                         \
+    sw t5,  REG_R11(gp);                         \
+    sw s5,  REG_R12(gp);                         \
+    sw t6,  REG_R13(gp);                         \
+    sw s6,  REG_R14(gp);                         \
+    sw s7,  REG_PC(gp)
 
-    /* ---- Set up JIT environment ---- */
-    mv      gp, a1          /* gp = reg[] base pointer */
-    mv      tp, a2          /* tp = memory map table */
+#define extract_flags(tmpreg)                   \
+    lw   tmpreg, REG_CPSR(gp);                   \
+    srli s8, tmpreg, 31;                         \
+    andi s8, s8, 1;                              \
+    srli s9, tmpreg, 30;                         \
+    andi s9, s9, 1;                              \
+    srli s10, tmpreg, 29;                        \
+    andi s10, s10, 1;                            \
+    srli s11, tmpreg, 28;                        \
+    andi s11, s11, 1
 
-    /* ---- Load cached GBA registers from reg[] ---- */
-    lw      s0,  (0*4)(gp)   /* GBA R0 */
-    lw      s1,  (1*4)(gp)   /* GBA R1 */
-    lw      s2,  (6*4)(gp)   /* GBA R6 */
-    lw      s3,  (9*4)(gp)   /* GBA R9 */
-    lw      s4, (10*4)(gp)   /* GBA R10 */
-    lw      s5, (12*4)(gp)   /* GBA R12 */
-    lw      s6, (14*4)(gp)   /* GBA R14 */
-    lw      s7, (15*4)(gp)   /* GBA R15 (PC) */
+#define consolidate_flags(tmpreg, tmpreg2)      \
+    lw   tmpreg, REG_CPSR(gp);                    \
+    li   tmpreg2, 0x0fffffff;                     \
+    and  tmpreg, tmpreg, tmpreg2;                 \
+    slli tmpreg2, s8, 31;                         \
+    or   tmpreg, tmpreg, tmpreg2;                 \
+    slli tmpreg2, s9, 30;                         \
+    or   tmpreg, tmpreg, tmpreg2;                 \
+    slli tmpreg2, s10, 29;                        \
+    or   tmpreg, tmpreg, tmpreg2;                 \
+    slli tmpreg2, s11, 28;                        \
+    or   tmpreg, tmpreg, tmpreg2;                 \
+    sw   tmpreg, REG_CPSR(gp)
 
-    /* ---- TODO: Load CPSR flags into s8-s11 ---- */
-    /* The CPSR is stored at reg[REG_CPSR].
-     * Extract N, Z, C, V bits into separate registers. */
-    li      s8, 0             /* N flag placeholder */
-    li      s9, 0             /* Z flag placeholder */
-    li      s10, 0            /* C flag placeholder */
-    li      s11, 0            /* V flag placeholder */
+/*
+ * execute_arm_translate_internal(u32 cycles, void *reg_ptr)
+ *   a0 = cycles
+ *   a1 = &reg[0]
+ */
+defsymbl(execute_arm_translate_internal)
+    addi sp, sp, -FRAME_SIZE
+    sw   ra,   0(sp)
+    sw   s0,   4(sp)
+    sw   s1,   8(sp)
+    sw   s2,  12(sp)
+    sw   s3,  16(sp)
+    sw   s4,  20(sp)
+    sw   s5,  24(sp)
+    sw   s6,  28(sp)
+    sw   s7,  32(sp)
+    sw   s8,  36(sp)
+    sw   s9,  40(sp)
+    sw   s10, 44(sp)
+    sw   s11, 48(sp)
+    sw   gp,  52(sp)
+    sw   tp,  56(sp)
 
-    /* ---- TODO: Look up translated block and jump to it ---- */
-    /* For now, just return immediately (interpreter fallback) */
-    mv      a0, a0            /* Pass cycles through unchanged */
-    j       .Lexit_jit
+    mv   t0, gp
+    mv   t1, tp
+    mv   gp, a1
+    sw   t0, REG_SAVE5(gp)
+    sw   t1, REG_SAVE6(gp)
+    mv   tp, a0
+    sw   tp, 60(sp)
+    sw   gp, 64(sp)
+
+    load_registers()
+    extract_flags(t0)
+
+    lw   t0, CPU_HALT_STATE(gp)
+    bnez t0, .Lcpu_sleep_loop
+
+.Llookup_pc:
+    lw   a0, REG_PC(gp)
+    lw   t0, REG_CPSR(gp)
+    extract_flags(t1)
+    andi t0, t0, 0x20
+    lw   gp, 52(sp)
+    lw   tp, 56(sp)
+    beqz t0, 1f
+    call block_lookup_address_thumb
+    lw   gp, 64(sp)
+    lw   tp, 60(sp)
+    load_registers()
+    jalr zero, a0, 0
+1:
+    call block_lookup_address_arm
+    lw   gp, 64(sp)
+    lw   tp, 60(sp)
+    load_registers()
+    jalr zero, a0, 0
+
+.Lcpu_sleep_loop:
+    sw   tp, 60(sp)
+    sw   gp, 64(sp)
+    lw   gp, 52(sp)
+    lw   tp, 56(sp)
+    lw   a0, 60(sp)
+    call update_gba
+    lw   gp, 64(sp)
+    mv   tp, a0
+    sw   tp, 60(sp)
+    blt  a0, zero, .Lreturn_cycles
+    lw   t0, CPU_HALT_STATE(gp)
+    bnez t0, .Lcpu_sleep_loop
+    j    .Llookup_pc
+
+.Lreturn_cycles:
+    mv   a0, tp
+
+.Lreturn_to_main:
+    lw   ra,   0(sp)
+    lw   s0,   4(sp)
+    lw   s1,   8(sp)
+    lw   s2,  12(sp)
+    lw   s3,  16(sp)
+    lw   s4,  20(sp)
+    lw   s5,  24(sp)
+    lw   s6,  28(sp)
+    lw   s7,  32(sp)
+    lw   s8,  36(sp)
+    lw   s9,  40(sp)
+    lw   s10, 44(sp)
+    lw   s11, 48(sp)
+    lw   gp,  52(sp)
+    lw   tp,  56(sp)
+    addi sp, sp, FRAME_SIZE
+    ret
 
     .globl return_from_jit
     .type  return_from_jit, @function
 return_from_jit:
-    /* ---- JIT blocks jump here when done ---- */
-    /* a0 = remaining cycles */
+    mv   a0, tp
 
 .Lexit_jit:
-    /* ---- Flush cached GBA registers back to reg[] ---- */
-    sw      s0,  (0*4)(gp)
-    sw      s1,  (1*4)(gp)
-    sw      s2,  (6*4)(gp)
-    sw      s3,  (9*4)(gp)
-    sw      s4, (10*4)(gp)
-    sw      s5, (12*4)(gp)
-    sw      s6, (14*4)(gp)
-    sw      s7, (15*4)(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
 
-    /* ---- TODO: Write back CPSR flags from s8-s11 ---- */
-
-    /* ---- Restore callee-saved registers ---- */
-    lw      ra,   0(sp)
-    lw      s0,   4(sp)
-    lw      s1,   8(sp)
-    lw      s2,  12(sp)
-    lw      s3,  16(sp)
-    lw      s4,  20(sp)
-    lw      s5,  24(sp)
-    lw      s6,  28(sp)
-    lw      s7,  32(sp)
-    lw      s8,  36(sp)
-    lw      s9,  40(sp)
-    lw      s10, 44(sp)
-    lw      s11, 48(sp)
-    lw      gp,  52(sp)
-    lw      tp,  56(sp)
-    addi    sp, sp, FRAME_SIZE
-
+    lw   ra,   0(sp)
+    lw   s0,   4(sp)
+    lw   s1,   8(sp)
+    lw   s2,  12(sp)
+    lw   s3,  16(sp)
+    lw   s4,  20(sp)
+    lw   s5,  24(sp)
+    lw   s6,  28(sp)
+    lw   s7,  32(sp)
+    lw   s8,  36(sp)
+    lw   s9,  40(sp)
+    lw   s10, 44(sp)
+    lw   s11, 48(sp)
+    lw   gp,  52(sp)
+    lw   tp,  56(sp)
+    addi sp, sp, FRAME_SIZE
     ret
 
-    .size execute_arm_translate, .-execute_arm_translate
+defsymbl(rv_update_gba)
+    sw   a0, REG_PC(gp)
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    mv   a0, s10
+    call update_gba
+    mv   tp, a0
+    blt  a0, zero, .Lreturn_to_main
 
-/* ================================================================
- * Trampoline stubs for calling C functions from JIT code
- *
- * When JIT code needs to call a C function (e.g., memory access),
- * it jumps to these trampolines which save JIT state first.
- * ================================================================ */
+    mv   gp, s11
+    srli t0, a0, 30
+    andi t0, t0, 1
+    beqz t0, 1f
 
-    .globl jit_call_c_trampoline
-    .type  jit_call_c_trampoline, @function
-jit_call_c_trampoline:
-    /* a0 = C function pointer, a1-a3 = arguments */
-    /* TODO: implement save-state + call + restore-state */
+    lw   a0, REG_PC(gp)
+    lw   t0, REG_CPSR(gp)
+    andi t0, t0, 0x20
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    beqz t0, 2f
+    call block_lookup_address_thumb
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t0)
+    load_registers()
+    jalr zero, a0, 0
+2:
+    call block_lookup_address_arm
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t0)
+    load_registers()
+    jalr zero, a0, 0
+1:
+    extract_flags(t0)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
     ret
 
-    .size jit_call_c_trampoline, .-jit_call_c_trampoline
+defsymbl(rv_indirect_branch_arm)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call block_lookup_address_arm
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t0)
+    load_registers()
+    jalr zero, a0, 0
+
+defsymbl(rv_indirect_branch_thumb)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call block_lookup_address_thumb
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t0)
+    load_registers()
+    jalr zero, a0, 0
+
+defsymbl(rv_indirect_branch_dual)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call block_lookup_address_dual
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t0)
+    load_registers()
+    jalr zero, a0, 0
+
+defsymbl(rv_execute_load_u8)
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call execute_load_u8
+    mv   t0, a0
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t1)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
+    mv   a0, t0
+    ret
+
+defsymbl(rv_execute_load_s8)
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call execute_load_s8
+    mv   t0, a0
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t1)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
+    mv   a0, t0
+    ret
+
+defsymbl(rv_execute_load_u16)
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call execute_load_u16
+    mv   t0, a0
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t1)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
+    mv   a0, t0
+    ret
+
+defsymbl(rv_execute_load_s16)
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call execute_load_s16
+    mv   t0, a0
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t1)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
+    mv   a0, t0
+    ret
+
+defsymbl(rv_execute_load_u32)
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call execute_load_u32
+    mv   t0, a0
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t1)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
+    mv   a0, t0
+    ret
+
+defsymbl(rv_execute_aligned_load32)
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call execute_aligned_load32
+    mv   t0, a0
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t1)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
+    mv   a0, t0
+    ret
+
+defsymbl(rv_execute_store_u8)
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call execute_store_u8
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t1)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
+    ret
+
+defsymbl(rv_execute_store_u16)
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call execute_store_u16
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t1)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
+    ret
+
+defsymbl(rv_execute_store_u32)
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call execute_store_u32
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t1)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
+    ret
+
+defsymbl(rv_execute_aligned_store32)
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call execute_aligned_store32
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t1)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
+    ret
+
+defsymbl(rv_cheat_hook)
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call process_cheats
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t1)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
+    ret
+
+defsymbl(execute_read_cpsr)
+    consolidate_flags(a0, t0)
+    ret
+
+defsymbl(execute_read_spsr)
+    lw   t0, CPU_MODE(gp)
+    andi t0, t0, 0x0f
+    addi t1, gp, SPSR_RAM_OFF
+    slli t0, t0, 2
+    add  t1, t1, t0
+    lw   a0, 0(t1)
+    ret
+
+defsymbl(execute_store_cpsr)
+    /* a0=new cpsr, a1=current pc, a2=user mask, t0=privileged mask */
+    lw   t1, CPU_MODE(gp)
+    andi t1, t1, 0x10
+    beqz t1, 1f
+    mv   t1, t0
+    j    2f
+1:
+    mv   t1, a2
+2:
+    lw   t2, REG_CPSR(gp)
+    and  a0, a0, t1
+    xori t3, t1, -1
+    and  t2, t2, t3
+    or   a0, a0, t2
+    sw   a0, REG_CPSR(gp)
+    extract_flags(a2)
+
+    andi t2, t1, 0xff
+    beqz t2, 3f
+
+    sw   ra, REG_SAVE3(gp)
+    store_registers()
+    consolidate_flags(t2, t3)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    mv   a2, t1
+    call execute_store_cpsr_body
+    beqz a0, 4f
+    call block_lookup_address_arm
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t2)
+    load_registers()
+    lw   ra, REG_SAVE3(gp)
+    jalr zero, a0, 0
+4:
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t2)
+    load_registers()
+    lw   ra, REG_SAVE3(gp)
+3:
+    ret
+
+defsymbl(execute_store_spsr)
+    /* a0=new spsr, a1=store mask */
+    lw   t0, CPU_MODE(gp)
+    andi t0, t0, 0x0f
+    slli t0, t0, 2
+    addi t1, gp, SPSR_RAM_OFF
+    add  t1, t1, t0
+    lw   t2, 0(t1)
+    and  a0, a0, a1
+    xori t3, a1, -1
+    and  t2, t2, t3
+    or   a0, a0, t2
+    sw   a0, 0(t1)
+    ret
+
+defsymbl(execute_spsr_restore)
+    /* a0=current pc */
+    lw   t0, CPU_MODE(gp)
+    andi t0, t0, 0x0f
+    beqz t0, 1f
+    slli t1, t0, 2
+    addi t1, t1, SPSR_RAM_OFF
+    add  t1, gp, t1
+    lw   t2, 0(t1)
+    sw   t2, REG_CPSR(gp)
+    extract_flags(t2)
+
+    sw   ra, REG_SAVE3(gp)
+    store_registers()
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call execute_spsr_restore_body
+    mv   gp, s11
+    mv   tp, s10
+    lw   ra, REG_SAVE3(gp)
+    extract_flags(t2)
+    load_registers()
+1:
+    ret
+
+defsymbl(execute_swi)
+    /* a0=current pc */
+    sw   ra, REG_SAVE(gp)
+    sw   a0, SUPERVISOR_LR(gp)
+    consolidate_flags(t0, t1)
+    sw   t0, SUPERVISOR_SPSR(gp)
+    li   t1, -64
+    and  t0, t0, t1
+    li   t1, (MODE_SUPERVISOR | 0x80)
+    or   t0, t0, t1
+    sw   t0, REG_CPSR(gp)
+    store_registers()
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    li   a0, MODE_SUPERVISOR
+    call set_cpu_mode
+    mv   gp, s11
+    mv   tp, s10
+    li   t0, 0xe3a02004
+    sw   t0, REG_BUS_VALUE(gp)
+    lw   ra, REG_SAVE(gp)
+    extract_flags(t0)
+    load_registers()
+    ret
+
+defsymbl(jit_call_c_trampoline)
+    /* a0 = function pointer, a1-a3 = C arguments */
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    mv   t0, a0
+    mv   a0, a1
+    mv   a1, a2
+    mv   a2, a3
+    jalr ra, t0, 0
+    mv   t0, a0
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t1)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
+    mv   a0, t0
+    ret
+
+        .bss
+        .align 6
+
+    defobj(memory_map_read)
+        .space 0x8000
+    defobj(iwram)
+        .space 0x10000
+    defobj(vram)
+        .space 0x18000
+    defobj(reg)
+        .space 0x100
+    defobj(spsr)
+        .space 24
+        .space 8
+    defobj(reg_mode)
+        .space 196
+        .space 28
+    defobj(oam_ram)
+        .space 0x400
+    defobj(palette_ram)
+        .space 0x400
+    defobj(io_registers)
+        .space 0x400
+    defobj(palette_ram_converted)
+        .space 0x400
+
+        .section .ext_ram.bss,"aw",@nobits
+        .align 6
+    defobj(ewram)
+        .space 0x80000
+
+        .align 12
+    defobj(rom_translation_cache)
+        .space ROM_TRANSLATION_CACHE_SIZE
+        .align 12
+    defobj(ram_translation_cache)
+        .space RAM_TRANSLATION_CACHE_SIZE
+
+        .text
+        .align 2

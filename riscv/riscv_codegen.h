@@ -246,6 +246,27 @@
 #define rv_fence_i()             rv_emit(0x0000100F)
 #define rv_fence()               rv_emit(0x0FF0000F)
 
+/* ---- Rotate helpers (synthesized for RV32IMAC without Zbb) ---- */
+#define rv_rori(rd, rs, shamt, tmp) do {                   \
+    u32 _shamt = (u32)(shamt) & 31;                        \
+    if (_shamt == 0) {                                     \
+        rv_mv(rd, rs);                                     \
+    } else {                                               \
+        rv_srli(rd, rs, _shamt);                           \
+        rv_slli(tmp, rs, 32 - _shamt);                     \
+        rv_or(rd, rd, tmp);                                \
+    }                                                      \
+} while(0)
+
+#define rv_ror(rd, rs, shreg, tmp, tmp2) do {              \
+    rv_andi(tmp, shreg, 31);                               \
+    rv_sub(tmp2, rv_zero, tmp);                            \
+    rv_andi(tmp2, tmp2, 31);                               \
+    rv_srl(rd, rs, tmp);                                   \
+    rv_sll(tmp2, rs, tmp2);                                \
+    rv_or(rd, rd, tmp2);                                   \
+} while(0)
+
 /* ---- Load 32-bit immediate (2-instruction sequence) ---- */
 #define rv_load_imm32(rd, imm32) do {                       \
     u32 _val = (u32)(imm32);                                \
@@ -255,7 +276,7 @@
        LUI needs +1 page because ADDI will sign-extend */   \
     if (_lo & 0x800) _hi += 0x1000;                         \
     rv_lui(rd, _hi);                                        \
-    rv_addi(rd, rd, (s32)(s16)(_lo << 4) >> 4);             \
+    rv_addi(rd, rd, (s32)(_lo << 20) >> 20);                \
 } while(0)
 
 #endif /* RISCV_CODEGEN_H */

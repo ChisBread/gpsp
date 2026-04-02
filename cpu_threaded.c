@@ -214,6 +214,8 @@ typedef struct
 /* Include the right emitter headers */
 #if defined(MIPS_ARCH)
   #include "mips/mips_emit.h"
+#elif defined(RISCV_ARCH)
+  #include "riscv/riscv_emit.h"
 #elif defined(ARM_ARCH)
   #include "arm/arm_emit.h"
 #elif defined(ARM64_ARCH)
