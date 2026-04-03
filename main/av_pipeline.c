@@ -23,6 +23,7 @@
 static const char *TAG = "gpsp_av";
 
 static GPSP_EXTRAM_BSS u16 gba_framebuffers[AV_PIPELINE_DEPTH][GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
+static GPSP_EXTRAM_BSS u16 gba_render_buffer[GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
 static int16_t audio_buffers[AV_PIPELINE_DEPTH][AUDIO_FRAME_SAMPLES_MAX * 2];
 static uint32_t audio_buffer_frames[AV_PIPELINE_DEPTH];
 static bool skip_video_submit[AV_PIPELINE_DEPTH];
@@ -141,7 +142,7 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
 
 u16 *av_pipeline_default_video_buffer(void)
 {
-    return gba_framebuffers[0];
+    return gba_render_buffer;
 }
 
 esp_err_t av_pipeline_acquire_slot(uint32_t *slot_index, u16 **video_buffer,

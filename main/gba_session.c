@@ -31,6 +31,8 @@
 #define GBA_SESSION_AUTOSAVE_PERIOD_US (5 * 1000 * 1000)
 #define GBA_SESSION_STATE_MAGIC 0x53545347u
 #define GBA_SESSION_STATE_VERSION 1u
+#define GBA_SESSION_STATE_IO_BUF_SIZE \
+    (sizeof(gba_session_state_file_header_t) + GBA_STATE_MEM_SIZE + sizeof(gamepak_backup))
 
 typedef enum {
     GBA_SESSION_CMD_SOFT_RESET = 0,
@@ -76,6 +78,9 @@ static gba_session_state_t s_session;
 static int64_t s_frame_start_us;
 static uint32_t s_fps_counter;
 static int64_t s_fps_timer_us;
+
+/* Pre-allocated PSRAM buffer for state/save I/O (serialized access via command queue) */
+static GPSP_EXTRAM_BSS uint8_t s_state_io_buf[GBA_SESSION_STATE_IO_BUF_SIZE] __attribute__((aligned(16)));
 
 static esp_err_t execute_command(gba_session_command_t *command);
 static esp_err_t execute_reload(const gba_session_command_t *command);
@@ -174,21 +179,16 @@ static esp_err_t load_state_file(unsigned slot)
         return ESP_ERR_INVALID_STATE;
     }
 
-    buffer = malloc(sizeof(*header) + GBA_STATE_MEM_SIZE + sizeof(gamepak_backup));
-    if (!buffer) {
-        return ESP_ERR_NO_MEM;
-    }
+    buffer = s_state_io_buf;
 
     result = storage_read_state(s_session.rom_path, slot, buffer,
                                 sizeof(*header) + GBA_STATE_MEM_SIZE + sizeof(gamepak_backup),
                                 &bytes_read);
     if (result != ESP_OK) {
-        free(buffer);
         return result;
     }
 
     if (bytes_read < sizeof(*header) + GBA_STATE_MEM_SIZE) {
-        free(buffer);
         return ESP_FAIL;
     }
 
@@ -197,13 +197,11 @@ static esp_err_t load_state_file(unsigned slot)
         header->version != GBA_SESSION_STATE_VERSION ||
         header->state_size != GBA_STATE_MEM_SIZE ||
         header->backup_size > sizeof(gamepak_backup)) {
-        free(buffer);
         return ESP_FAIL;
     }
 
     expected_size = sizeof(*header) + header->state_size + header->backup_size;
     if (bytes_read != expected_size) {
-        free(buffer);
         return ESP_FAIL;
     }
 
@@ -213,11 +211,9 @@ static esp_err_t load_state_file(unsigned slot)
     clear_backup_dirty_flag();
 
     if (!gba_load_state(state_data)) {
-        free(buffer);
         return ESP_FAIL;
     }
 
-    free(buffer);
     return ESP_OK;
 }
 
@@ -239,10 +235,7 @@ static esp_err_t save_state_file(unsigned slot)
 
     backup_size = current_backup_size();
     total_size = sizeof(*header) + GBA_STATE_MEM_SIZE + backup_size;
-    buffer = malloc(total_size);
-    if (!buffer) {
-        return ESP_ERR_NO_MEM;
-    }
+    buffer = s_state_io_buf;
 
     memset(buffer, 0, total_size);
     header = (gba_session_state_file_header_t *)buffer;
@@ -256,11 +249,9 @@ static esp_err_t save_state_file(unsigned slot)
     memcpy(state_data + GBA_STATE_MEM_SIZE, gamepak_backup, backup_size);
 
     if (storage_write_state(s_session.rom_path, slot, buffer, total_size) != ESP_OK) {
-        free(buffer);
         return ESP_FAIL;
     }
 
-    free(buffer);
     return ESP_OK;
 }
 
@@ -432,10 +423,7 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
     }
 
     if (command->reload_rom) {
-        backup_snapshot = malloc(sizeof(gamepak_backup));
-        if (!backup_snapshot) {
-            return ESP_ERR_NO_MEM;
-        }
+        backup_snapshot = s_state_io_buf;
         memcpy(backup_snapshot, gamepak_backup, sizeof(gamepak_backup));
     }
 
@@ -450,11 +438,7 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
 
         if (load_gamepak(NULL, next_rom_path, 0, 0, 0) != 0) {
             ESP_LOGE(TAG, "Failed to load ROM: %s", next_rom_path);
-            if (restore_previous_session(&previous, backup_snapshot) == ESP_OK) {
-                free(backup_snapshot);
-                return ESP_FAIL;
-            }
-            free(backup_snapshot);
+            restore_previous_session(&previous, backup_snapshot);
             return ESP_FAIL;
         }
 
@@ -474,7 +458,6 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
     copy_path(s_session.bios_path, sizeof(s_session.bios_path), next_bios_path);
     s_session.last_autosave_us = esp_timer_get_time();
 
-    free(backup_snapshot);
     ESP_LOGI(TAG, "GBA session reset complete");
     return ESP_OK;
 }
@@ -632,12 +615,13 @@ void gba_emulation_task(void *param)
 
     s_fps_timer_us = esp_timer_get_time();
 
+    gba_screen_pixels = av_pipeline_default_video_buffer();
+
     if (av_pipeline_acquire_slot(&slot_index, &video_buffer, portMAX_DELAY) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to acquire initial AV slot");
         vTaskDelete(NULL);
         return;
     }
-    gba_screen_pixels = video_buffer;
 
     while (1) {
         s_frame_start_us = esp_timer_get_time();
@@ -674,6 +658,11 @@ void gba_emulation_task(void *param)
             execute_arm(execute_cycles);
         }
 
+        if (!skip_next_frame) {
+            memcpy(video_buffer, gba_screen_pixels,
+                   GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * sizeof(u16));
+        }
+
         if (av_pipeline_submit_slot(slot_index, skip_next_frame != 0, portMAX_DELAY) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to submit AV slot");
             vTaskDelete(NULL);
@@ -689,7 +678,6 @@ void gba_emulation_task(void *param)
             vTaskDelete(NULL);
             return;
         }
-        gba_screen_pixels = video_buffer;
 
         s_fps_counter++;
         {

@@ -75,7 +75,7 @@ typedef struct
   u32 next_entry;
 } hashhdr_type;
 
-u32 rom_branch_hash[ROM_BRANCH_HASH_SIZE];
+GPSP_EXTRAM_BSS u32 rom_branch_hash[ROM_BRANCH_HASH_SIZE];
 
 typedef struct
 {
@@ -253,6 +253,24 @@ typedef struct
   void platform_cache_sync(void *baseaddr, void *endptr) {
     __builtin___clear_cache(baseaddr, endptr);
   }
+#elif defined(RISCV_ARCH)
+  #ifdef ESP_PLATFORM
+    #include <esp_cache.h>
+    void platform_cache_sync(void *baseaddr, void *endptr) {
+      size_t size = (char*)endptr - (char*)baseaddr;
+      /* Writeback D-cache to PSRAM, then invalidate I-cache */
+      esp_cache_msync(baseaddr, size,
+        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE |
+        ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+      esp_cache_msync(baseaddr, size,
+        ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_INST |
+        ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    }
+  #else
+    void platform_cache_sync(void *baseaddr, void *endptr) {
+      __builtin___clear_cache(baseaddr, endptr);
+    }
+  #endif
 #else
   /* x86 CPUs have icache consistency checks */
   void platform_cache_sync(void *baseaddr, void *endptr) {}

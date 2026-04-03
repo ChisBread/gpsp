@@ -62,6 +62,7 @@ idf_component_register(
         ${GPSP_CORE_INCLUDES}
     REQUIRES
         esp_timer
+        esp_mm
 )
 
 # Core compile definitions
