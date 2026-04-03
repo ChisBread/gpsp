@@ -590,12 +590,12 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 {                                                                             \
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
-    rv_beqz(reg_a1, 28);                                                       \
+    rv_beqz(reg_a1, 32);                                                       \
     generate_load_imm(reg_temp2, 32);                                          \
-    rv_bgeu(reg_a1, reg_temp2, 16);                                            \
+    rv_bgeu(reg_a1, reg_temp2, 24);                                            \
     rv_addi(reg_temp, reg_a1, -1);                                             \
-    rv_srl(reg_c_cache, reg_a0, reg_temp);                                     \
-    rv_andi(reg_c_cache, reg_c_cache, 1);                                      \
+    rv_sll(reg_c_cache, reg_a0, reg_temp);                                     \
+    rv_srli(reg_c_cache, reg_c_cache, 31);                                     \
     rv_sll(reg_a0, reg_a0, reg_a1);                                            \
     rv_j(12);                                                                  \
     rv_mv(reg_c_cache, reg_zero);                                              \
@@ -608,7 +608,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     rv_beqz(reg_a1, 28);                                                       \
     generate_load_imm(reg_temp2, 32);                                          \
-    rv_bgeu(reg_a1, reg_temp2, 16);                                            \
+    rv_bgeu(reg_a1, reg_temp2, 24);                                            \
     rv_addi(reg_temp, reg_a1, -1);                                             \
     rv_srl(reg_c_cache, reg_a0, reg_temp);                                     \
     rv_andi(reg_c_cache, reg_c_cache, 1);                                      \
@@ -624,10 +624,10 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     rv_beqz(reg_a1, 24);                                                       \
     generate_load_imm(reg_temp2, 32);                                          \
-    rv_bltu(reg_a1, reg_temp2, 12);                                            \
+    rv_bltu(reg_a1, reg_temp2, 16);                                            \
     rv_srli(reg_c_cache, reg_a0, 31);                                          \
     rv_srai(reg_a0, reg_a0, 31);                                               \
-    rv_j(12);                                                                  \
+    rv_j(20);                                                                  \
     rv_addi(reg_temp, reg_a1, -1);                                             \
     rv_srl(reg_c_cache, reg_a0, reg_temp);                                     \
     rv_andi(reg_c_cache, reg_c_cache, 1);                                      \
@@ -643,7 +643,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     rv_srl(reg_c_cache, reg_a0, reg_temp);                                     \
     rv_andi(reg_c_cache, reg_c_cache, 1);                                      \
     rv_ror(reg_a0, reg_a0, reg_a1, reg_temp, reg_temp2);                      \
-    rv_j(16);                                                                  \
+    rv_j(20);                                                                  \
     rv_andi(reg_c_cache, reg_a0, 1);                                           \
     rv_srli(reg_a0, reg_a0, 1);                                                \
     rv_slli(reg_temp, reg_c_cache, 31);                                        \
@@ -854,16 +854,19 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_op_logic_flags(_rd)                                              \
 
 #define generate_op_adds_reg(_rd, _rn, _rm)                                   \
+    rv_mv(reg_temp3, _rn);                                                    \
     rv_add(_rd, _rn, _rm);                                                    \
-    generate_op_add_flags(_rd, _rn, _rm)                                      \
+    generate_op_add_flags(_rd, reg_temp3, _rm)                                \
 
 #define generate_op_subs_reg(_rd, _rn, _rm)                                   \
+    rv_mv(reg_temp3, _rn);                                                    \
     rv_sub(_rd, _rn, _rm);                                                    \
-    generate_op_sub_flags(_rd, _rn, _rm)                                      \
+    generate_op_sub_flags(_rd, reg_temp3, _rm)                                \
 
 #define generate_op_rsbs_reg(_rd, _rn, _rm)                                   \
+    rv_mv(reg_temp3, _rm);                                                    \
     rv_sub(_rd, _rm, _rn);                                                    \
-    generate_op_sub_flags(_rd, _rm, _rn)                                      \
+    generate_op_sub_flags(_rd, reg_temp3, _rn)                                      \
 
 #define generate_op_adcs_reg(_rd, _rn, _rm)                                   \
 {                                                                             \

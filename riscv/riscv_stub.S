@@ -9,7 +9,6 @@ symbol:                  \
 _##symbol:
 
 #define defobj(symbol)    \
-.align 6;                 \
 .type symbol, %object ;   \
 .global symbol ;          \
 .global _##symbol ;       \
@@ -271,8 +270,11 @@ defsymbl(rv_update_gba)
     lw   tp, REG_SAVE6(s11)
     mv   a0, s10
     call update_gba
-    mv   tp, a0
     blt  a0, zero, .Lreturn_to_main
+
+    /* Clean cycle count: clear bits 30-31 (flags), keep bits 0-29 */
+    slli s10, a0, 2
+    srli s10, s10, 2
 
     mv   gp, s11
     srli t0, a0, 30
@@ -299,6 +301,7 @@ defsymbl(rv_update_gba)
     load_registers()
     jalr zero, a0, 0
 1:
+    mv   tp, s10
     extract_flags(t0)
     load_registers()
     lw   ra, REG_SAVE(gp)
@@ -699,10 +702,8 @@ defsymbl(jit_call_c_trampoline)
         .space 0x100
     defobj(spsr)
         .space 24
-        .space 8
     defobj(reg_mode)
         .space 196
-        .space 28
     defobj(oam_ram)
         .space 0x400
     defobj(palette_ram)
