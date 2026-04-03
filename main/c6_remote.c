@@ -12,6 +12,7 @@
 #include "esp_log.h"
 
 #include "c6_remote.h"
+#include "common.h"
 
 #if CONFIG_GPSP_ENABLE_C6_REMOTE
 
@@ -35,6 +36,8 @@ static esp_netif_t *c6_wifi_sta;
 static esp_event_handler_instance_t c6_wifi_any_id;
 static esp_event_handler_instance_t c6_ip_got_ip;
 static int c6_wifi_retry_count;
+static bool c6_transport_ready;
+static bool c6_wifi_connected;
 
 static void c6_wifi_event_handler(void *arg, esp_event_base_t event_base,
                                   int32_t event_id, void *event_data)
@@ -42,6 +45,7 @@ static void c6_wifi_event_handler(void *arg, esp_event_base_t event_base,
     (void)arg;
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        c6_wifi_connected = false;
 #if CONFIG_GPSP_C6_CONNECT_TEST
         if (c6_wifi_retry_count < CONFIG_GPSP_C6_CONNECT_MAX_RETRIES) {
             c6_wifi_retry_count++;
@@ -59,6 +63,7 @@ static void c6_wifi_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "ESP32-C6 remote STA got IP: " IPSTR,
                  IP2STR(&event->ip_info.ip));
         c6_wifi_retry_count = 0;
+        c6_wifi_connected = true;
         xEventGroupSetBits(c6_wifi_event_group, C6_WIFI_CONNECTED_BIT);
     }
 }
@@ -98,6 +103,9 @@ static esp_err_t init_c6_remote_transport(void)
         ESP_LOGW(TAG, "Failed to read ESP32-C6 app description: %s",
                  esp_err_to_name(err));
     }
+
+    c6_transport_ready = true;
+    c6_wifi_connected = false;
 
     return ESP_OK;
 }
@@ -368,6 +376,11 @@ esp_err_t c6_remote_start_task(BaseType_t core_id, UBaseType_t priority)
     return ESP_OK;
 }
 
+bool c6_remote_network_ready(void)
+{
+    return c6_transport_ready && c6_wifi_connected;
+}
+
 #else
 
 esp_err_t c6_remote_start_task(BaseType_t core_id, UBaseType_t priority)
@@ -375,6 +388,11 @@ esp_err_t c6_remote_start_task(BaseType_t core_id, UBaseType_t priority)
     (void)core_id;
     (void)priority;
     return ESP_OK;
+}
+
+bool c6_remote_network_ready(void)
+{
+    return false;
 }
 
 #endif

@@ -173,4 +173,53 @@ menu "gpSP ESP32-P4 Platform (JC4880P443C_I_W)"
                 remote C6 control path is still alive.
     endmenu
 
+    menu "Netplay"
+        config GPSP_NETPLAY_UDP_ENABLE
+            bool "Enable host-side UDP netpacket transport"
+            default n
+            depends on GPSP_ENABLE_C6_REMOTE
+            help
+                Run gpsp multiplayer transport entirely on the ESP32-P4 host.
+                The ESP32-C6 only provides the remote Wi-Fi stack; it no longer
+                carries gpsp netpacket payloads. Peers discover each other over
+                LAN broadcast and deterministically sort themselves into a
+                continuous client_id roster at runtime.
+
+        config GPSP_NETPLAY_UDP_PORT
+            int "Netplay UDP port"
+            default 60999
+            range 1024 65535
+            depends on GPSP_NETPLAY_UDP_ENABLE
+
+        config GPSP_NETPLAY_BROADCAST_ADDR
+            string "Netplay broadcast address"
+            default "255.255.255.255"
+            depends on GPSP_NETPLAY_UDP_ENABLE
+            help
+                Broadcast address used to flood netpacket frames on the local
+                network. If your router blocks limited broadcast, set this to
+                your subnet broadcast address, for example 192.168.1.255.
+
+        config GPSP_NETPLAY_PEER_TIMEOUT_MS
+            int "Peer timeout (ms)"
+            default 2000
+            range 100 30000
+            depends on GPSP_NETPLAY_UDP_ENABLE
+            help
+                Time without inbound packets before a peer is removed from the
+                active peer list and deducted from netplay_num_clients.
+
+        config GPSP_NETPLAY_HELLO_INTERVAL_MS
+            int "Roster hello interval (ms)"
+            default 250
+            range 50 5000
+            depends on GPSP_NETPLAY_UDP_ENABLE
+            help
+                Interval for the runtime client_id election heartbeat. Every
+                node periodically broadcasts a hello, and all nodes sort the
+                visible participants with the same rule to obtain unique and
+                continuous client ids.
+
+    endmenu
+
 endmenu

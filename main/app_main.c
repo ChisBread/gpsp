@@ -9,7 +9,6 @@
  * loads a ROM, and runs the emulation loop.
  */
 
-#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -32,6 +31,7 @@
 #include "gba_session.h"
 #include "input_driver.h"
 #include "c6_remote.h"
+#include "runtime_config.h"
 #include "storage.h"
 
 static const char *TAG = "gpsp_main";
@@ -45,14 +45,6 @@ boot_mode selected_boot_mode = boot_game;
 u32 idle_loop_target_pc = 0xFFFFFFFF;
 u32 translation_gate_target_pc[MAX_TRANSLATION_GATES];
 u32 translation_gate_targets = 0;
-
-/* Netplay stubs — gpsp serial/rfu code references these libretro symbols.
- * On ESP32-P4 we don't use libretro netplay; provide no-op implementations.
- * Future: could implement GBA link cable over WiFi via ESP32-C6. */
-u32 netplay_num_clients = 0;
-u32 netplay_client_id = 0;
-void netpacket_poll_receive(void) { }
-void netpacket_send(uint16_t client_id, const void *buf, size_t len) { (void)client_id; (void)buf; (void)len; }
 
 #define GPSP_AUDIO_OUTPUT_RATE   GBA_SOUND_FREQUENCY
 #define AV_TASK_STACK_SIZE       8192
@@ -83,6 +75,11 @@ static esp_err_t init_platform(bool *audio_ready)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Storage init failed: %s", esp_err_to_name(err));
         return err;
+    }
+
+    err = gpsp_runtime_config_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Runtime config init failed: %s", esp_err_to_name(err));
     }
 
     /* ---- Initialize display (ST7701 MIPI-DSI + backlight) ---- */
