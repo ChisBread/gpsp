@@ -19,6 +19,7 @@ extern "C" {
 #define STORAGE_MOUNT_POINT  "/sdcard"
 #define STORAGE_BIOS_PATH    STORAGE_MOUNT_POINT "/gba_bios.bin"
 #define STORAGE_SAVE_DIR     STORAGE_MOUNT_POINT "/saves"
+#define STORAGE_STATE_DIR    STORAGE_MOUNT_POINT "/states"
 
 /*
  * JC4880 SD card uses SDMMC Host Slot 0 with IO MUX pins:
@@ -40,7 +41,20 @@ esp_err_t storage_write_save(const char *rom_name, const void *data, size_t size
 /**
  * Load battery-backed RAM from a file.
  */
-esp_err_t storage_read_save(const char *rom_name, void *data, size_t size);
+esp_err_t storage_read_save(const char *rom_name, void *data, size_t buffer_size,
+							size_t *bytes_read);
+
+/**
+ * Save emulator state blob to a file.
+ */
+esp_err_t storage_write_state(const char *rom_name, unsigned slot,
+							  const void *data, size_t size);
+
+/**
+ * Load emulator state blob from a file.
+ */
+esp_err_t storage_read_state(const char *rom_name, unsigned slot,
+							 void *data, size_t buffer_size, size_t *bytes_read);
 
 /**
  * List ROM files in the storage directory.

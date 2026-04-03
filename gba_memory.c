@@ -345,6 +345,7 @@ u8 bios_rom[1024 * 16];  // 16KB - keep in SRAM, SWI calls
 
 // Up to 128kb, store SRAM, flash ROM, or EEPROM here.
 GPSP_EXTRAM_BSS u8 gamepak_backup[1024 * 128];  // 128KB - cold, save data
+bool gamepak_backup_dirty = false;
 
 u32 dma_bus_val;
 dma_transfer_type dma[4];
@@ -537,6 +538,7 @@ void function_cc write_eeprom(u32 unused_address, u32 value)
         {
           eeprom_mode = EEPROM_WRITE_MODE;
           memset(gamepak_backup + eeprom_address, 0, 8);
+          gamepak_backup_dirty = true;
         }
       }
       break;
@@ -544,6 +546,7 @@ void function_cc write_eeprom(u32 unused_address, u32 value)
     case EEPROM_WRITE_MODE:
       gamepak_backup[eeprom_address + (eeprom_counter / 8)] |=
        (value & 0x01) << (7 - (eeprom_counter % 8));
+      gamepak_backup_dirty = true;
       eeprom_counter++;
       if(eeprom_counter == 64)
       {
@@ -1110,6 +1113,7 @@ void function_cc write_backup(u32 address, u32 value)
           if(flash_mode == FLASH_ERASE_MODE)
           {
             memset(gamepak_backup, 0xFF, 1024 * 128);
+            gamepak_backup_dirty = true;
             flash_mode = FLASH_BASE_MODE;
           }
           break;
@@ -1135,6 +1139,7 @@ void function_cc write_backup(u32 address, u32 value)
       // Erase sector
       u32 fulladdr = (address & 0xF000) + 64*1024*flash_bank_num;
       memset(&gamepak_backup[fulladdr], 0xFF, 1024 * 4);
+      gamepak_backup_dirty = true;
       flash_mode = FLASH_BASE_MODE;
       flash_command_position = 0;
     }
@@ -1154,6 +1159,7 @@ void function_cc write_backup(u32 address, u32 value)
       // Write value to flash ROM
       u32 fulladdr = address + 64*1024*flash_bank_num;
       gamepak_backup[fulladdr] = value;
+      gamepak_backup_dirty = true;
       flash_mode = FLASH_BASE_MODE;
     }
     else
@@ -1162,6 +1168,7 @@ void function_cc write_backup(u32 address, u32 value)
     {
       // Write value to SRAM
       gamepak_backup[address] = value;
+      gamepak_backup_dirty = true;
     }
   }
 }

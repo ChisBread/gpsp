@@ -306,6 +306,7 @@ extern u32 flash_bank_cnt;
 extern u32 eeprom_size;
 
 extern u8 gamepak_backup[1024 * 128];
+extern bool gamepak_backup_dirty;
 
 // Page sticky bit routines
 extern u32 gamepak_sticky_bit[1024/32];

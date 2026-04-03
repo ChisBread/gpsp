@@ -33,6 +33,55 @@ static struct {
     bool initialized;
 } s_storage;
 
+static void build_content_path(char *path, size_t path_size, const char *dir_path,
+                               const char *rom_name, const char *extension,
+                               int slot)
+{
+    const char *base_name = rom_name;
+    const char *dot_extension;
+    size_t stem_len;
+
+    if (!path || path_size == 0) {
+        return;
+    }
+
+    if (!rom_name || rom_name[0] == '\0') {
+        path[0] = '\0';
+        return;
+    }
+
+    base_name = strrchr(rom_name, '/');
+    base_name = base_name ? base_name + 1 : rom_name;
+
+    dot_extension = strrchr(base_name, '.');
+    if (!dot_extension || dot_extension == base_name) {
+        dot_extension = base_name + strlen(base_name);
+    }
+
+    stem_len = (size_t)(dot_extension - base_name);
+    if (stem_len > 200) {
+        stem_len = 200;
+    }
+
+    if (slot >= 0) {
+        snprintf(path, path_size, "%s/%.*s.slot%u.%s",
+                 dir_path, (int)stem_len, base_name, (unsigned)slot, extension ? extension : "bin");
+    } else {
+        snprintf(path, path_size, "%s/%.*s.%s",
+                 dir_path, (int)stem_len, base_name, extension ? extension : "bin");
+    }
+}
+
+static void build_save_path(char *path, size_t path_size, const char *rom_name)
+{
+    build_content_path(path, path_size, STORAGE_SAVE_DIR, rom_name, "sav", -1);
+}
+
+static void build_state_path(char *path, size_t path_size, const char *rom_name, unsigned slot)
+{
+    build_content_path(path, path_size, STORAGE_STATE_DIR, rom_name, "state", (int)slot);
+}
+
 esp_err_t storage_init(void)
 {
     if (s_storage.initialized) {
@@ -85,6 +134,9 @@ esp_err_t storage_init(void)
     if (stat(STORAGE_SAVE_DIR, &st) != 0) {
         mkdir(STORAGE_SAVE_DIR, 0755);
     }
+    if (stat(STORAGE_STATE_DIR, &st) != 0) {
+        mkdir(STORAGE_STATE_DIR, 0755);
+    }
 
     s_storage.initialized = true;
     ESP_LOGI(TAG, "SD card mounted at %s (4-bit, %d kHz)",
@@ -95,7 +147,11 @@ esp_err_t storage_init(void)
 esp_err_t storage_write_save(const char *rom_name, const void *data, size_t size)
 {
     char path[256];
-    snprintf(path, sizeof(path), "%s/%.200s.sav", STORAGE_SAVE_DIR, rom_name);
+    build_save_path(path, sizeof(path), rom_name);
+
+    if (path[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
 
     FILE *f = fopen(path, "wb");
     if (!f) {
@@ -115,20 +171,91 @@ esp_err_t storage_write_save(const char *rom_name, const void *data, size_t size
     return ESP_OK;
 }
 
-esp_err_t storage_read_save(const char *rom_name, void *data, size_t size)
+esp_err_t storage_read_save(const char *rom_name, void *data, size_t buffer_size,
+                            size_t *bytes_read)
 {
     char path[256];
-    snprintf(path, sizeof(path), "%s/%.200s.sav", STORAGE_SAVE_DIR, rom_name);
+    size_t read = 0;
+
+    build_save_path(path, sizeof(path), rom_name);
+
+    if (path[0] == '\0' || !data) {
+        return ESP_ERR_INVALID_ARG;
+    }
 
     FILE *f = fopen(path, "rb");
     if (!f) {
         return ESP_ERR_NOT_FOUND;
     }
 
-    size_t read = fread(data, 1, size, f);
+    read = fread(data, 1, buffer_size, f);
     fclose(f);
 
+    if (bytes_read) {
+        *bytes_read = read;
+    }
+
     ESP_LOGI(TAG, "Save loaded: %s (%u bytes)", path, (unsigned)read);
+    return ESP_OK;
+}
+
+esp_err_t storage_write_state(const char *rom_name, unsigned slot,
+                              const void *data, size_t size)
+{
+    char path[256];
+    FILE *f;
+    size_t written;
+
+    build_state_path(path, sizeof(path), rom_name, slot);
+
+    if (path[0] == '\0' || !data) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    f = fopen(path, "wb");
+    if (!f) {
+        ESP_LOGE(TAG, "Cannot create state file: %s", path);
+        return ESP_FAIL;
+    }
+
+    written = fwrite(data, 1, size, f);
+    fclose(f);
+
+    if (written != size) {
+        ESP_LOGE(TAG, "State write incomplete: %u / %u", (unsigned)written, (unsigned)size);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "State written: %s (%u bytes)", path, (unsigned)size);
+    return ESP_OK;
+}
+
+esp_err_t storage_read_state(const char *rom_name, unsigned slot,
+                             void *data, size_t buffer_size, size_t *bytes_read)
+{
+    char path[256];
+    FILE *f;
+    size_t read;
+
+    build_state_path(path, sizeof(path), rom_name, slot);
+
+    if (path[0] == '\0' || !data) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    f = fopen(path, "rb");
+    if (!f) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    read = fread(data, 1, buffer_size, f);
+    fclose(f);
+
+    if (bytes_read) {
+        *bytes_read = read;
+    }
+
+    ESP_LOGI(TAG, "State loaded: %s (%u bytes)", path, (unsigned)read);
     return ESP_OK;
 }
 
