@@ -255,16 +255,29 @@ typedef struct
   }
 #elif defined(RISCV_ARCH)
   #ifdef ESP_PLATFORM
+    #include "sdkconfig.h"
     #include <esp_cache.h>
     void platform_cache_sync(void *baseaddr, void *endptr) {
-      size_t size = (char*)endptr - (char*)baseaddr;
+      uintptr_t start = (uintptr_t)baseaddr;
+      uintptr_t end = (uintptr_t)endptr;
+      uintptr_t aligned_start;
+      uintptr_t aligned_end;
+      size_t size;
+
+      if (end <= start) {
+        return;
+      }
+
+      aligned_start = start & ~((uintptr_t)CONFIG_CACHE_L1_CACHE_LINE_SIZE - 1);
+      aligned_end = (end + CONFIG_CACHE_L1_CACHE_LINE_SIZE - 1) &
+        ~((uintptr_t)CONFIG_CACHE_L1_CACHE_LINE_SIZE - 1);
+      size = aligned_end - aligned_start;
+
       /* Writeback D-cache to PSRAM, then invalidate I-cache */
-      esp_cache_msync(baseaddr, size,
-        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE |
-        ESP_CACHE_MSYNC_FLAG_UNALIGNED);
-      esp_cache_msync(baseaddr, size,
-        ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_INST |
-        ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+      esp_cache_msync((void *)aligned_start, size,
+        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+      esp_cache_msync((void *)aligned_start, size,
+        ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_INST);
     }
   #else
     void platform_cache_sync(void *baseaddr, void *endptr) {

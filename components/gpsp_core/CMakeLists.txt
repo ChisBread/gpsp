@@ -38,6 +38,10 @@ if(CONFIG_GPSP_DYNAREC)
     endif()
 endif()
 
+if(CONFIG_IDF_TARGET_ESP32P4 AND CONFIG_GPSP_P4_SIMD_PIXEL_OPS)
+    list(APPEND GPSP_CORE_ASM_SRCS "${GPSP_ROOT}/riscv/p4_pie_pixel_ops.S")
+endif()
+
 # libretro-common compatibility sources (file I/O, strings)
 set(LIBRETRO_COMMON_SRCS
     "${GPSP_ROOT}/libretro/libretro-common/compat/compat_posix_string.c"

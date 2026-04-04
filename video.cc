@@ -18,9 +18,21 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#if defined(ESP_PLATFORM)
+  #include "sdkconfig.h"
+#endif
+
 extern "C" {
   #include "common.h"
 }
+
+#if defined(CONFIG_IDF_TARGET_ESP32P4) && \
+    defined(CONFIG_GPSP_P4_SIMD_PIXEL_OPS) && \
+    CONFIG_GPSP_P4_SIMD_PIXEL_OPS
+  #define GPSP_P4_SIMD_PIXEL_OPS 1
+#else
+  #define GPSP_P4_SIMD_PIXEL_OPS 0
+#endif
 
 u16* gba_screen_pixels = NULL;
 
@@ -1679,6 +1691,61 @@ typedef enum
   BLEND_DARK,   // Same but with darken effecg
 } blendtype;
 
+#if GPSP_P4_SIMD_PIXEL_OPS
+extern "C" void gpsp_p4_fill_u16_pie(u16 *dst, u32 count, u16 value);
+extern "C" void gpsp_p4_fill_u32_pie(u32 *dst, u32 count, u32 value);
+#endif
+
+static inline void fill_pixels_scalar(u16 *dst, u32 count, u16 value) {
+  for (u32 i = 0; i < count; i++)
+    dst[i] = value;
+}
+
+static inline void fill_pixels_scalar(u32 *dst, u32 count, u32 value) {
+  for (u32 i = 0; i < count; i++)
+    dst[i] = value;
+}
+
+#if GPSP_P4_SIMD_PIXEL_OPS
+static inline void fill_pixels_pie(u16 *dst, u32 count, u16 value) {
+  u32 vec_count = count & ~7U;
+  if (vec_count)
+    gpsp_p4_fill_u16_pie(dst, vec_count, value);
+
+  dst += vec_count;
+  count -= vec_count;
+  while (count--)
+    *dst++ = value;
+}
+
+static inline void fill_pixels_pie(u32 *dst, u32 count, u32 value) {
+  u32 vec_count = count & ~3U;
+  if (vec_count)
+    gpsp_p4_fill_u32_pie(dst, vec_count, value);
+
+  dst += vec_count;
+  count -= vec_count;
+  while (count--)
+    *dst++ = value;
+}
+#endif
+
+static inline void fill_pixels_linear(u16 *dst, u32 count, u16 value) {
+#if GPSP_P4_SIMD_PIXEL_OPS
+  fill_pixels_pie(dst, count, value);
+#else
+  fill_pixels_scalar(dst, count, value);
+#endif
+}
+
+static inline void fill_pixels_linear(u32 *dst, u32 count, u32 value) {
+#if GPSP_P4_SIMD_PIXEL_OPS
+  fill_pixels_pie(dst, count, value);
+#else
+  fill_pixels_scalar(dst, count, value);
+#endif
+}
+
 // Applies blending (and optional brighten/darken) effect to a bunch of
 // color-indexed pixel pairs. Depending on the mode and the pixel target
 // number, blending, darken/brighten or no effect will be applied.
@@ -1796,11 +1863,24 @@ template<rendtype rdmode, typename dsttype>
 void fill_line_background(u32 start, u32 end, dsttype *scanline) {
   dsttype bgcol = palette_ram_converted[0];
   u16 bg_comb = color_flags(5);
-  while (start < end)
+
+  if constexpr (sizeof(dsttype) == sizeof(u16)) {
     if (rdmode == FULLCOLOR)
-      scanline[start++] = bgcol;
+      fill_pixels_linear((u16*)scanline + start, end - start, (u16)bgcol);
     else
-      scanline[start++] = 0 | bg_comb;
+      fill_pixels_linear((u16*)scanline + start, end - start, (u16)(0 | bg_comb));
+  } else if constexpr (sizeof(dsttype) == sizeof(u32)) {
+    if (rdmode == FULLCOLOR)
+      fill_pixels_linear((u32*)scanline + start, end - start, (u32)bgcol);
+    else
+      fill_pixels_linear((u32*)scanline + start, end - start, (u32)(0 | bg_comb));
+  } else {
+    while (start < end)
+      if (rdmode == FULLCOLOR)
+        scanline[start++] = bgcol;
+      else
+        scanline[start++] = 0 | bg_comb;
+  }
 }
 
 // Renders the backdrop color (ie. whenever no layer is active) applying
@@ -1829,8 +1909,7 @@ static void render_backdrop(u32 start, u32 end, u16 *scanline) {
   }
 
   // Fill the line with that color
-  while (start < end)
-    scanline[start++] = pixcol;
+  fill_pixels_linear(scanline + start, end - start, pixcol);
 }
 
 // Renders all the available and enabled layers (in tiled mode).

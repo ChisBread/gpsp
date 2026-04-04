@@ -25,4 +25,20 @@ menu "gpSP GBA Emulator"
             and the LRU paging mechanism loads remaining pages from SD on demand.
             With 32MB PSRAM, set to 32 to cache most ROMs entirely.
 
+    config GPSP_P4_SIMD_PIXEL_OPS
+        bool "Enable ESP32-P4 PIE pixel ops"
+        default n
+        depends on IDF_TARGET_ESP32P4
+        help
+            Enable ESP32-P4 PIE (Processor Instruction Extensions) helpers for
+            simple pixel-processing loops in the video renderer.
+
+            This does not replace the GBA PPU renderer with hardware logic.
+            Instead it enables selected PIE-backed helpers for simple linear
+            post-processing paths such as repeated pixel fills.
+
+            This option is experimental. It uses inline assembly with ESP32-P4
+            PIE instructions and should be validated with visual testing and
+            frame-time profiling on target hardware.
+
 endmenu
