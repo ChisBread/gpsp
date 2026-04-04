@@ -613,6 +613,12 @@ void gba_emulation_task(void *param)
     ESP_LOGI(TAG, "Emulation task started on core %d", xPortGetCoreID());
     s_session.emulation_task = xTaskGetCurrentTaskHandle();
 
+#ifdef HAVE_DYNAREC
+    /* init_emitter must run here (not in init_main on the main task)
+       because dynarec translation recurses and needs the large emu stack. */
+    init_emitter(gamepak_must_swap());
+#endif
+
     s_fps_timer_us = esp_timer_get_time();
 
     gba_screen_pixels = av_pipeline_default_video_buffer();

@@ -18,9 +18,26 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_vfs_fat.h"
+#include "esp_idf_version.h"
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
+
+/*
+ * When ESP-Hosted uses SDIO on Slot 1, it initialises the SDMMC host
+ * controller via a constructor before app_main().  The controller can
+ * only be initialised once, so we replace host.init / host.deinit with
+ * dummy functions so the SD-card mount on Slot 0 does not try to
+ * re-initialise it.  Reference: esp_hosted example host_sdcard_with_hosted.
+ */
+#if defined(CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE) && \
+    (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
+#define WORKAROUND_HOSTED_DOES_SDMMC_HOST_INIT 1
+static esp_err_t sdmmc_host_init_dummy(void)   { return ESP_OK; }
+static esp_err_t sdmmc_host_deinit_dummy(void)  { return ESP_OK; }
+#else
+#define WORKAROUND_HOSTED_DOES_SDMMC_HOST_INIT 0
+#endif
 
 static const char *TAG = "gpsp_storage";
 
@@ -110,6 +127,11 @@ esp_err_t storage_init(void)
     host.slot = SDMMC_HOST_SLOT_0;
     host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
     host.pwr_ctrl_handle = s_storage.pwr_ctrl;
+#if WORKAROUND_HOSTED_DOES_SDMMC_HOST_INIT
+    /* Controller already initialised by ESP-Hosted for Slot 1 SDIO */
+    host.init = &sdmmc_host_init_dummy;
+    host.deinit = &sdmmc_host_deinit_dummy;
+#endif
 
     /* Slot 0 uses IO MUX — no need to specify GPIO pins */
     sdmmc_slot_config_t slot_config = {

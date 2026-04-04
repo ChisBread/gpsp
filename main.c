@@ -113,7 +113,7 @@ void init_main(void)
 
 #ifdef HAVE_DYNAREC
   init_dynarec_caches();
-  init_emitter(gamepak_must_swap());
+  /* init_emitter() is deferred to the emulation task (larger stack) */
 #endif
 }
 

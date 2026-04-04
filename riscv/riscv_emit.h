@@ -1848,7 +1848,11 @@ static void trace_instruction(u32 pc, u32 mode)
         case 0xC: generate_condition_gt(); break;                             \
         case 0xD: generate_condition_le(); break;                             \
         case 0xE: break;                                                      \
-        case 0xF: break;                                                      \
+        case 0xF:                                                             \
+            /* NV condition (ARMv4: never execute) — emit unconditional skip */\
+            (backpatch_address) = translation_ptr;                            \
+            rv_beqz(reg_zero, 0);                                             \
+            break;                                                           \
     }
 
 #define generate_op_logic_flags(_reg)                                         \
