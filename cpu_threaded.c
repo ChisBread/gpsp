@@ -23,7 +23,6 @@
 
 #include "common.h"
 #include "cpu_instrument.h"
-#include "jit_trace.h"
 #if defined(VITA)
 #include <psp2/kernel/sysmem.h>
 #include <stdio.h>
@@ -2706,12 +2705,6 @@ u8 function_cc *block_lookup_address_dual(u32 pc)
   }
 }
 
-/* Wrapper called from asm stubs to trace indirect branches */
-void jit_trace_indirect_branch(u32 pc, u8 *host, int type)
-{
-  jit_trace_indirect(pc, host, type);
-}
-
 u8 function_cc *block_lookup_address_arm(u32 pc)
 {
   unsigned i;
@@ -2719,14 +2712,12 @@ u8 function_cc *block_lookup_address_arm(u32 pc)
     u8 *ret = block_lookup_translate_arm(pc);
     if (ret) {
       translate_icache_sync();
-      jit_trace_dispatch(pc, ret, 0);
       return ret;
     }
   }
 
   printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
   fflush(stdout);
-  jit_trace_dump_to_sd();
   return NULL;
 }
 
@@ -2737,13 +2728,11 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
     u8 *ret = block_lookup_translate_thumb(pc);
     if (ret) {
       translate_icache_sync();
-      jit_trace_dispatch(pc, ret, 1);
       return ret;
     }
   }
   printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
   fflush(stdout);
-  jit_trace_dump_to_sd();
   return NULL;
 }
 
@@ -3251,9 +3240,6 @@ bool translate_block_arm(u32 pc, bool ram_region)
     generate_branch_patch_unconditional(
       external_block_exits[i].branch_source, translation_target);
   }
-  jit_trace_translate(block_start_pc, block_translate_start_arm,
-    (u32)(translation_ptr - block_translate_start_arm), 0);
-  jit_trace_block_opcodes(block_start_pc, block_end_pc, 0);
   CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
   return true;
 }
@@ -3425,9 +3411,6 @@ bool translate_block_thumb(u32 pc, bool ram_region)
     generate_branch_patch_unconditional(
       external_block_exits[i].branch_source, translation_target);
   }
-  jit_trace_translate(block_start_pc, block_translate_start_thumb,
-    (u32)(translation_ptr - block_translate_start_thumb), 1);
-  jit_trace_block_opcodes(block_start_pc, block_end_pc, 1);
   CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
   return true;
 }

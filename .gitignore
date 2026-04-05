@@ -11,3 +11,5 @@ tools/generate_cc_lut
 JC4880P443C_I_W/
 build/
 managed_components/
+tests/qemu_harness/trace_*.log
+tests/qemu_harness/test_gba

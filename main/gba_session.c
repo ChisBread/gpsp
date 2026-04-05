@@ -18,7 +18,6 @@
 #include "common.h"
 #include "cpu.h"
 #include "cpu_instrument.h"
-#include "jit_trace.h"
 #include "gba_memory.h"
 #include "gba_session.h"
 #include "input_driver.h"
@@ -80,33 +79,6 @@ static gba_session_state_t s_session;
 static int64_t s_frame_start_us;
 static uint32_t s_fps_counter;
 static int64_t s_fps_timer_us;
-
-/* ---- JIT hang watchdog ---- */
-#if defined(HAVE_DYNAREC) && defined(JIT_TRACE_ENABLED)
-extern volatile u32 jit_block_entry_pc;
-static u32 s_watchdog_last_pc;
-static int s_watchdog_stuck_count;
-static esp_timer_handle_t s_jit_watchdog_timer;
-
-static void jit_watchdog_cb(void *arg)
-{
-    (void)arg;
-    u32 cur = jit_block_entry_pc;
-    if (cur != 0 && cur == s_watchdog_last_pc) {
-        s_watchdog_stuck_count++;
-        if (s_watchdog_stuck_count >= 2) {
-            ESP_LOGE(TAG, "JIT HANG detected! stuck_pc=0x%08lx count=%d",
-                     (unsigned long)cur, s_watchdog_stuck_count);
-            jit_trace_dump_to_sd();
-            ESP_LOGE(TAG, "Trace dumped. Halting watchdog.");
-            esp_timer_stop(s_jit_watchdog_timer);
-        }
-    } else {
-        s_watchdog_stuck_count = 0;
-    }
-    s_watchdog_last_pc = cur;
-}
-#endif
 
 /* Pre-allocated PSRAM buffer for state/save I/O (serialized access via command queue) */
 static GPSP_EXTRAM_BSS uint8_t s_state_io_buf[GBA_SESSION_STATE_IO_BUF_SIZE] __attribute__((aligned(16)));
@@ -648,13 +620,7 @@ void gba_emulation_task(void *param)
     /* init_emitter must run here (not in init_main on the main task)
        because dynarec translation recurses and needs the large emu stack. */
     init_emitter(gamepak_must_swap());
-    jit_trace_init();
-    ESP_LOGI(TAG, "JIT trace active, will dump after 5 frames or on error");
 #endif
-
-    /* Frame counter for trace auto-dump */
-    int jit_trace_frame_count = 0;
-    int64_t jit_watchdog_us = 0;
 
     s_fps_timer_us = esp_timer_get_time();
 
@@ -665,19 +631,6 @@ void gba_emulation_task(void *param)
         vTaskDelete(NULL);
         return;
     }
-
-#if defined(HAVE_DYNAREC) && defined(JIT_TRACE_ENABLED)
-    {
-        esp_timer_create_args_t wdog_args = {
-            .callback = jit_watchdog_cb,
-            .name = "jit_wdog",
-        };
-        if (esp_timer_create(&wdog_args, &s_jit_watchdog_timer) == ESP_OK) {
-            esp_timer_start_periodic(s_jit_watchdog_timer, 2000000); /* 2 seconds */
-            ESP_LOGI(TAG, "JIT watchdog timer started (2s period)");
-        }
-    }
-#endif
 
     while (1) {
         s_frame_start_us = esp_timer_get_time();
@@ -713,13 +666,6 @@ void gba_emulation_task(void *param)
             execute_arm_translate(execute_cycles);
             CPU_PROF_SCOPE_ACC(dynarec_total_cycles, dynarec_total_begin);
             cpu_prof.dynarec_frames++;
-            jit_trace_frame();
-            jit_trace_frame_count++;
-            /* Auto-dump after first 5 frames to capture startup */
-            if (jit_trace_frame_count == 5) {
-                ESP_LOGI(TAG, "Auto-dumping JIT trace after %d frames", jit_trace_frame_count);
-                jit_trace_dump_to_sd();
-            }
         } else
 #endif
         {

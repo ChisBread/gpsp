@@ -20,6 +20,9 @@
 extern "C" {
   #include "common.h"
   #include "cpu_instrument.h"
+#ifdef TRACE_INSTRUCTIONS
+  #include "tests/qemu_harness/trace_instr.h"
+#endif
 }
 
 const u8 bit_count[256] =
@@ -1664,9 +1667,9 @@ arm_loop:
              break;
        }
 
-       #ifdef TRACE_INSTRUCTIONS
-       interp_trace_instruction(reg[REG_PC], 1);
-       #endif
+#ifdef TRACE_INSTRUCTIONS
+       trace_instruction(reg[REG_PC], reg[REG_CPSR]);
+#endif
 
        switch((opcode >> 20) & 0xFF)
        {
@@ -3152,9 +3155,9 @@ thumb_loop:
        reg[REG_PC] &= ~0x01;
        opcode = readaddress16(pc_address_block, (reg[REG_PC] & 0x7FFF));
 
-       #ifdef TRACE_INSTRUCTIONS
-       interp_trace_instruction(reg[REG_PC], 0);
-       #endif
+#ifdef TRACE_INSTRUCTIONS
+       trace_instruction(reg[REG_PC], reg[REG_CPSR]);
+#endif
 
        switch((opcode >> 8) & 0xFF)
        {

@@ -19,7 +19,6 @@
 
 #include "common.h"
 #include "cpu_instrument.h"
-#include "jit_trace.h"
 #include <ctype.h>
 
 timer_type timer[4];
@@ -129,7 +128,6 @@ u32 function_cc update_gba(int remaining_cycles)
   u32 frame_complete = 0;
   irq_type irq_raised = IRQ_NONE;
   int dma_cycles;
-  jit_trace_update_gba(remaining_cycles);
   trace_update_gba(remaining_cycles);
   CPU_PROF_SCOPE_BEGIN(update_begin);
 

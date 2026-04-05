@@ -38,7 +38,7 @@ static const char *TAG = "gpsp_main";
 
 /* ---- Globals expected by gpsp core ---- */
 u32 skip_next_frame = 0;
-int dynarec_enable = 1;     /* Start with dynarec mode */
+int dynarec_enable = 0;     /* Start with dynarec mode */
 int sprite_limit = 1;
 boot_mode selected_boot_mode = boot_game;
 

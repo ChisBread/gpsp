@@ -705,6 +705,30 @@ defsymbl(jit_call_c_trampoline)
     mv   a0, t0
     ret
 
+#ifdef TRACE_INSTRUCTIONS
+/*
+ * rv_trace_instruction:
+ *   Called from JIT-generated code after each ARM instruction.
+ *   Saves all JIT registers to reg[], consolidates flags to CPSR,
+ *   calls trace_jit_instruction(), then restores everything.
+ */
+defsymbl(rv_trace_instruction)
+    sw   ra, REG_SAVE(gp)
+    store_registers()
+    consolidate_flags(t0, t1)
+    mv   s11, gp
+    mv   s10, tp
+    lw   gp, REG_SAVE5(s11)
+    lw   tp, REG_SAVE6(s11)
+    call trace_jit_instruction
+    mv   gp, s11
+    mv   tp, s10
+    extract_flags(t1)
+    load_registers()
+    lw   ra, REG_SAVE(gp)
+    ret
+#endif
+
         .bss
         .align 6
 

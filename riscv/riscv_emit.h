@@ -409,25 +409,9 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_cycle_update();                                                    \
     generate_indirect_branch_no_cycle_update(type)                              \
 
-/* ---- JIT block entry marker for hang debugging ---- */
-#ifdef JIT_TRACE_ENABLED
-volatile u32 jit_block_entry_pc;
-#endif
-
 #define block_prologue_size 0
 #define generate_block_prologue()                                             \
-    generate_load_imm(reg_pc, stored_pc);                                     \
-    _jit_emit_block_entry_marker(stored_pc)
-
-#ifdef JIT_TRACE_ENABLED
-#define _jit_emit_block_entry_marker(pc_val) do {                             \
-    /* Store reg_pc to jit_block_entry_pc via t0 */                           \
-    rv_load_imm32(rv_t0, (u32)(uintptr_t)&jit_block_entry_pc);               \
-    rv_sw(reg_pc, rv_t0, 0);                                                  \
-} while(0)
-#else
-#define _jit_emit_block_entry_marker(pc_val)
-#endif
+    generate_load_imm(reg_pc, stored_pc)
 
 #define check_generate_n_flag                                                 \
     (flag_status & 0x08)                                                        \
@@ -567,9 +551,10 @@ volatile u32 jit_block_entry_pc;
     }                                                                          \
     else                                                                       \
     {                                                                          \
+        /* RRX: save old C, set new C = bit0(Rm), result = (old_C<<31)|(Rm>>1) */ \
+        rv_slli(reg_temp, reg_c_cache, 31);                                   \
         rv_andi(reg_c_cache, arm_to_rv_reg[_rm], 1);                          \
         rv_srli(arm_to_rv_reg[arm_reg], arm_to_rv_reg[_rm], 1);               \
-        rv_slli(reg_temp, reg_c_cache, 31);                                   \
         rv_or(arm_to_rv_reg[arm_reg], arm_to_rv_reg[arm_reg], reg_temp);      \
     }                                                                          \
     _rm = arm_reg                                                              \
@@ -577,6 +562,7 @@ volatile u32 jit_block_entry_pc;
 #define generate_shift_reg_lsl_no_flags(_rm, _rs)                             \
 {                                                                             \
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
+    rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     generate_load_imm(reg_temp2, 32);                                          \
     rv_bgeu(reg_a1, reg_temp2, 12);                                            \
@@ -588,6 +574,7 @@ volatile u32 jit_block_entry_pc;
 #define generate_shift_reg_lsr_no_flags(_rm, _rs)                             \
 {                                                                             \
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
+    rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     generate_load_imm(reg_temp2, 32);                                          \
     rv_bgeu(reg_a1, reg_temp2, 12);                                            \
@@ -599,6 +586,7 @@ volatile u32 jit_block_entry_pc;
 #define generate_shift_reg_asr_no_flags(_rm, _rs)                             \
 {                                                                             \
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
+    rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     generate_load_imm(reg_temp2, 32);                                          \
     rv_bltu(reg_a1, reg_temp2, 12);                                            \
@@ -610,6 +598,7 @@ volatile u32 jit_block_entry_pc;
 #define generate_shift_reg_ror_no_flags(_rm, _rs)                             \
 {                                                                             \
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
+    rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     rv_ror(reg_a0, reg_a0, reg_a1, reg_temp, reg_temp2);                      \
 }                                                                             \
@@ -617,6 +606,7 @@ volatile u32 jit_block_entry_pc;
 #define generate_shift_reg_lsl_flags(_rm, _rs)                                \
 {                                                                             \
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
+    rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     rv_beqz(reg_a1, 32);                                                       \
     generate_load_imm(reg_temp2, 32);                                          \
@@ -625,7 +615,10 @@ volatile u32 jit_block_entry_pc;
     rv_sll(reg_c_cache, reg_a0, reg_temp);                                     \
     rv_srli(reg_c_cache, reg_c_cache, 31);                                     \
     rv_sll(reg_a0, reg_a0, reg_a1);                                            \
-    rv_j(12);                                                                  \
+    rv_j(20);                                                                  \
+    /* amt >= 32: C = bit0(Rm) if amt==32, else 0 */                           \
+    rv_andi(reg_c_cache, reg_a0, 1);                                           \
+    rv_beq(reg_a1, reg_temp2, 8);                                              \
     rv_mv(reg_c_cache, reg_zero);                                              \
     rv_mv(reg_a0, reg_zero);                                                   \
 }                                                                             \
@@ -633,6 +626,7 @@ volatile u32 jit_block_entry_pc;
 #define generate_shift_reg_lsr_flags(_rm, _rs)                                \
 {                                                                             \
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
+    rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     rv_beqz(reg_a1, 28);                                                       \
     generate_load_imm(reg_temp2, 32);                                          \
@@ -641,7 +635,10 @@ volatile u32 jit_block_entry_pc;
     rv_srl(reg_c_cache, reg_a0, reg_temp);                                     \
     rv_andi(reg_c_cache, reg_c_cache, 1);                                      \
     rv_srl(reg_a0, reg_a0, reg_a1);                                            \
-    rv_j(12);                                                                  \
+    rv_j(20);                                                                  \
+    /* amt >= 32: C = bit31(Rm) if amt==32, else 0 */                          \
+    rv_srli(reg_c_cache, reg_a0, 31);                                          \
+    rv_beq(reg_a1, reg_temp2, 8);                                              \
     rv_mv(reg_c_cache, reg_zero);                                              \
     rv_mv(reg_a0, reg_zero);                                                   \
 }                                                                             \
@@ -649,6 +646,7 @@ volatile u32 jit_block_entry_pc;
 #define generate_shift_reg_asr_flags(_rm, _rs)                                \
 {                                                                             \
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
+    rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     rv_beqz(reg_a1, 24);                                                       \
     generate_load_imm(reg_temp2, 32);                                          \
@@ -665,6 +663,7 @@ volatile u32 jit_block_entry_pc;
 #define generate_shift_reg_ror_flags(_rm, _rs)                                \
 {                                                                             \
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
+    rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     rv_beqz(reg_a1, 16);                                                       \
     rv_addi(reg_temp, reg_a1, -1);                                             \
@@ -900,12 +899,13 @@ volatile u32 jit_block_entry_pc;
 {                                                                             \
     rv_add(reg_temp3, _rm, reg_c_cache);                                      \
     rv_sltu(reg_temp2, reg_temp3, _rm);                                       \
+    rv_mv(reg_save0, _rn);                                                    \
     rv_add(_rd, _rn, reg_temp3);                                              \
-    rv_sltu(reg_c_cache, _rd, _rn);                                           \
+    rv_sltu(reg_c_cache, _rd, reg_save0);                                     \
     rv_or(reg_c_cache, reg_c_cache, reg_temp2);                               \
     if (check_generate_v_flag)                                                \
     {                                                                         \
-        rv_xor(reg_temp, _rn, _rd);                                           \
+        rv_xor(reg_temp, reg_save0, _rd);                                     \
         rv_xor(reg_temp2, _rm, _rd);                                          \
         rv_and(reg_v_cache, reg_temp, reg_temp2);                             \
         rv_srli(reg_v_cache, reg_v_cache, 31);                                \
@@ -918,14 +918,15 @@ volatile u32 jit_block_entry_pc;
     rv_xori(reg_temp3, reg_c_cache, 1);                                       \
     rv_add(reg_temp2, _rm, reg_temp3);                                        \
     rv_sltu(reg_temp3, reg_temp2, _rm);                                       \
+    rv_mv(reg_save0, _rn);                                                    \
     rv_sub(_rd, _rn, reg_temp2);                                              \
-    rv_sltu(reg_c_cache, _rn, reg_temp2);                                     \
+    rv_sltu(reg_c_cache, reg_save0, reg_temp2);                               \
     rv_or(reg_c_cache, reg_c_cache, reg_temp3);                               \
     rv_xori(reg_c_cache, reg_c_cache, 1);                                     \
     if (check_generate_v_flag)                                                \
     {                                                                         \
-        rv_xor(reg_temp, _rn, _rm);                                           \
-        rv_xor(reg_temp2, _rn, _rd);                                          \
+        rv_xor(reg_temp, reg_save0, _rm);                                     \
+        rv_xor(reg_temp2, reg_save0, _rd);                                    \
         rv_and(reg_v_cache, reg_temp, reg_temp2);                             \
         rv_srli(reg_v_cache, reg_v_cache, 31);                                \
     }                                                                         \
@@ -937,14 +938,15 @@ volatile u32 jit_block_entry_pc;
     rv_xori(reg_temp3, reg_c_cache, 1);                                       \
     rv_add(reg_temp2, _rn, reg_temp3);                                        \
     rv_sltu(reg_temp3, reg_temp2, _rn);                                       \
+    rv_mv(reg_save0, _rm);                                                    \
     rv_sub(_rd, _rm, reg_temp2);                                              \
-    rv_sltu(reg_c_cache, _rm, reg_temp2);                                     \
+    rv_sltu(reg_c_cache, reg_save0, reg_temp2);                               \
     rv_or(reg_c_cache, reg_c_cache, reg_temp3);                               \
     rv_xori(reg_c_cache, reg_c_cache, 1);                                     \
     if (check_generate_v_flag)                                                \
     {                                                                         \
-        rv_xor(reg_temp, _rm, _rn);                                           \
-        rv_xor(reg_temp2, _rm, _rd);                                          \
+        rv_xor(reg_temp, reg_save0, _rn);                                     \
+        rv_xor(reg_temp2, reg_save0, _rd);                                    \
         rv_and(reg_v_cache, reg_temp, reg_temp2);                             \
         rv_srli(reg_v_cache, reg_v_cache, 31);                                \
     }                                                                         \
@@ -956,35 +958,38 @@ volatile u32 jit_block_entry_pc;
 
 #define generate_op_adds_imm(_rd, _rn)                                        \
     generate_load_imm(reg_temp3, imm);                                        \
+    rv_mv(reg_save0, _rn);                                                    \
     rv_add(_rd, _rn, reg_temp3);                                              \
-    generate_op_add_flags(_rd, _rn, reg_temp3)                                \
+    generate_op_add_flags(_rd, reg_save0, reg_temp3)                          \
 
 #define generate_op_subs_imm(_rd, _rn)                                        \
     generate_load_imm(reg_temp3, imm);                                        \
+    rv_mv(reg_save0, _rn);                                                    \
     rv_sub(_rd, _rn, reg_temp3);                                              \
-    generate_op_sub_flags(_rd, _rn, reg_temp3)                                \
+    generate_op_sub_flags(_rd, reg_save0, reg_temp3)                          \
 
 #define generate_op_rsbs_imm(_rd, _rn)                                        \
     generate_load_imm(reg_temp3, imm);                                        \
+    rv_mv(reg_save0, _rn);                                                    \
     rv_sub(_rd, reg_temp3, _rn);                                              \
-    generate_op_sub_flags(_rd, reg_temp3, _rn)                                \
+    generate_op_sub_flags(_rd, reg_temp3, reg_save0)                          \
 
 #define generate_op_adcs_imm(_rd, _rn)                                        \
 {                                                                             \
-    generate_load_imm(reg_temp3, imm);                                        \
-    generate_op_adcs_reg(_rd, _rn, reg_temp3);                                \
+    generate_load_imm(reg_a0, imm);                                           \
+    generate_op_adcs_reg(_rd, _rn, reg_a0);                                   \
 }                                                                             \
 
 #define generate_op_sbcs_imm(_rd, _rn)                                        \
 {                                                                             \
-    generate_load_imm(reg_temp3, imm);                                        \
-    generate_op_sbcs_reg(_rd, _rn, reg_temp3);                                \
+    generate_load_imm(reg_a0, imm);                                           \
+    generate_op_sbcs_reg(_rd, _rn, reg_a0);                                   \
 }                                                                             \
 
 #define generate_op_rscs_imm(_rd, _rn)                                        \
 {                                                                             \
-    generate_load_imm(reg_temp3, imm);                                        \
-    generate_op_rscs_reg(_rd, _rn, reg_temp3);                                \
+    generate_load_imm(reg_a0, imm);                                           \
+    generate_op_rscs_reg(_rd, _rn, reg_a0);                                   \
 }                                                                             \
 
 #define generate_op_cmp_reg(_rd, _rn, _rm)                                    \
@@ -1507,8 +1512,25 @@ volatile u32 jit_block_entry_pc;
 
 /* Instruction tracing - currently disabled */
 #define emit_trace_instruction(pc, mode) do {} while(0)
+#ifdef TRACE_INSTRUCTIONS
+#define emit_trace_thumb_instruction(_pc)                                       \
+  do {                                                                        \
+    extern void rv_trace_instruction(void);                                   \
+    generate_load_imm(reg_pc, (_pc));                                         \
+    generate_function_call(rv_trace_instruction);                             \
+    generate_load_imm(reg_pc, stored_pc);                                     \
+  } while(0)
+#define emit_trace_arm_instruction(_pc)                                        \
+  do {                                                                        \
+    extern void rv_trace_instruction(void);                                   \
+    generate_load_imm(reg_pc, (_pc));                                         \
+    generate_function_call(rv_trace_instruction);                             \
+    generate_load_imm(reg_pc, stored_pc);                                     \
+  } while(0)
+#else
 #define emit_trace_thumb_instruction(pc) do {} while(0)
 #define emit_trace_arm_instruction(pc)   do {} while(0)
+#endif
 
 #define thumb_swi()                                                           \
     generate_load_pc(reg_a0, (pc + 2));                                       \
