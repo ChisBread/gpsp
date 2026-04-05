@@ -13,6 +13,7 @@ set(GPSP_CORE_SRCS
     "${GPSP_ROOT}/rfu.c"
     "${GPSP_ROOT}/serial_proto.c"
     "${GPSP_ROOT}/gba_cc_lut.c"
+    "${GPSP_ROOT}/jit_trace.c"
 )
 
 set(GPSP_CORE_CXX_SRCS
@@ -73,12 +74,14 @@ idf_component_register(
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     INLINE=inline
     _GNU_SOURCE
+    CPU_PROFILE_STATS
 )
 
 if(CONFIG_GPSP_DYNAREC)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC
         HAVE_DYNAREC
         RISCV_ARCH
+        JIT_TRACE_ENABLED
     )
 endif()
 

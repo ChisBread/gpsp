@@ -15,6 +15,10 @@ idf_component_register(
         lwip
 )
 
+target_compile_definitions(${COMPONENT_LIB} PUBLIC
+    CPU_PROFILE_STATS
+)
+
 target_link_libraries(${COMPONENT_LIB} INTERFACE
     "-u netpacket_poll_receive"
     "-u netpacket_send"

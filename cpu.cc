@@ -562,12 +562,16 @@ const u8 bit_count[256] =
   new_pc_region = (reg[REG_PC] >> 15);                                        \
   if(new_pc_region != pc_region)                                              \
   {                                                                           \
+      CPU_PROF_INC(core_pc_region_switches);                                    \
     pc_region = new_pc_region;                                                \
     pc_address_block = memory_map_read[new_pc_region];                        \
     touch_gamepak_page(pc_region);                                            \
                                                                               \
     if(!pc_address_block)                                                     \
+      {                                                                         \
       pc_address_block = load_gamepak_page(pc_region & 0x3FF);                \
+         CPU_PROF_INC(core_gamepak_page_loads);                                  \
+      }                                                                         \
   }                                                                           \
 
 
@@ -597,6 +601,7 @@ const u8 bit_count[256] =
     reg[REG_CPSR] = 0xD2;                                                     \
     reg[REG_PC] = 0x00000018;                                                 \
     set_cpu_mode(MODE_IRQ);                                                   \
+      CPU_PROF_SWITCH_TO_ARM();                                                 \
     goto arm_loop;                                                            \
   }                                                                           \
 
@@ -611,7 +616,10 @@ const u8 bit_count[256] =
     }                                                                         \
                                                                               \
     if(reg[REG_CPSR] & 0x20)                                                  \
+      {                                                                         \
+         CPU_PROF_SWITCH_TO_THUMB();                                             \
       goto thumb_loop;                                                        \
+      }                                                                         \
   }                                                                           \
 
 #define arm_spsr_restore_check()                                              \
@@ -1472,11 +1480,55 @@ void execute_arm(u32 cycles)
   s32 cycles_remaining;
   u32 update_ret;
   cpu_alert_type cpu_alert;
+#ifdef CPU_PROFILE_STATS
+   u32 core_segment_begin;
+   bool core_in_thumb;
+   #define CPU_PROF_CORE_COMMIT()                                              \
+      do {                                                                      \
+         u32 _cpu_prof_now = cpu_prof_cycles();                                  \
+         if (core_in_thumb)                                                      \
+            cpu_prof.core_thumb_cycles += _cpu_prof_now - core_segment_begin;     \
+         else                                                                    \
+            cpu_prof.core_arm_cycles += _cpu_prof_now - core_segment_begin;       \
+         core_segment_begin = _cpu_prof_now;                                     \
+      } while (0)
+   #define CPU_PROF_SWITCH_TO_THUMB()                                          \
+      do {                                                                      \
+         if (!core_in_thumb) {                                                   \
+            CPU_PROF_CORE_COMMIT();                                               \
+            cpu_prof.core_arm_to_thumb_switches++;                                \
+            core_in_thumb = true;                                                 \
+         }                                                                       \
+      } while (0)
+   #define CPU_PROF_SWITCH_TO_ARM()                                            \
+      do {                                                                      \
+         if (core_in_thumb) {                                                    \
+            CPU_PROF_CORE_COMMIT();                                               \
+            cpu_prof.core_thumb_to_arm_switches++;                                \
+            core_in_thumb = false;                                                \
+         }                                                                       \
+      } while (0)
+   #define CPU_PROF_CORE_RESET_STATE()                                         \
+      do {                                                                      \
+         core_in_thumb = (reg[REG_CPSR] & 0x20) != 0;                            \
+         core_segment_begin = cpu_prof_cycles();                                 \
+      } while (0)
+#else
+   #define CPU_PROF_CORE_COMMIT() do {} while (0)
+   #define CPU_PROF_SWITCH_TO_THUMB() do {} while (0)
+   #define CPU_PROF_SWITCH_TO_ARM() do {} while (0)
+   #define CPU_PROF_CORE_RESET_STATE() do {} while (0)
+#endif
 
   if(!pc_address_block)
+   {
     pc_address_block = load_gamepak_page(pc_region & 0x3FF);
+      CPU_PROF_INC(core_gamepak_page_loads);
+   }
   touch_gamepak_page(pc_region);
 
+   CPU_PROF_TOTAL_BEGIN();
+   CPU_PROF_CORE_RESET_STATE();
   cycles_remaining = cycles;
   while(1)
   {
@@ -1484,21 +1536,27 @@ void execute_arm(u32 cycles)
     if (reg[CPU_HALT_STATE] != CPU_ACTIVE) {
        u32 ret = update_gba(cycles_remaining);
        if (completed_frame(ret))
+       {
+          CPU_PROF_TOTAL_END();
+          CPU_PROF_FRAME();
           return;
+       }
 
        cycles_remaining = cycles_to_run(ret);
+       CPU_PROF_CORE_RESET_STATE();
     }
 
     cpu_alert = CPU_ALERT_NONE;
     extract_flags();
 
     if(reg[REG_CPSR] & 0x20)
+         {
       goto thumb_loop;
+      }
 
     do
     {
 arm_loop:
-
        collapse_flags();
 
        /* Process cheats if we are about to execute the cheat hook */
@@ -1507,7 +1565,9 @@ arm_loop:
 
        /* Execute ARM instruction */
        using_instruction(arm);
+      CPU_PROF_ARM();
        check_pc_region();
+      CPU_PROF_PC_REGION(reg[REG_PC]);
        reg[REG_PC] &= ~0x03;
        opcode = readaddress32(pc_address_block, (reg[REG_PC] & 0x7FFF));
        condition = opcode >> 28;
@@ -2083,6 +2143,7 @@ arm_loop:
                    {
                       reg[REG_PC] = src - 1;
                       reg[REG_CPSR] |= 0x20;
+                     CPU_PROF_SWITCH_TO_THUMB();
                       goto thumb_loop;
                    }
                    else
@@ -3048,21 +3109,34 @@ skip_instruction:
        if (reg[REG_PC] == idle_loop_target_pc && cycles_remaining > 0) cycles_remaining = 0;
 
        if (cpu_alert & (CPU_ALERT_HALT | CPU_ALERT_IRQ))
+      {
+         CPU_PROF_CORE_COMMIT();
          goto alert;
+      }
 
+      if(reg[REG_CPSR] & 0x20)
+      {
+         CPU_PROF_SWITCH_TO_THUMB();
+         goto thumb_loop;
+      }
     } while(cycles_remaining > 0);
 
+    CPU_PROF_CORE_COMMIT();
     collapse_flags();
     update_ret = update_gba(cycles_remaining);
     if (completed_frame(update_ret))
+    {
+       CPU_PROF_TOTAL_END();
+       CPU_PROF_FRAME();
        return;
+    }
     cycles_remaining = cycles_to_run(update_ret);
+      CPU_PROF_CORE_RESET_STATE();
     continue;
 
     do
     {
 thumb_loop:
-
        collapse_flags();
 
        /* Process cheats if we are about to execute the cheat hook */
@@ -3072,7 +3146,9 @@ thumb_loop:
        /* Execute THUMB instruction */
 
        using_instruction(thumb);
+      CPU_PROF_THUMB();
        check_pc_region();
+      CPU_PROF_PC_REGION(reg[REG_PC]);
        reg[REG_PC] &= ~0x01;
        opcode = readaddress16(pc_address_block, (reg[REG_PC] & 0x7FFF));
 
@@ -3281,6 +3357,7 @@ thumb_loop:
                    reg[REG_PC] = src;
                    reg[REG_CPSR] &= ~0x20;
                    collapse_flags();
+                   CPU_PROF_SWITCH_TO_ARM();
                    goto arm_loop;
                 }
              }
@@ -3487,6 +3564,7 @@ thumb_loop:
              reg[REG_CPSR] = (reg[REG_CPSR] & ~0x3F) | 0x13 | 0x80;
              set_cpu_mode(MODE_SUPERVISOR);
              reg[REG_BUS_VALUE] = 0xe3a02004;  // After SWI, we read bios[0xE4]
+             CPU_PROF_SWITCH_TO_ARM();
              goto arm_loop;
              break;
 
@@ -3528,15 +3606,30 @@ thumb_loop:
        if (reg[REG_PC] == idle_loop_target_pc && cycles_remaining > 0) cycles_remaining = 0;
 
        if (cpu_alert & (CPU_ALERT_HALT | CPU_ALERT_IRQ))
+       {
+          CPU_PROF_CORE_COMMIT();
           goto alert;
+       }
+
+       if((reg[REG_CPSR] & 0x20) == 0)
+       {
+          CPU_PROF_SWITCH_TO_ARM();
+          goto arm_loop;
+       }
 
     } while(cycles_remaining > 0);
 
+    CPU_PROF_CORE_COMMIT();
     collapse_flags();
     update_ret = update_gba(cycles_remaining);
     if (completed_frame(update_ret))
+    {
+       CPU_PROF_TOTAL_END();
+       CPU_PROF_FRAME();
        return;
+    }
     cycles_remaining = cycles_to_run(update_ret);
+    CPU_PROF_CORE_RESET_STATE();
     continue;
 
     alert:
@@ -3544,6 +3637,11 @@ thumb_loop:
       collapse_flags();
   }
 }
+
+#undef CPU_PROF_CORE_COMMIT
+#undef CPU_PROF_SWITCH_TO_THUMB
+#undef CPU_PROF_SWITCH_TO_ARM
+#undef CPU_PROF_CORE_RESET_STATE
 
 void init_cpu(void)
 {

@@ -247,13 +247,14 @@
 #define rv_fence()               rv_emit(0x0FF0000F)
 
 /* ---- Rotate helpers (synthesized for RV32IMAC without Zbb) ---- */
+/* NOTE: slli/sll MUST come before srli/srl so that rd==rs is safe. */
 #define rv_rori(rd, rs, shamt, tmp) do {                   \
     u32 _shamt = (u32)(shamt) & 31;                        \
     if (_shamt == 0) {                                     \
         rv_mv(rd, rs);                                     \
     } else {                                               \
-        rv_srli(rd, rs, _shamt);                           \
         rv_slli(tmp, rs, 32 - _shamt);                     \
+        rv_srli(rd, rs, _shamt);                           \
         rv_or(rd, rd, tmp);                                \
     }                                                      \
 } while(0)
@@ -262,8 +263,8 @@
     rv_andi(tmp, shreg, 31);                               \
     rv_sub(tmp2, rv_zero, tmp);                            \
     rv_andi(tmp2, tmp2, 31);                               \
-    rv_srl(rd, rs, tmp);                                   \
     rv_sll(tmp2, rs, tmp2);                                \
+    rv_srl(rd, rs, tmp);                                   \
     rv_or(rd, rd, tmp2);                                   \
 } while(0)
 

@@ -24,6 +24,7 @@
 
 extern "C" {
   #include "common.h"
+  #include "cpu_instrument.h"
 }
 
 #if defined(CONFIG_IDF_TARGET_ESP32P4) && \
@@ -162,6 +163,9 @@ void video_reload_counters()
 // If isbase is not set, color 0 is interpreted as transparent, otherwise
 // we are drawing the base layer, so palette[0] is used (backdrop).
 
+template<typename dtype, rendtype rdtype>
+static inline void fill_base_pixels(dtype *dst, u32 count, u16 bgcolor, u32 bg_comb);
+
 template<typename dtype, rendtype rdtype, bool is8bpp, bool isbase, bool hflip>
 static inline void rend_part_tile_Nbpp(u32 bg_comb, u32 px_comb,
   dtype *dest_ptr, u32 start, u32 end, u16 tile,
@@ -208,6 +212,10 @@ static inline void rend_part_tile_Nbpp(u32 bg_comb, u32 px_comb,
     u32 tilepix = eswap32(*(u32*)tile_ptr);
     if (hflip) tilepix <<= (start * 4);
     else       tilepix >>= (start * 4);
+    if (isbase && tilepix == 0) {
+      fill_base_pixels<dtype, rdtype>(dest_ptr, end - start, bgcolor, bg_comb);
+      return;
+    }
     // Only 32 bits (8 pixels * 4 bits)
     for (u32 i = start; i < end; i++, dest_ptr++) {
       u8 pval = hflip ? tilepix >> 28 : tilepix & 0xF;
@@ -263,9 +271,9 @@ static inline void render_tile_Nbpp(
           }
         }
       } else {
-        for (u32 i = 0; i < 4; i++, dest_ptr++)
-          if (isbase)
-            *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+        if (isbase)
+          fill_base_pixels<dtype, rdtype>(dest_ptr, 4, bgcolor, bg_comb);
+        dest_ptr += 4;
       }
     }
   } else {
@@ -290,8 +298,7 @@ static inline void render_tile_Nbpp(
       }
     } else if (isbase) {
       // In this case we simply fill the pixels with background pixels
-      for (u32 i = 0; i < 8; i++, dest_ptr++)
-        *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+      fill_base_pixels<dtype, rdtype>(dest_ptr, 8, bgcolor, bg_comb);
     }
   }
 }
@@ -574,18 +581,34 @@ static void render_scanline_text(u32 layer,
 
   if (has_mosaic) {
     if (is8bpp)
+    {
+      CPU_PROF_SCOPE_BEGIN(bg_text_begin);
       render_scanline_text_mosaic<stype, rdtype, isbase, true>(
         layer, start, end, scanline, paltbl);
+      CPU_PROF_SCOPE_ACC(scanline_bg_text_mosaic_cycles, bg_text_begin);
+    }
     else
+    {
+      CPU_PROF_SCOPE_BEGIN(bg_text_begin);
       render_scanline_text_mosaic<stype, rdtype, isbase, false>(
         layer, start, end, scanline, paltbl);
+      CPU_PROF_SCOPE_ACC(scanline_bg_text_mosaic_cycles, bg_text_begin);
+    }
   } else {
     if (is8bpp)
+    {
+      CPU_PROF_SCOPE_BEGIN(bg_text_begin);
       render_scanline_text_fast<stype, rdtype, isbase, true>(
         layer, start, end, scanline, paltbl);
+      CPU_PROF_SCOPE_ACC(scanline_bg_text_fast_cycles, bg_text_begin);
+    }
     else
+    {
+      CPU_PROF_SCOPE_BEGIN(bg_text_begin);
       render_scanline_text_fast<stype, rdtype, isbase, false>(
         layer, start, end, scanline, paltbl);
+      CPU_PROF_SCOPE_ACC(scanline_bg_text_fast_cycles, bg_text_begin);
+    }
   }
 }
 
@@ -783,6 +806,7 @@ template<typename dsttype, rendtype rdtype, bool isbase>
 static void render_scanline_affine(u32 layer,
  u32 start, u32 end, void *scanline, const u16 *pal)
 {
+  CPU_PROF_SCOPE_BEGIN(bg_affine_begin);
   u32 bg_control = read_ioreg(REG_BGxCNT(layer));
   u32 map_size = (bg_control >> 14) & 0x03;
 
@@ -821,6 +845,7 @@ static void render_scanline_affine(u32 layer,
   };
 
   rdfns[fidx](layer, start, cnt, map_base, map_size, tile_base, dest_ptr, pal);
+  CPU_PROF_SCOPE_ACC(scanline_bg_affine_cycles, bg_affine_begin);
 }
 
 template<rendtype rdmode, typename buftype, unsigned mode, typename pixfmt>
@@ -859,6 +884,7 @@ template<rendtype rdtype, typename dsttype, // Rendering target type and format
 static inline void render_scanline_bitmap(
   u32 start, u32 end, void *scanline, const u16 * palptr
 ) {
+  CPU_PROF_SCOPE_BEGIN(bg_bitmap_begin);
   s32 dx = (s16)read_ioreg(REG_BG2PA);
   s32 dy = (s16)read_ioreg(REG_BG2PC);
   s32 source_x = affine_reference_x[0] + (start * dx); // Always BG2
@@ -959,6 +985,8 @@ static inline void render_scanline_bitmap(
       source_y += dy;
     }
   }
+
+  CPU_PROF_SCOPE_ACC(scanline_bg_bitmap_cycles, bg_bitmap_begin);
 }
 
 // Object/Sprite rendering logic
@@ -1746,6 +1774,28 @@ static inline void fill_pixels_linear(u32 *dst, u32 count, u32 value) {
 #endif
 }
 
+template<typename dtype, rendtype rdtype>
+static inline void fill_base_pixels(dtype *dst, u32 count, u16 bgcolor, u32 bg_comb) {
+  if constexpr (sizeof(dtype) == sizeof(u16)) {
+    if (rdtype == FULLCOLOR)
+      fill_pixels_linear((u16*)dst, count, bgcolor);
+    else
+      fill_pixels_linear((u16*)dst, count, (u16)bg_comb);
+  } else if constexpr (sizeof(dtype) == sizeof(u32)) {
+    if (rdtype == FULLCOLOR)
+      fill_pixels_linear((u32*)dst, count, (u32)bgcolor);
+    else
+      fill_pixels_linear((u32*)dst, count, (u32)bg_comb);
+  } else {
+    while (count--) {
+      if (rdtype == FULLCOLOR)
+        *dst++ = bgcolor;
+      else
+        *dst++ = bg_comb;
+    }
+  }
+}
+
 // Applies blending (and optional brighten/darken) effect to a bunch of
 // color-indexed pixel pairs. Depending on the mode and the pixel target
 // number, blending, darken/brighten or no effect will be applied.
@@ -1937,12 +1987,14 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
         fill_line_background<bgmode, dsttype>(start, end, dst_ptr);
 
       // Optimization: skip blending mode if no blending can happen to this layer
+      CPU_PROF_SCOPE_BEGIN(obj_begin);
       if (objmode == STCKCOLOR && can_skip_blend)
         render_scanline_objs<dsttype, INDXCOLOR>(
           layer & 0x3, start, end, dst_ptr, &palette_ram_converted[0x100]);
       else
         render_scanline_objs<dsttype, objmode>(
           layer & 0x3, start, end, dst_ptr, &palette_ram_converted[0x100]);
+      CPU_PROF_SCOPE_ACC(scanline_obj_cycles, obj_begin);
 
       base_done = 1;
     }
@@ -1962,7 +2014,9 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
           render_scanline_affine<dsttype, INDXCOLOR, true>,
           render_scanline_affine<dsttype, INDXCOLOR, false>,
         };
+        CPU_PROF_SCOPE_BEGIN(bg_begin);
         rdfns[fnidx](layer, start, end, dst_ptr, palette_ram_converted);
+        CPU_PROF_SCOPE_ACC(scanline_bg_cycles, bg_begin);
       } else {
         static const tile_render_function rdfns[4] = {
           render_scanline_text<dsttype, bgmode, true>,
@@ -1970,7 +2024,9 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
           render_scanline_affine<dsttype, bgmode, true>,
           render_scanline_affine<dsttype, bgmode, false>,
         };
+        CPU_PROF_SCOPE_BEGIN(bg_begin);
         rdfns[fnidx](layer, start, end, dst_ptr, palette_ram_converted);
+        CPU_PROF_SCOPE_ACC(scanline_bg_cycles, bg_begin);
       }
 
       base_done = 1;
@@ -2017,10 +2073,14 @@ static void render_w_effects(
         if (obj_blend) {
           u32 tmp_buf[240];
           renderers->indexed_u32(start, end, tmp_buf, enable_flags);
+          CPU_PROF_SCOPE_BEGIN(effect_begin);
           merge_blend<BLEND_BRIGHT, true>(start, end, scanline, tmp_buf);
+          CPU_PROF_SCOPE_ACC(scanline_effect_cycles, effect_begin);
         } else {
           renderers->indexed_u16(start, end, scanline, enable_flags);
+          CPU_PROF_SCOPE_BEGIN(effect_begin);
           merge_brightness<BLEND_BRIGHT>(start, end, scanline);
+          CPU_PROF_SCOPE_ACC(scanline_effect_cycles, effect_begin);
         }
         return;
       }
@@ -2037,10 +2097,14 @@ static void render_w_effects(
         if (obj_blend) {
           u32 tmp_buf[240];
           renderers->indexed_u32(start, end, tmp_buf, enable_flags);
+          CPU_PROF_SCOPE_BEGIN(effect_begin);
           merge_blend<BLEND_DARK, true>(start, end, scanline, tmp_buf);
+          CPU_PROF_SCOPE_ACC(scanline_effect_cycles, effect_begin);
         } else {
           renderers->indexed_u16(start, end, scanline, enable_flags);
+          CPU_PROF_SCOPE_BEGIN(effect_begin);
           merge_brightness<BLEND_DARK>(start, end, scanline);
+          CPU_PROF_SCOPE_ACC(scanline_effect_cycles, effect_begin);
         }
         return;
       }
@@ -2057,10 +2121,12 @@ static void render_w_effects(
       if (some_1st_tgt && some_2nd_tgt && non_trns_tgt) {
         u32 tmp_buf[240];
         renderers->stacked(start, end, tmp_buf, enable_flags);
+        CPU_PROF_SCOPE_BEGIN(effect_begin);
         if (obj_blend)
           merge_blend<BLEND_ONLY, true>(start, end, scanline, tmp_buf);
         else
           merge_blend<BLEND_ONLY, false>(start, end, scanline, tmp_buf);
+        CPU_PROF_SCOPE_ACC(scanline_effect_cycles, effect_begin);
         return;
       }
     }
@@ -2075,7 +2141,9 @@ static void render_w_effects(
   if (obj_blend) {
     u32 tmp_buf[240];
     renderers->stacked(start, end, tmp_buf, enable_flags);
+    CPU_PROF_SCOPE_BEGIN(effect_begin);
     merge_blend<OBJ_BLEND, true>(start, end, scanline, tmp_buf);
+    CPU_PROF_SCOPE_ACC(scanline_effect_cycles, effect_begin);
   } else {
     renderers->fullcolor(start, end, scanline, enable_flags);
   }
@@ -2143,12 +2211,14 @@ static void bitmap_render_layers(
         bool can_skip_blend = !has_trans_obj && !objlayer_is_1st_tgt;
 
         // Optimization: skip blending mode if no blending can happen to this layer
+        CPU_PROF_SCOPE_BEGIN(obj_begin);
         if (objmode == STCKCOLOR && can_skip_blend)
           render_scanline_objs<dsttype, INDXCOLOR>(
             current_layer & 3, start, end, scanline, &palette_ram_converted[0x100]);
         else
           render_scanline_objs<dsttype, objmode>(
             current_layer & 3, start, end, scanline, &palette_ram_converted[0x100]);
+        CPU_PROF_SCOPE_ACC(scanline_obj_cycles, obj_begin);
       }
     }
     else
@@ -2162,12 +2232,14 @@ static void bitmap_render_layers(
         const bitmap_layer_render_struct *rd =
           (bgmode == STCKCOLOR && can_skip_blend) ? idxm_rend : mode_rend;
 
+        CPU_PROF_SCOPE_BEGIN(bg_begin);
         if (dy)
           rd->affine_render(start, end, scanline, palette_ram_converted);
         else if (dx == 256)
           rd->blit_render(start, end, scanline, palette_ram_converted);
         else
           rd->scale_render(start, end, scanline, palette_ram_converted);
+        CPU_PROF_SCOPE_ACC(scanline_bg_cycles, bg_begin);
       }
     }
   }
@@ -2376,20 +2448,29 @@ void update_scanline(void)
   // reorder and reprofile the OBJ lists.
   if(reg[OAM_UPDATED])
   {
+    CPU_PROF_SCOPE_BEGIN(order_begin);
     order_obj(video_mode);
+    CPU_PROF_SCOPE_ACC(scanline_order_cycles, order_begin);
     reg[OAM_UPDATED] = 0;
   }
 
+  CPU_PROF_SCOPE_BEGIN(order_begin);
   order_layers((dispcnt >> 8) & active_layers[video_mode], vcount);
+  CPU_PROF_SCOPE_ACC(scanline_order_cycles, order_begin);
 
   // If the screen is in in forced blank draw pure white.
   if(dispcnt & 0x80)
+  {
+    CPU_PROF_SCOPE_BEGIN(blank_begin);
     memset(screen_offset, 0xff, 240*sizeof(u16));
+    CPU_PROF_SCOPE_ACC(scanline_blank_cycles, blank_begin);
+  }
   else
     render_scanline_window(screen_offset);
 
   // Mode 0 does not use any affine params at all.
   if (video_mode) {
+    CPU_PROF_SCOPE_BEGIN(affine_begin);
     // Account for vertical mosaic effect, by correcting affine references.
     const u32 bgmosv = ((read_ioreg(REG_MOSAIC) >> 4) & 0xF) + 1;
 
@@ -2412,6 +2493,7 @@ void update_scanline(void)
       affine_reference_x[1] += (s16)read_ioreg(REG_BG3PB);
       affine_reference_y[1] += (s16)read_ioreg(REG_BG3PD);
     }
+    CPU_PROF_SCOPE_ACC(scanline_affine_cycles, affine_begin);
   }
 }
 

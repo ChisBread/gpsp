@@ -56,45 +56,29 @@ _##symbol:
 #define SUPERVISOR_LR      (REGMODE_RAM_OFF + (3 * (7 * 4)) + (6 * 4))
 
 /* Stack frame layout (bytes from sp):
- *   0:  ra
- *   4:  s0
- *   8:  s1
- *  12:  s2
- *  16:  s3
- *  20:  s4
- *  24:  s5
- *  28:  s6
- *  32:  s7
- *  36:  s8
- *  40:  s9
- *  44:  s10
- *  48:  s11
+ *   0:  s0
+ *   4:  s1
+ *   8:  s2
+ *  12:  s3
+ *  16:  s4
+ *  20:  s5
+ *  24:  s6
+ *  28:  s7
+ *  32:  s8
+ *  36:  s9
+ *  40:  s10
+ *  44:  s11
+ *  48:  ra
  *  52:  gp
  *  56:  tp
  *  60:  jit tp (cycles)
  *  64:  jit gp (reg base)
+ *  68-79: padding to preserve 16-byte stack alignment across C calls
  */
-#define FRAME_SIZE         72
-
-#define load_registers()                        \
-    lw s0,  REG_R0(gp);                          \
-    lw s1,  REG_R1(gp);                          \
-    lw a3,  REG_R2(gp);                          \
-    lw a4,  REG_R3(gp);                          \
-    lw a5,  REG_R4(gp);                          \
-    lw a6,  REG_R5(gp);                          \
-    lw s2,  REG_R6(gp);                          \
-    lw a7,  REG_R7(gp);                          \
-    lw t4,  REG_R8(gp);                          \
-    lw s3,  REG_R9(gp);                          \
-    lw s4,  REG_R10(gp);                         \
-    lw t5,  REG_R11(gp);                         \
-    lw s5,  REG_R12(gp);                         \
-    lw t6,  REG_R13(gp);                         \
-    lw s6,  REG_R14(gp);                         \
-    lw s7,  REG_PC(gp)
+#define FRAME_SIZE         80
 
 #define store_registers()                       \
+    sw t3, REG_SAVE2(gp);                        \
     sw s0,  REG_R0(gp);                          \
     sw s1,  REG_R1(gp);                          \
     sw a3,  REG_R2(gp);                          \
@@ -111,6 +95,25 @@ _##symbol:
     sw t6,  REG_R13(gp);                         \
     sw s6,  REG_R14(gp);                         \
     sw s7,  REG_PC(gp)
+
+#define load_registers()                        \
+    lw t3, REG_SAVE2(gp);                        \
+    lw s0,  REG_R0(gp);                          \
+    lw s1,  REG_R1(gp);                          \
+    lw a3,  REG_R2(gp);                          \
+    lw a4,  REG_R3(gp);                          \
+    lw a5,  REG_R4(gp);                          \
+    lw a6,  REG_R5(gp);                          \
+    lw s2,  REG_R6(gp);                          \
+    lw a7,  REG_R7(gp);                          \
+    lw t4,  REG_R8(gp);                          \
+    lw s3,  REG_R9(gp);                          \
+    lw s4,  REG_R10(gp);                         \
+    lw t5,  REG_R11(gp);                         \
+    lw s5,  REG_R12(gp);                         \
+    lw t6,  REG_R13(gp);                         \
+    lw s6,  REG_R14(gp);                         \
+    lw s7,  REG_PC(gp)
 
 #define extract_flags(tmpreg)                   \
     lw   tmpreg, REG_CPSR(gp);                   \
@@ -260,7 +263,7 @@ return_from_jit:
     ret
 
 defsymbl(rv_update_gba)
-    sw   a0, REG_PC(gp)
+    mv   s7, a0                  /* update s7 so store_registers saves correct PC */
     sw   ra, REG_SAVE(gp)
     store_registers()
     consolidate_flags(t0, t1)
@@ -351,6 +354,7 @@ defsymbl(rv_indirect_branch_dual)
 
 defsymbl(rv_execute_load_u8)
     sw   ra, REG_SAVE(gp)
+    sw   a1, REG_PC(gp)
     store_registers()
     consolidate_flags(t0, t1)
     mv   s11, gp
@@ -369,6 +373,7 @@ defsymbl(rv_execute_load_u8)
 
 defsymbl(rv_execute_load_s8)
     sw   ra, REG_SAVE(gp)
+    sw   a1, REG_PC(gp)
     store_registers()
     consolidate_flags(t0, t1)
     mv   s11, gp
@@ -387,6 +392,7 @@ defsymbl(rv_execute_load_s8)
 
 defsymbl(rv_execute_load_u16)
     sw   ra, REG_SAVE(gp)
+    sw   a1, REG_PC(gp)
     store_registers()
     consolidate_flags(t0, t1)
     mv   s11, gp
@@ -405,6 +411,7 @@ defsymbl(rv_execute_load_u16)
 
 defsymbl(rv_execute_load_s16)
     sw   ra, REG_SAVE(gp)
+    sw   a1, REG_PC(gp)
     store_registers()
     consolidate_flags(t0, t1)
     mv   s11, gp
@@ -423,6 +430,7 @@ defsymbl(rv_execute_load_s16)
 
 defsymbl(rv_execute_load_u32)
     sw   ra, REG_SAVE(gp)
+    sw   a1, REG_PC(gp)
     store_registers()
     consolidate_flags(t0, t1)
     mv   s11, gp
@@ -441,6 +449,7 @@ defsymbl(rv_execute_load_u32)
 
 defsymbl(rv_execute_aligned_load32)
     sw   ra, REG_SAVE(gp)
+    sw   a1, REG_PC(gp)
     store_registers()
     consolidate_flags(t0, t1)
     mv   s11, gp
@@ -459,6 +468,7 @@ defsymbl(rv_execute_aligned_load32)
 
 defsymbl(rv_execute_store_u8)
     sw   ra, REG_SAVE(gp)
+    sw   a2, REG_PC(gp)
     store_registers()
     consolidate_flags(t0, t1)
     mv   s11, gp
@@ -475,6 +485,7 @@ defsymbl(rv_execute_store_u8)
 
 defsymbl(rv_execute_store_u16)
     sw   ra, REG_SAVE(gp)
+    sw   a2, REG_PC(gp)
     store_registers()
     consolidate_flags(t0, t1)
     mv   s11, gp
@@ -491,6 +502,7 @@ defsymbl(rv_execute_store_u16)
 
 defsymbl(rv_execute_store_u32)
     sw   ra, REG_SAVE(gp)
+    sw   a2, REG_PC(gp)
     store_registers()
     consolidate_flags(t0, t1)
     mv   s11, gp
@@ -507,6 +519,7 @@ defsymbl(rv_execute_store_u32)
 
 defsymbl(rv_execute_aligned_store32)
     sw   ra, REG_SAVE(gp)
+    sw   a2, REG_PC(gp)
     store_registers()
     consolidate_flags(t0, t1)
     mv   s11, gp
@@ -551,19 +564,20 @@ defsymbl(execute_read_spsr)
     ret
 
 defsymbl(execute_store_cpsr)
-    /* a0=new cpsr, a1=current pc, a2=user mask, t0=privileged mask */
+    /* a0=new cpsr, a1=current pc, a2=user mask, t2=privileged mask */
+    sw   a1, REG_PC(gp)
     lw   t1, CPU_MODE(gp)
     andi t1, t1, 0x10
     beqz t1, 1f
-    mv   t1, t0
+    mv   t1, t2
     j    2f
 1:
     mv   t1, a2
 2:
     lw   t2, REG_CPSR(gp)
     and  a0, a0, t1
-    xori t3, t1, -1
-    and  t2, t2, t3
+    xori t0, t1, -1
+    and  t2, t2, t0
     or   a0, a0, t2
     sw   a0, REG_CPSR(gp)
     extract_flags(a2)
@@ -606,14 +620,15 @@ defsymbl(execute_store_spsr)
     add  t1, t1, t0
     lw   t2, 0(t1)
     and  a0, a0, a1
-    xori t3, a1, -1
-    and  t2, t2, t3
+    xori t0, a1, -1
+    and  t2, t2, t0
     or   a0, a0, t2
     sw   a0, 0(t1)
     ret
 
 defsymbl(execute_spsr_restore)
     /* a0=current pc */
+    sw   a0, REG_PC(gp)
     lw   t0, CPU_MODE(gp)
     andi t0, t0, 0x0f
     beqz t0, 1f
@@ -642,6 +657,7 @@ defsymbl(execute_spsr_restore)
 defsymbl(execute_swi)
     /* a0=current pc */
     sw   ra, REG_SAVE(gp)
+    sw   a0, REG_PC(gp)
     sw   a0, SUPERVISOR_LR(gp)
     consolidate_flags(t0, t1)
     sw   t0, SUPERVISOR_SPSR(gp)

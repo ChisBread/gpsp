@@ -28,6 +28,7 @@ u32 execute_read_cpsr(void);
 u32 execute_read_spsr(void);
 void execute_swi(u32 pc);
 void rv_cheat_hook(void);
+u32 jit_call_c_trampoline(uintptr_t function_ptr, u32 arg0, u32 arg1, u32 arg2);
 
 u32 rv_execute_load_u8(u32 address);
 u32 rv_execute_load_s8(u32 address);
@@ -97,6 +98,17 @@ void execute_aligned_store32(u32 addr, u32 data)
 u32 execute_aligned_load32(u32 addr)
 {
     return read_memory32(addr);
+}
+
+void rv_bad_pc_trap(u32 bad_pc)
+{
+    printf("DYNAREC BAD PC: 0x%08x (REG_PC=0x%08x CPSR=0x%08x)\n",
+           bad_pc, reg[REG_PC], reg[REG_CPSR]);
+    printf("  r0=%08x r1=%08x r2=%08x r3=%08x\n", reg[0], reg[1], reg[2], reg[3]);
+    printf("  r4=%08x r5=%08x r6=%08x r7=%08x\n", reg[4], reg[5], reg[6], reg[7]);
+    printf("  r8=%08x r9=%08x r10=%08x r11=%08x\n", reg[8], reg[9], reg[10], reg[11]);
+    printf("  r12=%08x sp=%08x lr=%08x\n", reg[12], reg[13], reg[14]);
+    fflush(stdout);
 }
 
 u32 execute_spsr_restore_body(u32 address)
@@ -397,9 +409,25 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_cycle_update();                                                    \
     generate_indirect_branch_no_cycle_update(type)                              \
 
+/* ---- JIT block entry marker for hang debugging ---- */
+#ifdef JIT_TRACE_ENABLED
+volatile u32 jit_block_entry_pc;
+#endif
+
 #define block_prologue_size 0
 #define generate_block_prologue()                                             \
-    generate_load_imm(reg_pc, stored_pc)                                        \
+    generate_load_imm(reg_pc, stored_pc);                                     \
+    _jit_emit_block_entry_marker(stored_pc)
+
+#ifdef JIT_TRACE_ENABLED
+#define _jit_emit_block_entry_marker(pc_val) do {                             \
+    /* Store reg_pc to jit_block_entry_pc via t0 */                           \
+    rv_load_imm32(rv_t0, (u32)(uintptr_t)&jit_block_entry_pc);               \
+    rv_sw(reg_pc, rv_t0, 0);                                                  \
+} while(0)
+#else
+#define _jit_emit_block_entry_marker(pc_val)
+#endif
 
 #define check_generate_n_flag                                                 \
     (flag_status & 0x08)                                                        \
@@ -1055,12 +1083,13 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_load_reg(reg_a0, rm)                                             \
 
 #define arm_psr_load_new_imm()                                                \
+    ror(imm, imm, imm_ror);                                                   \
     generate_load_imm(reg_a0, imm)                                            \
 
 #define arm_psr_store_cpsr(op_type)                                           \
     generate_load_pc(reg_a1, (pc));                                           \
     generate_load_imm(reg_a2, cpsr_masks[psr_pfield][0]);                     \
-    generate_load_imm(reg_temp, cpsr_masks[psr_pfield][1]);                   \
+    generate_load_imm(reg_temp3, cpsr_masks[psr_pfield][1]);                  \
     generate_function_call(execute_store_cpsr)                                \
 
 #define arm_psr_store_spsr(op_type)                                           \
@@ -1252,11 +1281,13 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     (bit_count[(word) >> 8] + bit_count[(word) & 0xFF])                       \
 
 #define arm_block_memory_load()                                               \
+    generate_load_pc(reg_a1, (pc));                                           \
     generate_function_call(rv_execute_aligned_load32);                        \
     generate_store_reg(reg_res, i)                                            \
 
 #define arm_block_memory_store()                                              \
     generate_load_reg_pc(reg_a1, i, 8);                                       \
+    generate_load_pc(reg_a2, (pc + 4));                                       \
     generate_function_call(rv_execute_aligned_store32)                        \
 
 #define arm_block_memory_final_load(writeback_type)                           \
@@ -1474,26 +1505,10 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define arm_process_cheats()                                                  \
     generate_function_call(rv_cheat_hook)                                     \
 
-#ifdef TRACE_INSTRUCTIONS
-static void trace_instruction(u32 pc, u32 mode)
-{
-    if (mode)
-        printf("Executed arm %x\n", pc);
-    else
-        printf("Executed thumb %x\n", pc);
-#ifdef TRACE_REGISTERS
-    print_regs();
-#endif
-}
-
-#define emit_trace_instruction(pc, mode)                                      \
-    do { } while (0)
-#define emit_trace_thumb_instruction(pc) emit_trace_instruction(pc, 0)
-#define emit_trace_arm_instruction(pc)   emit_trace_instruction(pc, 1)
-#else
-#define emit_trace_thumb_instruction(pc)
-#define emit_trace_arm_instruction(pc)
-#endif
+/* Instruction tracing - currently disabled */
+#define emit_trace_instruction(pc, mode) do {} while(0)
+#define emit_trace_thumb_instruction(pc) do {} while(0)
+#define emit_trace_arm_instruction(pc)   do {} while(0)
 
 #define thumb_swi()                                                           \
     generate_load_pc(reg_a0, (pc + 2));                                       \
@@ -1637,11 +1652,13 @@ static void trace_instruction(u32 pc, u32 mode)
 #define thumb_block_address_postadjust_push_lr(base_reg)                      \
 
 #define thumb_block_memory_load()                                             \
+    generate_load_pc(reg_a1, (pc));                                           \
     generate_function_call(rv_execute_aligned_load32);                        \
     generate_store_reg(reg_res, i)                                            \
 
 #define thumb_block_memory_store()                                            \
     generate_load_reg(reg_a1, i);                                             \
+    generate_load_pc(reg_a2, (pc + 2));                                       \
     generate_function_call(rv_execute_aligned_store32);                       \
 
 #define thumb_block_memory_final_load()                                       \
@@ -1676,10 +1693,12 @@ static void trace_instruction(u32 pc, u32 mode)
 #define thumb_block_memory_extra_push_lr()                                    \
     generate_add_imm(reg_a0, reg_save0, (bit_count[reg_list] * 4));           \
     generate_load_reg(reg_a1, REG_LR);                                        \
+    generate_load_pc(reg_a2, (pc + 2));                                       \
     generate_function_call(rv_execute_aligned_store32);                       \
 
 #define thumb_block_memory_extra_pop_pc()                                     \
     generate_add_imm(reg_a0, reg_save0, (bit_count[reg_list] * 4));           \
+    generate_load_pc(reg_a1, (pc));                                           \
     generate_function_call(rv_execute_aligned_load32);                        \
     generate_indirect_branch_cycle_update(thumb)                              \
 
@@ -1870,14 +1889,14 @@ static void trace_instruction(u32 pc, u32 mode)
     {                                                                         \
         rv_sltu(reg_c_cache, _rd, _rn);                                       \
     }                                                                         \
+    generate_op_logic_flags(_rd)                                              \
     if (check_generate_v_flag)                                                \
     {                                                                         \
         rv_xor(reg_temp, _rn, _rd);                                           \
         rv_xor(reg_temp2, _rm, _rd);                                          \
         rv_and(reg_v_cache, reg_temp, reg_temp2);                             \
         rv_srli(reg_v_cache, reg_v_cache, 31);                                \
-    }                                                                         \
-    generate_op_logic_flags(_rd)
+    }
 
 #define generate_op_sub_flags(_rd, _rn, _rm)                                 \
     if (check_generate_c_flag)                                                \
@@ -1885,14 +1904,14 @@ static void trace_instruction(u32 pc, u32 mode)
         rv_sltu(reg_c_cache, _rn, _rm);                                       \
         rv_xori(reg_c_cache, reg_c_cache, 1);                                 \
     }                                                                         \
+    generate_op_logic_flags(_rd)                                              \
     if (check_generate_v_flag)                                                \
     {                                                                         \
         rv_xor(reg_temp, _rn, _rm);                                           \
         rv_xor(reg_temp2, _rn, _rd);                                          \
         rv_and(reg_v_cache, reg_temp, reg_temp2);                             \
         rv_srli(reg_v_cache, reg_v_cache, 31);                                \
-    }                                                                         \
-    generate_op_logic_flags(_rd)
+    }
 
 #define generate_op_arith_flags()                                             \
     /* RISC-V computes arithmetic flags directly in per-op helpers */
@@ -1904,9 +1923,12 @@ static void trace_instruction(u32 pc, u32 mode)
 #define emit_icache_sync()                                                    \
     asm volatile ("fence.i" ::: "memory")
 
+#include "riscv_selftest.h"
+
 void init_emitter(bool must_swap)
 {
     (void)must_swap;
+    jit_selftest();
     init_bios_hooks();
 }
 

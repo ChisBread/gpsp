@@ -22,6 +22,8 @@
 // - block memory needs psr swapping and user mode reg swapping
 
 #include "common.h"
+#include "cpu_instrument.h"
+#include "jit_trace.h"
 #if defined(VITA)
 #include <psp2/kernel/sysmem.h>
 #include <stdio.h>
@@ -290,15 +292,22 @@ typedef struct
 #endif
 
 void translate_icache_sync() {
+  CPU_PROF_SCOPE_BEGIN(dynarec_sync_begin);
+  bool synced = false;
     // Cache emitted code can only grow
     if (last_rom_translation_ptr < rom_translation_ptr) {
         platform_cache_sync(last_rom_translation_ptr, rom_translation_ptr);
         last_rom_translation_ptr = rom_translation_ptr;
+        synced = true;
     }
     if (last_ram_translation_ptr < ram_translation_ptr) {
         platform_cache_sync(last_ram_translation_ptr, ram_translation_ptr);
         last_ram_translation_ptr = ram_translation_ptr;
+        synced = true;
     }
+  if (synced)
+    CPU_PROF_INC(dynarec_icache_sync_count);
+  CPU_PROF_SCOPE_ACC(dynarec_icache_sync_cycles, dynarec_sync_begin);
 }
 
 /* End of Cache invalidation */
@@ -2575,12 +2584,13 @@ inline static ramtag_type* get_ram_tag(u16 tagval) {
 
 #define block_lookup_address_pc_thumb()                                       \
   u32 thumb = 1;                                                              \
-  pc &= ~0x01                                                                 \
+  pc &= ~0x01
 
 
 #define block_lookup_translate_builder(type)                                  \
 u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
 {                                                                             \
+  CPU_PROF_SCOPE_BEGIN(dynarec_lookup_begin);                                 \
   u8 pcregion = (pc >> 24);                                                   \
   u16 *location;                                                              \
   u32 block_tag;                                                              \
@@ -2608,14 +2618,20 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
       if (!trentry->offset_##type) {                                          \
         bool result;                                                          \
         u8 *blkptr = ram_translation_ptr + block_prologue_size;               \
+        CPU_PROF_INC(dynarec_lookup_misses);                                     \
         trentry->offset_##type = blkptr - ram_translation_cache;              \
         result = translate_block_##type(pc, true);                            \
                                                                               \
-        if (result)                                                           \
+        if (result) {                                                         \
+          CPU_PROF_SCOPE_ACC(dynarec_lookup_cycles, dynarec_lookup_begin);    \
           return blkptr;                                                      \
+        }                                                                     \
       } else {                                                                \
+        CPU_PROF_INC(dynarec_lookup_hits);                                       \
+        CPU_PROF_SCOPE_ACC(dynarec_lookup_cycles, dynarec_lookup_begin);      \
         return &ram_translation_cache[trentry->offset_##type];                \
       }                                                                       \
+      CPU_PROF_SCOPE_ACC(dynarec_lookup_cycles, dynarec_lookup_begin);        \
       return NULL;                                                            \
     }                                                                         \
                                                                               \
@@ -2632,9 +2648,12 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
       while(blk_offset)                                                       \
       {                                                                       \
         bhdr = (hashhdr_type*)&rom_translation_cache[blk_offset];             \
-        if(bhdr->pc_value == key)                                             \
+        if(bhdr->pc_value == key) {                                           \
+          CPU_PROF_INC(dynarec_lookup_hits);                                     \
+          CPU_PROF_SCOPE_ACC(dynarec_lookup_cycles, dynarec_lookup_begin);    \
           return &rom_translation_cache[                                      \
                   blk_offset + sizeof(hashhdr_type) + block_prologue_size];   \
+        }                                                                     \
                                                                               \
         blk_offset = bhdr->next_entry;                                        \
         blk_offset_addr = &bhdr->next_entry;                                  \
@@ -2643,17 +2662,21 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
       { /* Not found, go ahead and translate, and backfill the hash table */  \
         u8 *blkptr;                                                           \
         bool result;                                                          \
+        CPU_PROF_INC(dynarec_lookup_misses);                                     \
         bhdr = (hashhdr_type*)rom_translation_ptr;                            \
         bhdr->pc_value = key;                                                 \
         bhdr->next_entry = 0;                                                 \
         *blk_offset_addr = (u32)(rom_translation_ptr - rom_translation_cache);\
         rom_translation_ptr += sizeof(hashhdr_type);                          \
         blkptr = rom_translation_ptr + block_prologue_size;                   \
-        result = translate_block_##type(pc, false);                           \
+        result = translate_block_##type(pc, false);                                                                     \
                                                                               \
-        if (result)                                                           \
+        if (result) {                                                         \
+          CPU_PROF_SCOPE_ACC(dynarec_lookup_cycles, dynarec_lookup_begin);    \
           return blkptr;                                                      \
+        }                                                                     \
       }                                                                       \
+      CPU_PROF_SCOPE_ACC(dynarec_lookup_cycles, dynarec_lookup_begin);        \
       return NULL;                                                            \
     }                                                                         \
   }                                                                           \
@@ -2662,6 +2685,7 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
      points to some random place (perhaps due to being garbage). This can     \
      happen when especulatively compiling code in RAM. Perhaps the game       \
      patches these instructions later, which would trigger a flush */         \
+  CPU_PROF_SCOPE_ACC(dynarec_lookup_cycles, dynarec_lookup_begin);            \
   return (u8*)(~0);                                                           \
 }                                                                             \
 
@@ -2682,6 +2706,12 @@ u8 function_cc *block_lookup_address_dual(u32 pc)
   }
 }
 
+/* Wrapper called from asm stubs to trace indirect branches */
+void jit_trace_indirect_branch(u32 pc, u8 *host, int type)
+{
+  jit_trace_indirect(pc, host, type);
+}
+
 u8 function_cc *block_lookup_address_arm(u32 pc)
 {
   unsigned i;
@@ -2689,12 +2719,14 @@ u8 function_cc *block_lookup_address_arm(u32 pc)
     u8 *ret = block_lookup_translate_arm(pc);
     if (ret) {
       translate_icache_sync();
+      jit_trace_dispatch(pc, ret, 0);
       return ret;
     }
   }
 
   printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
   fflush(stdout);
+  jit_trace_dump_to_sd();
   return NULL;
 }
 
@@ -2705,11 +2737,13 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
     u8 *ret = block_lookup_translate_thumb(pc);
     if (ret) {
       translate_icache_sync();
+      jit_trace_dispatch(pc, ret, 1);
       return ret;
     }
   }
   printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
   fflush(stdout);
+  jit_trace_dump_to_sd();
   return NULL;
 }
 
@@ -3043,6 +3077,7 @@ if (ram_region) {                                                             \
 
 bool translate_block_arm(u32 pc, bool ram_region)
 {
+  CPU_PROF_SCOPE_BEGIN(dynarec_translate_begin);
   u32 opcode = 0;
   u32 last_opcode;
   u32 condition;
@@ -3067,6 +3102,12 @@ bool translate_block_arm(u32 pc, bool ram_region)
   generate_block_extra_vars_arm();
   arm_fix_pc();
 
+  CPU_PROF_INC(dynarec_translate_arm_blocks);
+  if (ram_region)
+    CPU_PROF_INC(dynarec_translate_arm_ram_blocks);
+
+  u8 *block_translate_start_arm;
+
   if(!pc_address_block)
     pc_address_block = load_gamepak_page(pc_region & 0x3FF);
 
@@ -3083,6 +3124,8 @@ bool translate_block_arm(u32 pc, bool ram_region)
   }
 
   generate_block_prologue();
+
+  block_translate_start_arm = translation_ptr;
 
   /* This is a function because it's used a lot more than it might seem (all
      of the data processing functions can access it), and its expansion was
@@ -3140,6 +3183,7 @@ bool translate_block_arm(u32 pc, bool ram_region)
         flush_translation_cache_ram();
       else
         flush_translation_cache_rom();
+      CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
       return false;
     }
 
@@ -3200,15 +3244,23 @@ bool translate_block_arm(u32 pc, bool ram_region)
     else
       translation_target = block_lookup_translate_arm(branch_target);
     if (!translation_target)
+    {
+      CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
       return false;
+    }
     generate_branch_patch_unconditional(
       external_block_exits[i].branch_source, translation_target);
   }
+  jit_trace_translate(block_start_pc, block_translate_start_arm,
+    (u32)(translation_ptr - block_translate_start_arm), 0);
+  jit_trace_block_opcodes(block_start_pc, block_end_pc, 0);
+  CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
   return true;
 }
 
 bool translate_block_thumb(u32 pc, bool ram_region)
 {
+  CPU_PROF_SCOPE_BEGIN(dynarec_translate_begin);
   u32 opcode = 0;
   u32 last_opcode;
   u32 condition;
@@ -3232,6 +3284,12 @@ bool translate_block_thumb(u32 pc, bool ram_region)
   generate_block_extra_vars_thumb();
   thumb_fix_pc();
 
+  CPU_PROF_INC(dynarec_translate_thumb_blocks);
+  if (ram_region)
+    CPU_PROF_INC(dynarec_translate_thumb_ram_blocks);
+
+  u8 *block_translate_start_thumb;
+
   if(!pc_address_block)
     pc_address_block = load_gamepak_page(pc_region & 0x3FF);
 
@@ -3247,6 +3305,8 @@ bool translate_block_thumb(u32 pc, bool ram_region)
   }
 
   generate_block_prologue();
+
+  block_translate_start_thumb = translation_ptr;
 
   /* This is a function because it's used a lot more than it might seem (all
      of the data processing functions can access it), and its expansion was
@@ -3303,6 +3363,7 @@ bool translate_block_thumb(u32 pc, bool ram_region)
         flush_translation_cache_ram();
       else
         flush_translation_cache_rom();
+      CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
       return false;
     }
 
@@ -3357,10 +3418,17 @@ bool translate_block_thumb(u32 pc, bool ram_region)
     else
       translation_target = block_lookup_translate_thumb(branch_target);
     if (!translation_target)
+    {
+      CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
       return false;
+    }
     generate_branch_patch_unconditional(
       external_block_exits[i].branch_source, translation_target);
   }
+  jit_trace_translate(block_start_pc, block_translate_start_thumb,
+    (u32)(translation_ptr - block_translate_start_thumb), 1);
+  jit_trace_block_opcodes(block_start_pc, block_end_pc, 1);
+  CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
   return true;
 }
 
@@ -3378,6 +3446,7 @@ void flush_translation_cache_ram(void)
 {
   /* Flushes RAM caches avoiding doing too much work (ie. wiping unused memory) */
   flush_ram_count++;
+  CPU_PROF_INC(dynarec_flush_ram_count);
   /*printf("ram flush %d (pc %x), %x to %x, %x to %x\n",
    flush_ram_count, reg[REG_PC], iwram_code_min, iwram_code_max,
    ewram_code_min, ewram_code_max);*/
@@ -3415,6 +3484,7 @@ void flush_translation_cache_ram(void)
 void flush_translation_cache_rom(void)
 {
   /* We flush the generated code except for everything below the watermark. */
+  CPU_PROF_INC(dynarec_flush_rom_count);
   last_rom_translation_ptr = &rom_translation_cache[rom_cache_watermark];
   rom_translation_ptr      = &rom_translation_cache[rom_cache_watermark];
 

@@ -17,6 +17,8 @@
 #include "av_pipeline.h"
 #include "common.h"
 #include "cpu.h"
+#include "cpu_instrument.h"
+#include "jit_trace.h"
 #include "gba_memory.h"
 #include "gba_session.h"
 #include "input_driver.h"
@@ -78,6 +80,33 @@ static gba_session_state_t s_session;
 static int64_t s_frame_start_us;
 static uint32_t s_fps_counter;
 static int64_t s_fps_timer_us;
+
+/* ---- JIT hang watchdog ---- */
+#if defined(HAVE_DYNAREC) && defined(JIT_TRACE_ENABLED)
+extern volatile u32 jit_block_entry_pc;
+static u32 s_watchdog_last_pc;
+static int s_watchdog_stuck_count;
+static esp_timer_handle_t s_jit_watchdog_timer;
+
+static void jit_watchdog_cb(void *arg)
+{
+    (void)arg;
+    u32 cur = jit_block_entry_pc;
+    if (cur != 0 && cur == s_watchdog_last_pc) {
+        s_watchdog_stuck_count++;
+        if (s_watchdog_stuck_count >= 2) {
+            ESP_LOGE(TAG, "JIT HANG detected! stuck_pc=0x%08lx count=%d",
+                     (unsigned long)cur, s_watchdog_stuck_count);
+            jit_trace_dump_to_sd();
+            ESP_LOGE(TAG, "Trace dumped. Halting watchdog.");
+            esp_timer_stop(s_jit_watchdog_timer);
+        }
+    } else {
+        s_watchdog_stuck_count = 0;
+    }
+    s_watchdog_last_pc = cur;
+}
+#endif
 
 /* Pre-allocated PSRAM buffer for state/save I/O (serialized access via command queue) */
 static GPSP_EXTRAM_BSS uint8_t s_state_io_buf[GBA_SESSION_STATE_IO_BUF_SIZE] __attribute__((aligned(16)));
@@ -610,14 +639,22 @@ void gba_emulation_task(void *param)
 
     (void)param;
 
-    ESP_LOGI(TAG, "Emulation task started on core %d", xPortGetCoreID());
+    ESP_LOGI(TAG, "Emulation task started on core %d, waiting 15s for monitor...", xPortGetCoreID());
+    vTaskDelay(pdMS_TO_TICKS(15000));
+    ESP_LOGI(TAG, "Starting emulation now");
     s_session.emulation_task = xTaskGetCurrentTaskHandle();
 
 #ifdef HAVE_DYNAREC
     /* init_emitter must run here (not in init_main on the main task)
        because dynarec translation recurses and needs the large emu stack. */
     init_emitter(gamepak_must_swap());
+    jit_trace_init();
+    ESP_LOGI(TAG, "JIT trace active, will dump after 5 frames or on error");
 #endif
+
+    /* Frame counter for trace auto-dump */
+    int jit_trace_frame_count = 0;
+    int64_t jit_watchdog_us = 0;
 
     s_fps_timer_us = esp_timer_get_time();
 
@@ -629,8 +666,22 @@ void gba_emulation_task(void *param)
         return;
     }
 
+#if defined(HAVE_DYNAREC) && defined(JIT_TRACE_ENABLED)
+    {
+        esp_timer_create_args_t wdog_args = {
+            .callback = jit_watchdog_cb,
+            .name = "jit_wdog",
+        };
+        if (esp_timer_create(&wdog_args, &s_jit_watchdog_timer) == ESP_OK) {
+            esp_timer_start_periodic(s_jit_watchdog_timer, 2000000); /* 2 seconds */
+            ESP_LOGI(TAG, "JIT watchdog timer started (2s period)");
+        }
+    }
+#endif
+
     while (1) {
         s_frame_start_us = esp_timer_get_time();
+        int64_t t0, t1, t2, t3, t4;
 
         if (gba_session_process_pending() != ESP_OK) {
             ESP_LOGW(TAG, "Failed to process pending GBA session request");
@@ -654,9 +705,21 @@ void gba_emulation_task(void *param)
         }
         skip_next_frame = 0;
 
+        t0 = esp_timer_get_time();
+
 #ifdef HAVE_DYNAREC
         if (dynarec_enable) {
+            CPU_PROF_SCOPE_BEGIN(dynarec_total_begin);
             execute_arm_translate(execute_cycles);
+            CPU_PROF_SCOPE_ACC(dynarec_total_cycles, dynarec_total_begin);
+            cpu_prof.dynarec_frames++;
+            jit_trace_frame();
+            jit_trace_frame_count++;
+            /* Auto-dump after first 5 frames to capture startup */
+            if (jit_trace_frame_count == 5) {
+                ESP_LOGI(TAG, "Auto-dumping JIT trace after %d frames", jit_trace_frame_count);
+                jit_trace_dump_to_sd();
+            }
         } else
 #endif
         {
@@ -664,16 +727,22 @@ void gba_emulation_task(void *param)
             execute_arm(execute_cycles);
         }
 
+        t1 = esp_timer_get_time();
+
         if (!skip_next_frame) {
             memcpy(video_buffer, gba_screen_pixels,
                    GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * sizeof(u16));
         }
+
+        t2 = esp_timer_get_time();
 
         if (av_pipeline_submit_slot(slot_index, skip_next_frame != 0, portMAX_DELAY) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to submit AV slot");
             vTaskDelete(NULL);
             return;
         }
+
+        t3 = esp_timer_get_time();
 
         if (s_session.stop_requested) {
             break;
@@ -685,13 +754,22 @@ void gba_emulation_task(void *param)
             return;
         }
 
+        t4 = esp_timer_get_time();
+
         s_fps_counter++;
         {
             int64_t now = esp_timer_get_time();
             if (now - s_fps_timer_us >= 1000000) {
-                ESP_LOGI(TAG, "FPS: %u | Free heap: %u KB",
+                ESP_LOGI(TAG, "FPS: %u | cpu: %lld us | copy: %lld us | submit: %lld us | acquire: %lld us | heap: %u KB",
                          (unsigned)s_fps_counter,
+                         (long long)(t1 - t0),
+                         (long long)(t2 - t1),
+                         (long long)(t3 - t2),
+                         (long long)(t4 - t3),
                          (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024));
+#ifdef CPU_PROFILE_STATS
+                cpu_prof_print();
+#endif
                 s_fps_counter = 0;
                 s_fps_timer_us = now;
             }

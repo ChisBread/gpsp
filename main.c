@@ -18,9 +18,15 @@
  */
 
 #include "common.h"
+#include "cpu_instrument.h"
+#include "jit_trace.h"
 #include <ctype.h>
 
 timer_type timer[4];
+
+#ifdef CPU_PROFILE_STATS
+cpu_profile_stats_t cpu_prof;
+#endif
 
 u32 frame_counter = 0;
 u32 cpu_ticks = 0;
@@ -123,7 +129,9 @@ u32 function_cc update_gba(int remaining_cycles)
   u32 frame_complete = 0;
   irq_type irq_raised = IRQ_NONE;
   int dma_cycles;
+  jit_trace_update_gba(remaining_cycles);
   trace_update_gba(remaining_cycles);
+  CPU_PROF_SCOPE_BEGIN(update_begin);
 
   remaining_cycles = MAX(remaining_cycles, -64);
 
@@ -138,10 +146,14 @@ u32 function_cc update_gba(int remaining_cycles)
     remaining_cycles = 0;
 
     // Timers can trigger DMA (usually sound) and consume cycles
+    CPU_PROF_SCOPE_BEGIN(timer_begin);
     dma_cycles = update_timers(&irq_raised, completed_cycles);
+    CPU_PROF_SCOPE_ACC(timer_cycles, timer_begin);
     // Check for serial port IRQs as well.
+    CPU_PROF_SCOPE_BEGIN(serial_begin);
     if (update_serial(completed_cycles))
       irq_raised |= IRQ_SERIAL;
+    CPU_PROF_SCOPE_ACC(serial_cycles, serial_begin);
 
     // Video count tracks the video cycles remaining until the next event
     video_count -= completed_cycles;
@@ -168,13 +180,19 @@ u32 function_cc update_gba(int remaining_cycles)
           if(reg[OAM_UPDATED])
             oam_update_count++;
 
+          CPU_PROF_SCOPE_BEGIN(scanline_begin);
           update_scanline();
+          CPU_PROF_SCOPE_ACC(scanline_cycles, scanline_begin);
 
           // Trigger the HBlank DMAs if enabled
           for (i = 0; i < 4; i++)
           {
             if(dma[i].start_type == DMA_START_HBLANK)
+            {
+              CPU_PROF_SCOPE_BEGIN(dma_begin);
               dma_transfer(i, &dma_cycles);
+              CPU_PROF_SCOPE_ACC(dma_cycles, dma_begin);
+            }
           }
         }
 
@@ -206,7 +224,11 @@ u32 function_cc update_gba(int remaining_cycles)
           for (i = 0; i < 4; i++)
           {
             if(dma[i].start_type == DMA_START_VBLANK)
+            {
+              CPU_PROF_SCOPE_BEGIN(dma_begin);
               dma_transfer(i, &dma_cycles);
+              CPU_PROF_SCOPE_ACC(dma_cycles, dma_begin);
+            }
           }
         }
         else if (vcount == 228)
@@ -230,7 +252,9 @@ u32 function_cc update_gba(int remaining_cycles)
           flush_ram_count = 0;
 
           // Force audio generation. Need to flush samples for this frame.
+          CPU_PROF_SCOPE_BEGIN(sound_begin);
           render_gbc_sound();
+          CPU_PROF_SCOPE_ACC(sound_cycles, sound_begin);
 
           // We completed a frame, tell the dynarec to exit to the main thread
           frame_complete = 0x80000000;
@@ -254,11 +278,17 @@ u32 function_cc update_gba(int remaining_cycles)
 
     // Flag any V/H blank interrupts, DMA IRQs, Vcount, etc.
     if (irq_raised)
+    {
+      CPU_PROF_SCOPE_BEGIN(irq_begin);
       flag_interrupt(irq_raised);
+      CPU_PROF_SCOPE_ACC(irq_cycles, irq_begin);
+    }
 
     // Raise any pending interrupts. This changes the CPU mode.
+    CPU_PROF_SCOPE_BEGIN(raise_irq_begin);
     if (check_and_raise_interrupts())
       changed_pc = 0x40000000;
+    CPU_PROF_SCOPE_ACC(irq_cycles, raise_irq_begin);
 
     // Figure out when we need to stop CPU execution. The next event is
     // a video event or a timer event, whatever happens first.
@@ -295,6 +325,8 @@ u32 function_cc update_gba(int remaining_cycles)
   // We voluntarily limit this. It is not accurate but it would be much harder.
   dma_cycles = MIN(64, dma_cycles);
   dma_cycles = MIN(execute_cycles, dma_cycles);
+
+  CPU_PROF_SCOPE_ACC(update_cycles, update_begin);
 
   return (execute_cycles - dma_cycles) | changed_pc | frame_complete;
 }
