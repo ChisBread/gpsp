@@ -25,6 +25,15 @@ menu "gpSP GBA Emulator"
             and the LRU paging mechanism loads remaining pages from SD on demand.
             With 32MB PSRAM, set to 32 to cache most ROMs entirely.
 
+    config GPSP_CPU_PROFILE_STATS
+        bool "Enable CPU profile statistics"
+        default n
+        help
+            Collect per-frame cycle counts for the CPU execution core,
+            video renderer, sound mixer, and other subsystems.
+            Results are printed to the log once per second.
+            Adds a small overhead to every measured scope.
+
     config GPSP_P4_SIMD_PIXEL_OPS
         bool "Enable ESP32-P4 PIE pixel ops"
         default n

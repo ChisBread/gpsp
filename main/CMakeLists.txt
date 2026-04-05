@@ -15,9 +15,9 @@ idf_component_register(
         lwip
 )
 
-target_compile_definitions(${COMPONENT_LIB} PUBLIC
-    CPU_PROFILE_STATS
-)
+if(CONFIG_GPSP_CPU_PROFILE_STATS)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC CPU_PROFILE_STATS)
+endif()
 
 target_link_libraries(${COMPONENT_LIB} INTERFACE
     "-u netpacket_poll_receive"

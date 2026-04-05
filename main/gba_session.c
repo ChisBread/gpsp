@@ -660,10 +660,12 @@ void gba_emulation_task(void *param)
 
 #ifdef HAVE_DYNAREC
         if (dynarec_enable) {
+            CPU_PROF_TOTAL_BEGIN();
             CPU_PROF_SCOPE_BEGIN(dynarec_total_begin);
             execute_arm_translate(execute_cycles);
             CPU_PROF_SCOPE_ACC(dynarec_total_cycles, dynarec_total_begin);
-            cpu_prof.dynarec_frames++;
+            CPU_PROF_TOTAL_END();
+            CPU_PROF_INC(dynarec_frames);
             CPU_PROF_FRAME();
         } else
 #endif

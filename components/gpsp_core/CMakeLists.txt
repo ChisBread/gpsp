@@ -73,8 +73,11 @@ idf_component_register(
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     INLINE=inline
     _GNU_SOURCE
-    CPU_PROFILE_STATS
 )
+
+if(CONFIG_GPSP_CPU_PROFILE_STATS)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC CPU_PROFILE_STATS)
+endif()
 
 if(CONFIG_GPSP_DYNAREC)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC

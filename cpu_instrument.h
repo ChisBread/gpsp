@@ -205,8 +205,9 @@
     ESP_LOGI("CPU_PROF", "    mode sw:    A->T %u  T->A %u  pc_reg %u  page_ld %u",
          arm_to_thumb, thumb_to_arm, pc_region_switches, gamepak_page_loads);
         if (cpu_prof.dynarec_frames) {
+       u32 dynarec_exec = (dynarec_total > update) ? (dynarec_total - update) : dynarec_total;
        ESP_LOGI("CPU_PROF", "    Dynarec:    %8u (%2u%%)",
-         dynarec_total, total ? (dynarec_total * 100) / total : 0);
+         dynarec_exec, total ? (dynarec_exec * 100) / total : 0);
        ESP_LOGI("CPU_PROF", "      lookup:   %8u | hit %u miss %u",
          dynarec_lookup, dynarec_hits, dynarec_misses);
        ESP_LOGI("CPU_PROF", "      xlate:    %8u | arm %u thumb %u | ram arm %u thumb %u",
