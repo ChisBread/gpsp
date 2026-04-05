@@ -141,6 +141,29 @@ _##symbol:
     sw   tmpreg, REG_CPSR(gp)
 
 /*
+ * Interrupt safety for JIT execution (gp / tp repurposed).
+ *
+ * The JIT uses gp as the ARM register-file base and tp as the cycle counter.
+ * ESP-IDF's _interrupt_handler (vectors.S) saves gp/tp on entry and restores
+ * them on return.  However it does NOT reload gp to the ABI __global_pointer$
+ * before calling C functions (rtos_int_enter, _global_interrupt_handler, etc.).
+ *
+ * If the linker applied relaxation, many C functions — including ISR handlers
+ * like mipi_dsi_bridge_isr_handler, task_wdt_isr, serial_ll_rx_handler — would
+ * contain gp-relative load/store instructions (e.g. lw a5, offset(gp)).
+ * Running those while gp holds the JIT register base crashes immediately.
+ *
+ * Solution: the top-level CMakeLists.txt passes -Wl,--no-relax to the linker,
+ * which prevents ALL relaxation of auipc+addi → gp-relative addressing.
+ * With this flag, no non-JIT code references gp, so it is safe for the JIT
+ * to hold non-ABI values in gp/tp while interrupts remain enabled.
+ *
+ * No csrci/csrsi mstatus bracketing is needed — interrupts stay enabled.
+ */
+#define jit_disable_interrupts()
+#define jit_enable_interrupts()
+
+/*
  * execute_arm_translate_internal(u32 cycles, void *reg_ptr)
  *   a0 = cycles
  *   a1 = &reg[0]
@@ -162,6 +185,8 @@ defsymbl(execute_arm_translate_internal)
     sw   s11, 48(sp)
     sw   gp,  52(sp)
     sw   tp,  56(sp)
+
+    jit_disable_interrupts()
 
     mv   t0, gp
     mv   t1, tp
@@ -185,14 +210,17 @@ defsymbl(execute_arm_translate_internal)
     andi t0, t0, 0x20
     lw   gp, 52(sp)
     lw   tp, 56(sp)
+    jit_enable_interrupts()
     beqz t0, 1f
     call block_lookup_address_thumb
+    jit_disable_interrupts()
     lw   gp, 64(sp)
     lw   tp, 60(sp)
     load_registers()
     jalr zero, a0, 0
 1:
     call block_lookup_address_arm
+    jit_disable_interrupts()
     lw   gp, 64(sp)
     lw   tp, 60(sp)
     load_registers()
@@ -203,15 +231,24 @@ defsymbl(execute_arm_translate_internal)
     sw   gp, 64(sp)
     lw   gp, 52(sp)
     lw   tp, 56(sp)
+    jit_enable_interrupts()
     lw   a0, 60(sp)
     call update_gba
+    jit_disable_interrupts()
     lw   gp, 64(sp)
-    mv   tp, a0
+    blt  a0, zero, .Lreturn_cycles_sleep
+    /* Clean cycle count: clear flag bits 30-31 (changed_pc, frame_complete) */
+    slli tp, a0, 2
+    srli tp, tp, 2
     sw   tp, 60(sp)
-    blt  a0, zero, .Lreturn_cycles
     lw   t0, CPU_HALT_STATE(gp)
     bnez t0, .Lcpu_sleep_loop
     j    .Llookup_pc
+
+.Lreturn_cycles_sleep:
+    /* frame_complete (bit 31) is set — clean cycle count and exit JIT */
+    slli tp, a0, 2
+    srli tp, tp, 2
 
 .Lreturn_cycles:
     mv   a0, tp
@@ -232,6 +269,7 @@ defsymbl(execute_arm_translate_internal)
     lw   s11, 48(sp)
     lw   gp,  52(sp)
     lw   tp,  56(sp)
+    jit_enable_interrupts()
     addi sp, sp, FRAME_SIZE
     ret
 
@@ -259,6 +297,7 @@ return_from_jit:
     lw   s11, 48(sp)
     lw   gp,  52(sp)
     lw   tp,  56(sp)
+    jit_enable_interrupts()
     addi sp, sp, FRAME_SIZE
     ret
 
@@ -271,6 +310,7 @@ defsymbl(rv_update_gba)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     mv   a0, s10
     call update_gba
     blt  a0, zero, .Lreturn_to_main
@@ -279,6 +319,7 @@ defsymbl(rv_update_gba)
     slli s10, a0, 2
     srli s10, s10, 2
 
+    jit_disable_interrupts()
     mv   gp, s11
     srli t0, a0, 30
     andi t0, t0, 1
@@ -289,8 +330,10 @@ defsymbl(rv_update_gba)
     andi t0, t0, 0x20
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     beqz t0, 2f
     call block_lookup_address_thumb
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t0)
@@ -298,6 +341,7 @@ defsymbl(rv_update_gba)
     jalr zero, a0, 0
 2:
     call block_lookup_address_arm
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t0)
@@ -317,7 +361,9 @@ defsymbl(rv_indirect_branch_arm)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call block_lookup_address_arm
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t0)
@@ -331,7 +377,9 @@ defsymbl(rv_indirect_branch_thumb)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call block_lookup_address_thumb
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t0)
@@ -339,13 +387,17 @@ defsymbl(rv_indirect_branch_thumb)
     jalr zero, a0, 0
 
 defsymbl(rv_indirect_branch_dual)
+    /* Save a0 (branch target) to REG_SAVE4 before it gets used by lookup */
+    sw   a0, REG_SAVE4(gp)
     store_registers()
     consolidate_flags(t0, t1)
     mv   s11, gp
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call block_lookup_address_dual
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t0)
@@ -361,7 +413,9 @@ defsymbl(rv_execute_load_u8)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call execute_load_u8
+    jit_disable_interrupts()
     mv   t0, a0
     mv   gp, s11
     mv   tp, s10
@@ -380,7 +434,9 @@ defsymbl(rv_execute_load_s8)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call execute_load_s8
+    jit_disable_interrupts()
     mv   t0, a0
     mv   gp, s11
     mv   tp, s10
@@ -399,7 +455,9 @@ defsymbl(rv_execute_load_u16)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call execute_load_u16
+    jit_disable_interrupts()
     mv   t0, a0
     mv   gp, s11
     mv   tp, s10
@@ -418,7 +476,9 @@ defsymbl(rv_execute_load_s16)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call execute_load_s16
+    jit_disable_interrupts()
     mv   t0, a0
     mv   gp, s11
     mv   tp, s10
@@ -437,7 +497,9 @@ defsymbl(rv_execute_load_u32)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call execute_load_u32
+    jit_disable_interrupts()
     mv   t0, a0
     mv   gp, s11
     mv   tp, s10
@@ -456,7 +518,9 @@ defsymbl(rv_execute_aligned_load32)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call execute_aligned_load32
+    jit_disable_interrupts()
     mv   t0, a0
     mv   gp, s11
     mv   tp, s10
@@ -475,7 +539,9 @@ defsymbl(rv_execute_store_u8)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call execute_store_u8
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t1)
@@ -492,7 +558,9 @@ defsymbl(rv_execute_store_u16)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call execute_store_u16
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t1)
@@ -509,7 +577,9 @@ defsymbl(rv_execute_store_u32)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call execute_store_u32
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t1)
@@ -526,7 +596,9 @@ defsymbl(rv_execute_aligned_store32)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call execute_aligned_store32
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t1)
@@ -542,7 +614,9 @@ defsymbl(rv_cheat_hook)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call process_cheats
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t1)
@@ -592,10 +666,12 @@ defsymbl(execute_store_cpsr)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     mv   a2, t1
     call execute_store_cpsr_body
     beqz a0, 4f
     call block_lookup_address_arm
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t2)
@@ -603,6 +679,7 @@ defsymbl(execute_store_cpsr)
     lw   ra, REG_SAVE3(gp)
     jalr zero, a0, 0
 4:
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t2)
@@ -645,7 +722,9 @@ defsymbl(execute_spsr_restore)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call execute_spsr_restore_body
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     lw   ra, REG_SAVE3(gp)
@@ -671,8 +750,10 @@ defsymbl(execute_swi)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     li   a0, MODE_SUPERVISOR
     call set_cpu_mode
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     li   t0, 0xe3a02004
@@ -691,11 +772,13 @@ defsymbl(jit_call_c_trampoline)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     mv   t0, a0
     mv   a0, a1
     mv   a1, a2
     mv   a2, a3
     jalr ra, t0, 0
+    jit_disable_interrupts()
     mv   t0, a0
     mv   gp, s11
     mv   tp, s10
@@ -720,7 +803,9 @@ defsymbl(rv_trace_instruction)
     mv   s10, tp
     lw   gp, REG_SAVE5(s11)
     lw   tp, REG_SAVE6(s11)
+    jit_enable_interrupts()
     call trace_jit_instruction
+    jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t1)

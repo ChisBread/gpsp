@@ -95,7 +95,7 @@ $(TARGET): $(OBJS)
 	$(AS) $(ASFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) test_gba test_gba_interp test_gba_jit
+	rm -f $(OBJS) test_gba
 
 run: $(TARGET)
 	$(QEMU) ./$(TARGET) $(BIOS) $(ROM)

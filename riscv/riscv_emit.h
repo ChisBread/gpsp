@@ -289,12 +289,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define generate_load_pc(ireg, new_pc)                                        \
 {                                                                             \
-    s32 pc_delta = (new_pc) - (stored_pc);                                      \
-    if ((pc_delta >= -2048) && (pc_delta <= 2047)) {                            \
-        rv_addi(ireg, reg_pc, pc_delta);                                          \
-    } else {                                                                    \
-        generate_load_imm(ireg, (new_pc));                                        \
-    }                                                                           \
+    generate_load_imm(ireg, (new_pc));                                          \
 }
 
 #define generate_store_reg(ireg, reg_index)                                   \

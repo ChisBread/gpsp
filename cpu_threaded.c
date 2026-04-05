@@ -258,27 +258,50 @@ typedef struct
   #ifdef ESP_PLATFORM
     #include "sdkconfig.h"
     #include <esp_cache.h>
+    #include <esp_heap_caps.h>
+    #include <esp_private/esp_cache_private.h>
+    static size_t s_cache_line_size = 0;
+
     void platform_cache_sync(void *baseaddr, void *endptr) {
       uintptr_t start = (uintptr_t)baseaddr;
       uintptr_t end = (uintptr_t)endptr;
-      uintptr_t aligned_start;
-      uintptr_t aligned_end;
-      size_t size;
 
       if (end <= start) {
         return;
       }
 
-      aligned_start = start & ~((uintptr_t)CONFIG_CACHE_L1_CACHE_LINE_SIZE - 1);
-      aligned_end = (end + CONFIG_CACHE_L1_CACHE_LINE_SIZE - 1) &
-        ~((uintptr_t)CONFIG_CACHE_L1_CACHE_LINE_SIZE - 1);
-      size = aligned_end - aligned_start;
+      /* Query cache line size once; M2C direction does not allow
+       * ESP_CACHE_MSYNC_FLAG_UNALIGNED, so we align manually. */
+      if (s_cache_line_size == 0) {
+        esp_cache_get_alignment(MALLOC_CAP_SPIRAM, &s_cache_line_size);
+        if (s_cache_line_size == 0)
+          s_cache_line_size = 64;  /* safe fallback */
+      }
+      size_t line_mask = s_cache_line_size - 1;
+      uintptr_t aligned_start = start & ~line_mask;
+      uintptr_t aligned_end = (end + line_mask) & ~line_mask;
+      size_t aligned_size = aligned_end - aligned_start;
 
-      /* Writeback D-cache to PSRAM, then invalidate I-cache */
-      esp_cache_msync((void *)aligned_start, size,
+      /* Full memory barrier before any cache operations */
+      asm volatile ("fence rw, rw" ::: "memory");
+
+      /* Writeback D-cache lines containing JIT code to PSRAM,
+       * then invalidate D-cache so stale data lines are dropped. */
+      esp_err_t e1 = esp_cache_msync((void *)aligned_start, aligned_size,
         ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
-      esp_cache_msync((void *)aligned_start, size,
+
+      /* Invalidate I-cache lines so CPU re-fetches from PSRAM. */
+      esp_err_t e2 = esp_cache_msync((void *)aligned_start, aligned_size,
         ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_INST);
+
+      if (e1 != ESP_OK || e2 != ESP_OK) {
+        printf("CACHE SYNC ERR: e1=%d e2=%d addr=%p size=%u\n",
+               e1, e2, baseaddr, (unsigned)aligned_size);
+      }
+
+      /* fence.i serializes the instruction stream so the CPU pipeline
+       * does not execute stale pre-fetched instructions. */
+      asm volatile ("fence.i" ::: "memory");
     }
   #else
     void platform_cache_sync(void *baseaddr, void *endptr) {
@@ -2680,10 +2703,6 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
     }                                                                         \
   }                                                                           \
                                                                               \
-  /* Do not return NULL since it could indeed happen that some branch         \
-     points to some random place (perhaps due to being garbage). This can     \
-     happen when especulatively compiling code in RAM. Perhaps the game       \
-     patches these instructions later, which would trigger a flush */         \
   CPU_PROF_SCOPE_ACC(dynarec_lookup_cycles, dynarec_lookup_begin);            \
   return (u8*)(~0);                                                           \
 }                                                                             \

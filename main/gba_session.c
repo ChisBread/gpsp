@@ -611,8 +611,6 @@ void gba_emulation_task(void *param)
 
     (void)param;
 
-    ESP_LOGI(TAG, "Emulation task started on core %d, waiting 15s for monitor...", xPortGetCoreID());
-    vTaskDelay(pdMS_TO_TICKS(15000));
     ESP_LOGI(TAG, "Starting emulation now");
     s_session.emulation_task = xTaskGetCurrentTaskHandle();
 
@@ -666,6 +664,7 @@ void gba_emulation_task(void *param)
             execute_arm_translate(execute_cycles);
             CPU_PROF_SCOPE_ACC(dynarec_total_cycles, dynarec_total_begin);
             cpu_prof.dynarec_frames++;
+            CPU_PROF_FRAME();
         } else
 #endif
         {
