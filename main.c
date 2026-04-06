@@ -178,9 +178,17 @@ u32 function_cc update_gba(int remaining_cycles)
           if(reg[OAM_UPDATED])
             oam_update_count++;
 
+#ifdef DUAL_CORE_PPU
+          /* Push an IO snapshot for this scanline; the render task on
+           * Core 0 will run update_scanline() later. */
+          CPU_PROF_SCOPE_BEGIN(scanline_begin);
+          ppu_pipeline_submit_scanline();
+          CPU_PROF_SCOPE_ACC(scanline_cycles, scanline_begin);
+#else
           CPU_PROF_SCOPE_BEGIN(scanline_begin);
           update_scanline();
           CPU_PROF_SCOPE_ACC(scanline_cycles, scanline_begin);
+#endif
 
           // Trigger the HBlank DMAs if enabled
           for (i = 0; i < 4; i++)
@@ -211,8 +219,14 @@ u32 function_cc update_gba(int remaining_cycles)
           u32 i;
           dispstat |= 0x01;
 
+#ifdef DUAL_CORE_PPU
+          /* Reload affine accumulators for the next frame.
+           * VBlank DMA may further override via BG2X handler. */
+          ppu_pipeline_end_frame(skip_next_frame);
+#else
           // Reinit affine transformation counters for the next frame
           video_reload_counters();
+#endif
 
           // Trigger VBlank interrupt if enabled
           if (dispstat & 0x8)
@@ -253,6 +267,16 @@ u32 function_cc update_gba(int remaining_cycles)
           CPU_PROF_SCOPE_BEGIN(sound_begin);
           render_gbc_sound();
           CPU_PROF_SCOPE_ACC(sound_cycles, sound_begin);
+
+#ifdef DUAL_CORE_PPU
+          /* All VBlank processing is now complete (VBlank DMA at
+           * vcount=160 AND CPU instructions during vcount 161-227).
+           * Flush VRAM + frame descriptor and queue the frame for the
+           * render core.  By deferring until the very end of VBlank
+           * we guarantee no more VRAM writes from the emu core while
+           * the render core reads VRAM. */
+          ppu_pipeline_post_vblank();
+#endif
 
           // We completed a frame, tell the dynarec to exit to the main thread
           frame_complete = 0x80000000;

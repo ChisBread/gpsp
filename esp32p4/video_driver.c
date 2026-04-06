@@ -17,6 +17,7 @@
 #include "driver/ledc.h"
 #include "driver/gpio.h"
 #include "driver/ppa.h"
+#include "esp_cache.h"
 #include "esp_lcd_st7701.h"
 
 static const char *TAG = "gpsp_video";
@@ -47,13 +48,17 @@ static struct {
     esp_ldo_channel_handle_t phy_pwr_chan;
     ppa_client_handle_t      ppa_srm_client;
 
-    uint16_t *out_buf;           /* Full LCD-sized scratch buffer for scaled output */
+    uint16_t *out_buf;           /* Current draw target (may be a DPI panel FB) */
+    uint16_t *dpi_fbs[2];        /* DPI panel framebuffers (when double-buffered) */
+    int       dpi_draw_idx;      /* Index of the FB we are drawing into (0 or 1) */
+    int       dpi_fb_count;      /* Number of DPI FBs (1 or 2) */
     size_t    out_buf_size;
     uint16_t  offset_y;          /* Vertical centering offset: (800-720)/2 = 40 */
 
     uint16_t lcd_h_res;
     uint16_t lcd_v_res;
     bool     use_ppa;
+    bool     direct_dpi_fb;     /* true → out_buf IS a DPI panel FB */
     bool     initialized;
 } s_video;
 
@@ -259,18 +264,66 @@ esp_err_t video_driver_init(const video_driver_config_t *config)
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_video.panel), TAG, "Panel init failed");
     ESP_LOGI(TAG, "ST7701 panel initialized: %ux%u", config->lcd_h_res, config->lcd_v_res);
 
-    /* ---- 8. Allocate scaled output buffer (used by both PPA and SW paths) ---- */
+    /* ---- 8. Scaled output buffer ---- */
     s_video.out_buf_size = config->lcd_h_res * config->lcd_v_res * sizeof(uint16_t);
-    s_video.out_buf = (uint16_t *)heap_caps_aligned_alloc(
-        64, s_video.out_buf_size, MALLOC_CAP_SPIRAM);
-    if (!s_video.out_buf) {
-        ESP_LOGE(TAG, "Output buffer alloc failed (%u bytes)", (unsigned)s_video.out_buf_size);
-        return ESP_ERR_NO_MEM;
-    }
-    /* Clear to black — top/bottom bars stay black permanently */
-    memset(s_video.out_buf, 0, s_video.out_buf_size);
     s_video.offset_y = (config->lcd_v_res > SCALED_H)
         ? (config->lcd_v_res - SCALED_H) / 2 : 0;
+
+    /*
+     * Try to get the DPI panel's internal framebuffer(s) so PPA can output
+     * directly into them, eliminating the ~768 KB CPU memcpy in draw_bitmap.
+     * With 2 FBs we get tear-free output: draw into the back buffer while
+     * the DPI controller scans out the front buffer, then swap.
+     */
+    s_video.dpi_fb_count = 0;
+    s_video.dpi_draw_idx = 0;
+    s_video.dpi_fbs[0] = NULL;
+    s_video.dpi_fbs[1] = NULL;
+    s_video.direct_dpi_fb = false;
+
+    int requested_fbs = config->num_fbs > 0 ? config->num_fbs : 1;
+    if (requested_fbs >= 2) {
+        void *fb0 = NULL, *fb1 = NULL;
+        if (esp_lcd_dpi_panel_get_frame_buffer(s_video.panel, 2, &fb0, &fb1) == ESP_OK
+            && fb0 && fb1) {
+            s_video.dpi_fbs[0] = (uint16_t *)fb0;
+            s_video.dpi_fbs[1] = (uint16_t *)fb1;
+            s_video.dpi_fb_count = 2;
+            s_video.dpi_draw_idx = 1;  /* draw into fb1 first, fb0 is displayed */
+            s_video.out_buf = s_video.dpi_fbs[s_video.dpi_draw_idx];
+            s_video.direct_dpi_fb = true;
+            for (int i = 0; i < 2; i++) {
+                memset(s_video.dpi_fbs[i], 0, s_video.out_buf_size);
+                esp_cache_msync(s_video.dpi_fbs[i], s_video.out_buf_size,
+                                ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+            }
+            ESP_LOGI(TAG, "Direct DPI FB x2 — tear-free PPA -> LCD");
+        }
+    }
+
+    if (!s_video.direct_dpi_fb) {
+        void *fb0 = NULL;
+        if (esp_lcd_dpi_panel_get_frame_buffer(s_video.panel, 1, &fb0) == ESP_OK
+            && fb0) {
+            s_video.dpi_fbs[0] = (uint16_t *)fb0;
+            s_video.dpi_fb_count = 1;
+            s_video.out_buf = (uint16_t *)fb0;
+            s_video.direct_dpi_fb = true;
+            memset(s_video.out_buf, 0, s_video.out_buf_size);
+            esp_cache_msync(s_video.out_buf, s_video.out_buf_size,
+                            ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+            ESP_LOGI(TAG, "Direct DPI FB x1 — zero-copy PPA -> LCD");
+        } else {
+            s_video.out_buf = (uint16_t *)heap_caps_aligned_alloc(
+                64, s_video.out_buf_size, MALLOC_CAP_SPIRAM);
+            if (!s_video.out_buf) {
+                ESP_LOGE(TAG, "Output buffer alloc failed (%u bytes)",
+                         (unsigned)s_video.out_buf_size);
+                return ESP_ERR_NO_MEM;
+            }
+            memset(s_video.out_buf, 0, s_video.out_buf_size);
+        }
+    }
 
     /* ---- 9. Initialize PPA for hardware rotation + scaling (optional) ---- */
     if (s_video.use_ppa) {
@@ -349,11 +402,36 @@ esp_err_t video_driver_submit_frame(const uint16_t *gba_framebuffer)
                         s_video.lcd_h_res, s_video.offset_y);
     }
 
-    /* Blit full LCD buffer (including black bars) to DPI panel */
-    esp_lcd_panel_draw_bitmap(s_video.panel,
-                              0, 0,
-                              s_video.lcd_h_res, s_video.lcd_v_res,
-                              s_video.out_buf);
+    if (s_video.direct_dpi_fb) {
+        /* For SW fallback, flush CPU cache writes to PSRAM. */
+        if (!(s_video.use_ppa && s_video.ppa_srm_client)) {
+            esp_cache_msync(s_video.out_buf, s_video.out_buf_size,
+                            ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        }
+
+        if (s_video.dpi_fb_count == 2) {
+            /*
+             * Double-buffered: we just finished drawing into dpi_fbs[draw_idx].
+             * Call draw_bitmap with this FB pointer — the DPI driver detects
+             * it is one of its internal FBs and does a zero-copy swap
+             * (just updates cur_fb_index, no memcpy).
+             */
+            esp_lcd_panel_draw_bitmap(s_video.panel,
+                                      0, 0,
+                                      s_video.lcd_h_res, s_video.lcd_v_res,
+                                      s_video.out_buf);
+            /* Swap: next frame draws into the other buffer */
+            s_video.dpi_draw_idx ^= 1;
+            s_video.out_buf = s_video.dpi_fbs[s_video.dpi_draw_idx];
+        }
+        /* Single-buffered: nothing more to do, DPI scans directly. */
+    } else {
+        /* Blit full LCD buffer (including black bars) to DPI panel */
+        esp_lcd_panel_draw_bitmap(s_video.panel,
+                                  0, 0,
+                                  s_video.lcd_h_res, s_video.lcd_v_res,
+                                  s_video.out_buf);
+    }
 
     return ESP_OK;
 }
@@ -376,7 +454,7 @@ void video_driver_deinit(void)
 {
     video_driver_set_brightness(0);
 
-    if (s_video.out_buf) {
+    if (s_video.out_buf && !s_video.direct_dpi_fb) {
         heap_caps_free(s_video.out_buf);
         s_video.out_buf = NULL;
     }

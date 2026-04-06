@@ -27,6 +27,63 @@ extern "C" {
   #include "cpu_instrument.h"
 }
 
+#ifdef DUAL_CORE_PPU
+/*
+ * Dual-core PPU — render-side data isolation.
+ *
+ * The render task (Core 0) calls update_scanline() with all mutable GBA
+ * state redirected to DRAM-local copies.  Before each frame / scanline,
+ * the render task copies snapshot data from the PSRAM frame descriptor
+ * into these arrays, so the rendering code never touches cross-core
+ * shared memory during pixel work.
+ *
+ * Redirected state:
+ *   io_registers → ppu_io[]          (per-scanline, 128 B copied)
+ *   oam_ram      → ppu_oam[]         (per-frame,   1 KB copied)
+ *   palette_ram_converted → ppu_pal[] (per-frame,   1 KB copied)
+ *   affine_reference_x/y → ppu_affine_ref_x/y  (per-scanline)
+ *   reg[OAM_UPDATED]     → ppu_oam_updated      (per-scanline)
+ */
+
+/* ── render-local IO registers ─────────────────────────────────────── */
+
+static u16  ppu_io[64];                       /* DRAM-local IO copy    */
+static u16 *ppu_active_io = io_registers;     /* points to active set  */
+
+#undef read_ioreg
+#undef read_ioreg32
+#define read_ioreg(regnum)   (eswap16(ppu_active_io[(regnum)]))
+#define read_ioreg32(regnum) (read_ioreg(regnum) | (read_ioreg((regnum)+1) << 16))
+
+/* ── render-local OAM ──────────────────────────────────────────────── */
+
+static u16  ppu_oam[512];                     /* DRAM-local OAM copy   */
+static u16 *ppu_real_oam = oam_ram;           /* real symbol (before redirect) */
+static u16 *ppu_oam_ptr  = oam_ram;
+#define oam_ram ppu_oam_ptr
+
+/* ── render-local palette ──────────────────────────────────────────── */
+
+static u16  ppu_pal[512];                     /* DRAM-local palette copy */
+static u16 *ppu_real_pal = palette_ram_converted;
+static u16 *ppu_pal_ptr  = palette_ram_converted;
+#define palette_ram_converted ppu_pal_ptr
+
+/* ── render-local VRAM ─────────────────────────────────────────────── */
+
+static u8  *ppu_vram_ptr  = vram;
+#define vram ppu_vram_ptr
+
+/* ── OAM_UPDATED flag ─────────────────────────────────────────────── */
+
+static u32  ppu_oam_updated;
+
+/* NOTE: affine_reference redirect is further below, after the global
+ *       declaration of affine_reference_x/y (which must use the real
+ *       symbol for the extern "C" storage). */
+
+#endif /* DUAL_CORE_PPU */
+
 #if defined(CONFIG_IDF_TARGET_ESP32P4) && \
     defined(CONFIG_GPSP_P4_SIMD_PIXEL_OPS) && \
     CONFIG_GPSP_P4_SIMD_PIXEL_OPS
@@ -138,6 +195,48 @@ typedef enum
 
 s32 affine_reference_x[2];
 s32 affine_reference_y[2];
+
+#ifdef DUAL_CORE_PPU
+/* Render-local affine reference copies. */
+static s32 ppu_affine_ref_x[2];
+static s32 ppu_affine_ref_y[2];
+#define affine_reference_x ppu_affine_ref_x
+#define affine_reference_y ppu_affine_ref_y
+
+/*
+ * API called by the render task (ppu_pipeline.c) to copy snapshot data
+ * into the DRAM-local render arrays before calling update_scanline().
+ * All functions are extern "C" because ppu_pipeline.c is plain C.
+ */
+
+extern "C" void ppu_begin_render_frame(const u16 *oam_snap, const u16 *pal_snap)
+{
+    memcpy(ppu_oam, oam_snap, sizeof(ppu_oam));
+    memcpy(ppu_pal, pal_snap, sizeof(ppu_pal));
+    ppu_oam_ptr  = ppu_oam;
+    ppu_pal_ptr  = ppu_pal;
+}
+
+extern "C" void ppu_begin_render_line(const u16 *io_snap,
+                                       const s32 *ref_x, const s32 *ref_y,
+                                       u32 oam_upd)
+{
+    memcpy(ppu_io, io_snap, sizeof(ppu_io));
+    ppu_active_io = ppu_io;
+    affine_reference_x[0] = ref_x[0];
+    affine_reference_y[0] = ref_y[0];
+    affine_reference_x[1] = ref_x[1];
+    affine_reference_y[1] = ref_y[1];
+    ppu_oam_updated = oam_upd;
+}
+
+extern "C" void ppu_end_render_frame(void)
+{
+    ppu_active_io = io_registers;
+    ppu_oam_ptr   = ppu_real_oam;
+    ppu_pal_ptr   = ppu_real_pal;
+}
+#endif /* DUAL_CORE_PPU */
 
 static inline s32 signext28(u32 value)
 {
@@ -2446,6 +2545,15 @@ void update_scanline(void)
 
   // If OAM has been modified since the last scanline has been updated then
   // reorder and reprofile the OBJ lists.
+#ifdef DUAL_CORE_PPU
+  if(ppu_oam_updated)
+  {
+    CPU_PROF_SCOPE_BEGIN(order_begin);
+    order_obj(video_mode);
+    CPU_PROF_SCOPE_ACC(scanline_order_cycles, order_begin);
+    ppu_oam_updated = 0;
+  }
+#else
   if(reg[OAM_UPDATED])
   {
     CPU_PROF_SCOPE_BEGIN(order_begin);
@@ -2453,6 +2561,7 @@ void update_scanline(void)
     CPU_PROF_SCOPE_ACC(scanline_order_cycles, order_begin);
     reg[OAM_UPDATED] = 0;
   }
+#endif
 
   CPU_PROF_SCOPE_BEGIN(order_begin);
   order_layers((dispcnt >> 8) & active_layers[video_mode], vcount);
@@ -2468,7 +2577,10 @@ void update_scanline(void)
   else
     render_scanline_window(screen_offset);
 
+#ifndef DUAL_CORE_PPU
   // Mode 0 does not use any affine params at all.
+  // In dual-core mode, affine accumulation is done synchronously on the
+  // CPU core (ppu_pipeline_submit_scanline), not here on the render side.
   if (video_mode) {
     CPU_PROF_SCOPE_BEGIN(affine_begin);
     // Account for vertical mosaic effect, by correcting affine references.
@@ -2495,6 +2607,7 @@ void update_scanline(void)
     }
     CPU_PROF_SCOPE_ACC(scanline_affine_cycles, affine_begin);
   }
+#endif /* !DUAL_CORE_PPU */
 }
 
 

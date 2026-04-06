@@ -79,6 +79,10 @@ if(CONFIG_GPSP_CPU_PROFILE_STATS)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC CPU_PROFILE_STATS)
 endif()
 
+if(CONFIG_GPSP_DUAL_CORE_PPU)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC DUAL_CORE_PPU)
+endif()
+
 if(CONFIG_GPSP_DYNAREC)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC
         HAVE_DYNAREC

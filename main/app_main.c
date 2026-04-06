@@ -33,6 +33,9 @@
 #include "c6_remote.h"
 #include "runtime_config.h"
 #include "storage.h"
+#ifdef DUAL_CORE_PPU
+#include "ppu_pipeline.h"
+#endif
 
 static const char *TAG = "gpsp_main";
 
@@ -181,6 +184,23 @@ void app_main(void)
         ESP_LOGE(TAG, "AV pipeline init failed, halting");
         return;
     }
+
+#ifdef DUAL_CORE_PPU
+    {
+        int render_core = (CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0;
+        ppu_pipeline_config_t cfg = {
+            .task_stack_size = 16384,
+            .render_core     = render_core,
+            .task_priority   = configMAX_PRIORITIES - 2,
+            .audio_enabled   = audio_ready,
+        };
+        err = ppu_pipeline_init(&cfg);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to init PPU pipeline");
+            return;
+        }
+    }
+#endif
 
     snprintf(bios_path, sizeof(bios_path), "%s/gba_bios.bin", STORAGE_MOUNT_POINT);
 

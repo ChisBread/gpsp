@@ -27,6 +27,10 @@
 #include "storage.h"
 #include "video.h"
 
+#ifdef DUAL_CORE_PPU
+#include "ppu_pipeline.h"
+#endif
+
 #define GBA_SESSION_PATH_MAX 512
 #define GBA_SESSION_QUEUE_LEN 4
 #define GBA_SESSION_AUTOSAVE_PERIOD_US (5 * 1000 * 1000)
@@ -606,8 +610,10 @@ esp_err_t gba_session_process_pending(void)
 
 void gba_emulation_task(void *param)
 {
+#ifndef DUAL_CORE_PPU
     uint32_t slot_index;
     u16 *video_buffer;
+#endif
 
     (void)param;
 
@@ -622,6 +628,12 @@ void gba_emulation_task(void *param)
 
     s_fps_timer_us = esp_timer_get_time();
 
+#ifdef DUAL_CORE_PPU
+    /* The render task owns gba_screen_pixels.  The emu core does not
+     * render, so it does not need it.  Set a dummy buffer so any
+     * stray accesses don't crash (e.g. init code). */
+    gba_screen_pixels = av_pipeline_default_video_buffer();
+#else
     gba_screen_pixels = av_pipeline_default_video_buffer();
 
     if (av_pipeline_acquire_slot(&slot_index, &video_buffer, portMAX_DELAY) != ESP_OK) {
@@ -629,17 +641,23 @@ void gba_emulation_task(void *param)
         vTaskDelete(NULL);
         return;
     }
+#endif
 
     while (1) {
         s_frame_start_us = esp_timer_get_time();
-        int64_t t0, t1, t2, t3, t4;
+        int64_t t0, t1;
+#ifdef DUAL_CORE_PPU
+        int64_t t_wait;
+#endif
 
         if (gba_session_process_pending() != ESP_OK) {
             ESP_LOGW(TAG, "Failed to process pending GBA session request");
         }
 
         if (s_session.stop_requested) {
+#ifndef DUAL_CORE_PPU
             av_pipeline_release_slot(slot_index, portMAX_DELAY);
+#endif
             break;
         }
 
@@ -655,6 +673,13 @@ void gba_emulation_task(void *param)
             write_ioreg(REG_P1, ~keys & 0x3FF);
         }
         skip_next_frame = 0;
+
+#ifdef DUAL_CORE_PPU
+        /* Wait for the render task to finish the previous frame before
+         * we start writing new scanline descriptors. */
+        ppu_pipeline_begin_frame();
+        t_wait = esp_timer_get_time();
+#endif
 
         t0 = esp_timer_get_time();
 
@@ -676,43 +701,78 @@ void gba_emulation_task(void *param)
 
         t1 = esp_timer_get_time();
 
-        if (!skip_next_frame) {
-            memcpy(video_buffer, gba_screen_pixels,
-                   GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * sizeof(u16));
+#ifndef DUAL_CORE_PPU
+        {
+            int64_t t2, t3, t4;
+
+            if (!skip_next_frame) {
+                memcpy(video_buffer, gba_screen_pixels,
+                       GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * sizeof(u16));
+            }
+
+            t2 = esp_timer_get_time();
+
+            if (av_pipeline_submit_slot(slot_index, skip_next_frame != 0, portMAX_DELAY) != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to submit AV slot");
+                vTaskDelete(NULL);
+                return;
+            }
+
+            t3 = esp_timer_get_time();
+
+            if (s_session.stop_requested) {
+                break;
+            }
+
+            if (av_pipeline_acquire_slot(&slot_index, &video_buffer, portMAX_DELAY) != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to acquire AV slot");
+                vTaskDelete(NULL);
+                return;
+            }
+
+            t4 = esp_timer_get_time();
+
+            s_fps_counter++;
+            {
+                int64_t now = esp_timer_get_time();
+                if (now - s_fps_timer_us >= 1000000) {
+                    ESP_LOGI(TAG, "FPS: %u | cpu: %lld us | copy: %lld us | submit: %lld us | acquire: %lld us | heap: %u KB",
+                             (unsigned)s_fps_counter,
+                             (long long)(t1 - t0),
+                             (long long)(t2 - t1),
+                             (long long)(t3 - t2),
+                             (long long)(t4 - t3),
+                             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024));
+#ifdef CPU_PROFILE_STATS
+                    cpu_prof_print();
+#endif
+                    s_fps_counter = 0;
+                    s_fps_timer_us = now;
+                }
+            }
+
+            if (!av_pipeline_audio_enabled()) {
+                int64_t elapsed_us = esp_timer_get_time() - s_frame_start_us;
+                int64_t target_us = 16742;
+                if (elapsed_us < target_us) {
+                    vTaskDelay(pdMS_TO_TICKS((target_us - elapsed_us) / 1000));
+                }
+            }
         }
-
-        t2 = esp_timer_get_time();
-
-        if (av_pipeline_submit_slot(slot_index, skip_next_frame != 0, portMAX_DELAY) != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to submit AV slot");
-            vTaskDelete(NULL);
-            return;
-        }
-
-        t3 = esp_timer_get_time();
-
-        if (s_session.stop_requested) {
-            break;
-        }
-
-        if (av_pipeline_acquire_slot(&slot_index, &video_buffer, portMAX_DELAY) != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to acquire AV slot");
-            vTaskDelete(NULL);
-            return;
-        }
-
-        t4 = esp_timer_get_time();
-
+#else /* DUAL_CORE_PPU */
+        /* Frame is done — scanlines + end_frame were pushed inside
+         * update_gba().  Just log stats. */
         s_fps_counter++;
         {
             int64_t now = esp_timer_get_time();
             if (now - s_fps_timer_us >= 1000000) {
-                ESP_LOGI(TAG, "FPS: %u | cpu: %lld us | copy: %lld us | submit: %lld us | acquire: %lld us | heap: %u KB",
+                int64_t r_scan, r_video, r_audio;
+                ppu_pipeline_get_render_stats(&r_scan, &r_video, &r_audio);
+                ESP_LOGI(TAG, "FPS: %u | cpu: %lld us | wait: %lld us | R: scan %lld vid %lld aud %lld us | heap: %u KB",
                          (unsigned)s_fps_counter,
                          (long long)(t1 - t0),
-                         (long long)(t2 - t1),
-                         (long long)(t3 - t2),
-                         (long long)(t4 - t3),
+                         (long long)(t_wait - s_frame_start_us),
+                         (long long)r_scan, (long long)r_video, (long long)r_audio,
                          (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024));
 #ifdef CPU_PROFILE_STATS
                 cpu_prof_print();
@@ -722,16 +782,13 @@ void gba_emulation_task(void *param)
             }
         }
 
-        if (!av_pipeline_audio_enabled()) {
-            int64_t elapsed_us = esp_timer_get_time() - s_frame_start_us;
-            int64_t target_us = 16742;
-            if (elapsed_us < target_us) {
-                vTaskDelay(pdMS_TO_TICKS((target_us - elapsed_us) / 1000));
-            }
-        }
+#endif /* DUAL_CORE_PPU */
     }
 
     flush_backup_image(true);
+#ifdef DUAL_CORE_PPU
+    ppu_pipeline_deinit();
+#endif
     memory_term();
     s_session.emulation_task = NULL;
     s_session.has_content = false;

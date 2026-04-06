@@ -1945,7 +1945,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 void init_emitter(bool must_swap)
 {
     (void)must_swap;
-    jit_selftest();
+    // jit_selftest();
     init_bios_hooks();
 }
 

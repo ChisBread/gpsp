@@ -34,6 +34,17 @@ menu "gpSP GBA Emulator"
             Results are printed to the log once per second.
             Adds a small overhead to every measured scope.
 
+    config GPSP_DUAL_CORE_PPU
+        bool "Dual-core PPU rendering"
+        default n
+        depends on IDF_TARGET_ESP32P4
+        help
+            Offload scanline rendering (update_scanline) to a second CPU core.
+            The emulation core runs ARM/Thumb CPU execution while the PPU core
+            renders the previous scanline in parallel, using an IO register
+            snapshot and lightweight atomic synchronization.
+            Requires a dual-core ESP32-P4.
+
     config GPSP_P4_SIMD_PIXEL_OPS
         bool "Enable ESP32-P4 PIE pixel ops"
         default n
