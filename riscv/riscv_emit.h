@@ -1116,8 +1116,8 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define arm_multiply_add_yes()                                                \
 {                                                                             \
-    rv_mul(arm_to_rv_reg[rd], arm_to_rv_reg[rm], arm_to_rv_reg[rs]);          \
-    rv_add(arm_to_rv_reg[rd], arm_to_rv_reg[rd], arm_to_rv_reg[rn]);          \
+    rv_mul(reg_save0, arm_to_rv_reg[rm], arm_to_rv_reg[rs]);                  \
+    rv_add(arm_to_rv_reg[rd], reg_save0, arm_to_rv_reg[rn]);                  \
 }                                                                             \
 
 #define arm_multiply(add_op, flags)                                           \
