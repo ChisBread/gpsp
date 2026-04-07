@@ -28,6 +28,12 @@
 
 #include <string/stdstring.h> /* string_is_empty */
 
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_memory_utils.h"
+#endif
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -221,6 +227,53 @@
 
 #define RFILE_HINT_UNBUFFERED (1 << 8)
 
+#ifdef ESP_PLATFORM
+#define VFS_ESP_STDIO_BUF_SIZE (32 * 1024)
+#define VFS_ESP_BUF_ALIGNMENT  64
+
+static const char *VFS_ESP_TAG = "vfs_impl";
+static bool vfs_esp_logged_bounce = false;
+static bool vfs_esp_logged_non_external = false;
+static bool vfs_esp_logged_alloc_fail = false;
+
+static char *retro_vfs_file_get_read_buf(libretro_vfs_implementation_file *stream, size_t *buf_size)
+{
+   static const unsigned candidate_sizes[] = { 32 * 1024, 16 * 1024, 8 * 1024, 4 * 1024 };
+   unsigned i;
+
+   if (!stream)
+      return NULL;
+
+   if (stream->buf)
+   {
+      if (buf_size)
+         *buf_size = stream->buf_size;
+      return stream->buf;
+   }
+
+   for (i = 0; i < sizeof(candidate_sizes) / sizeof(candidate_sizes[0]); i++)
+   {
+      stream->buf = (char*)heap_caps_aligned_alloc(
+         VFS_ESP_BUF_ALIGNMENT,
+         candidate_sizes[i],
+         MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+      if (stream->buf)
+      {
+         stream->buf_size = candidate_sizes[i];
+         break;
+      }
+   }
+
+   if (!stream->buf)
+      return NULL;
+
+   if (buf_size)
+      *buf_size = stream->buf_size;
+
+   return stream->buf;
+}
+#endif
+
 int64_t retro_vfs_file_seek_internal(
       libretro_vfs_implementation_file *stream,
       int64_t offset, int whence)
@@ -315,6 +368,9 @@ libretro_vfs_implementation_file *retro_vfs_file_open_impl(
    stream->fp                     = NULL;
 #ifdef _WIN32
    stream->fh                     = 0;
+#endif
+#ifdef ESP_PLATFORM
+   stream->buf_size               = 0;
 #endif
    stream->orig_path              = NULL;
    stream->mappos                 = 0;
@@ -468,6 +524,19 @@ libretro_vfs_implementation_file *retro_vfs_file_open_impl(
          if (stream->fp)
             setvbuf(stream->fp, stream->buf, _IOFBF, 0x10000);
       }
+#elif defined(ESP_PLATFORM)
+      if (stream->scheme != VFS_SCHEME_CDROM)
+      {
+         stream->buf = (char*)heap_caps_aligned_alloc(
+            VFS_ESP_BUF_ALIGNMENT,
+            VFS_ESP_STDIO_BUF_SIZE,
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+         if (stream->buf) 
+         {
+            setvbuf(stream->fp, stream->buf, _IOFBF, VFS_ESP_STDIO_BUF_SIZE);
+            stream->buf_size = VFS_ESP_STDIO_BUF_SIZE;
+         }
+      }
 #elif defined(WIIU)
       if (stream->scheme != VFS_SCHEME_CDROM)
       {
@@ -580,8 +649,13 @@ end:
    if (stream->cdrom.cue_buf)
       free(stream->cdrom.cue_buf);
 #endif
+#ifdef ESP_PLATFORM
+   if (stream->buf)
+      heap_caps_free(stream->buf);
+#else
    if (stream->buf)
       free(stream->buf);
+#endif
 
    if (stream->orig_path)
       free(stream->orig_path);
@@ -676,6 +750,66 @@ int64_t retro_vfs_file_read_impl(libretro_vfs_implementation_file *stream,
       if (stream->scheme == VFS_SCHEME_CDROM)
          return retro_vfs_file_read_cdrom(stream, s, len);
 #endif
+
+#ifdef ESP_PLATFORM
+      if (len > 0 && esp_ptr_external_ram(s))
+      {
+         char *read_buf  = NULL;
+         size_t buf_size = 0;
+         uint8_t *dst    = (uint8_t*)s;
+         int64_t total   = 0;
+
+         read_buf = retro_vfs_file_get_read_buf(stream, &buf_size);
+         if (!read_buf || buf_size == 0)
+         {
+            if (!vfs_esp_logged_alloc_fail)
+            {
+               vfs_esp_logged_alloc_fail = true;
+               ESP_LOGW(VFS_ESP_TAG, "PSRAM read bounce alloc failed");
+            }
+            return -1;
+         }
+
+         if (!vfs_esp_logged_bounce)
+         {
+            vfs_esp_logged_bounce = true;
+            ESP_LOGI(VFS_ESP_TAG, "PSRAM read bounce active | dst %p | buf %p | buf_size %u",
+                     s, read_buf, (unsigned)buf_size);
+         }
+
+         while (total < (int64_t)len)
+         {
+            size_t chunk = (size_t)(len - (uint64_t)total);
+            size_t got;
+
+            if (chunk > buf_size)
+               chunk = buf_size;
+
+            got = fread(read_buf, 1, chunk, stream->fp);
+            if (got == 0)
+            {
+               if (ferror(stream->fp))
+                  return -1;
+               break;
+            }
+
+            memcpy(dst + total, read_buf, got);
+            total += (int64_t)got;
+            if (got < chunk)
+               break;
+         }
+
+         return total;
+      }
+   else if (!vfs_esp_logged_non_external)
+   {
+      vfs_esp_logged_non_external = true;
+      ESP_LOGI(VFS_ESP_TAG, "Direct fread path | dst %p | external_ram %s",
+         s,
+         esp_ptr_external_ram(s) ? "yes" : "no");
+   }
+#endif
+
       return fread(s, 1, (size_t)len, stream->fp);
    }
 #ifdef HAVE_MMAP

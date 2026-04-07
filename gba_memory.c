@@ -21,7 +21,11 @@
 #include "streams/file_stream.h"
 
 #ifdef ESP_PLATFORM
+#include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_heap_caps.h"
+
+static const char *GBA_MEMORY_TAG = "gba_memory";
 #endif
 
 /* Sound */
@@ -2518,19 +2522,42 @@ unsigned memory_write_savestate(u8 *dst)
 static s32 load_gamepak_raw(const char *name)
 {
   unsigned i, j;
+#ifdef ESP_PLATFORM
+  int64_t t_open0 = esp_timer_get_time();
+  int64_t t_open1;
+  int64_t t_size0;
+  int64_t t_size1;
+  int64_t t_stage0;
+  int64_t t_stage1;
+  int64_t read_us = 0;
+  int64_t map_us = 0;
+  size_t bytes_loaded = 0;
+  u32 ldblks = 0;
+  u32 buf_blocks = 0;
+  u32 rom_blocks = 0;
+#endif
   gamepak_file_large = filestream_open(name, RETRO_VFS_FILE_ACCESS_READ,
                                        RETRO_VFS_FILE_ACCESS_HINT_NONE);
+#ifdef ESP_PLATFORM
+  t_open1 = esp_timer_get_time();
+#endif
   if(gamepak_file_large)
   {
     // Round size to 32KB pages
+#ifdef ESP_PLATFORM
+  t_size0 = esp_timer_get_time();
+#endif
     gamepak_size = (u32)filestream_get_size(gamepak_file_large);
     gamepak_size = (gamepak_size + 0x7FFF) & ~0x7FFF;
+#ifdef ESP_PLATFORM
+  t_size1 = esp_timer_get_time();
+#endif
 
     // Load stuff in 1MB chunks
-    u32 buf_blocks = (gamepak_size + gamepak_buffer_blocksize-1) / (gamepak_buffer_blocksize);
-    u32 rom_blocks = gamepak_size >> 15;
-    u32 ldblks = buf_blocks < gamepak_buffer_count ?
-                    buf_blocks : gamepak_buffer_count;
+    buf_blocks = (gamepak_size + gamepak_buffer_blocksize-1) / (gamepak_buffer_blocksize);
+    rom_blocks = gamepak_size >> 15;
+    ldblks = buf_blocks < gamepak_buffer_count ?
+               buf_blocks : gamepak_buffer_count;
 
     // Unmap the ROM space since we will re-map it now
     map_null(read, 0x8000000, 0xD000000);
@@ -2539,7 +2566,20 @@ static s32 load_gamepak_raw(const char *name)
     for (i = 0; i < ldblks; i++)
     {
       // Load 1MB chunk and map it
-      filestream_read(gamepak_file_large, gamepak_buffers[i], gamepak_buffer_blocksize);
+    #ifdef ESP_PLATFORM
+      t_stage0 = esp_timer_get_time();
+    #endif
+      int64_t read_bytes = filestream_read(gamepak_file_large, gamepak_buffers[i], gamepak_buffer_blocksize);
+    #ifdef ESP_PLATFORM
+      t_stage1 = esp_timer_get_time();
+      read_us += t_stage1 - t_stage0;
+    #endif
+      if (read_bytes > 0)
+        bytes_loaded += (size_t)read_bytes;
+
+    #ifdef ESP_PLATFORM
+      t_stage0 = esp_timer_get_time();
+    #endif
       for (j = 0; j < 32 && i*32 + j < rom_blocks; j++)
       {
         u32 phyn = i*32 + j;
@@ -2549,10 +2589,39 @@ static s32 load_gamepak_raw(const char *name)
         // Map it to the read handlers now
         map_rom_entry(read, phyn, blkptr, rom_blocks);
       }
-    } 
+#ifdef ESP_PLATFORM
+      t_stage1 = esp_timer_get_time();
+      map_us += t_stage1 - t_stage0;
+#endif
+    }
+#ifdef ESP_PLATFORM
+    {
+      int64_t open_us = t_open1 - t_open0;
+      int64_t size_us = t_size1 - t_size0;
+      uint32_t read_kib_s = read_us > 0 ?
+        (uint32_t)((bytes_loaded * 1000000ULL) / 1024ULL / (uint64_t)read_us) : 0;
+      ESP_LOGI(GBA_MEMORY_TAG,
+               "ROM load: size %u KB rounded %u KB | open %lld us size %lld us read %lld us map %lld us | loaded %u KB cached %u/%u MB | %u KiB/s",
+               (unsigned)(filestream_get_size(gamepak_file_large) / 1024),
+               (unsigned)(gamepak_size / 1024),
+               (long long)open_us,
+               (long long)size_us,
+               (long long)read_us,
+               (long long)map_us,
+               (unsigned)(bytes_loaded / 1024),
+               (unsigned)ldblks,
+               (unsigned)buf_blocks,
+               (unsigned)read_kib_s);
+    }
+#endif
 
     return 0;
   }
+
+#ifdef ESP_PLATFORM
+  ESP_LOGW(GBA_MEMORY_TAG, "ROM open failed: %s (%lld us)", name,
+           (long long)(t_open1 - t_open0));
+#endif
 
   return -1;
 }
@@ -2590,6 +2659,9 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
 
 s32 load_bios(char *name)
 {
+#ifdef ESP_PLATFORM
+  int64_t t0 = esp_timer_get_time();
+#endif
   RFILE *fd = filestream_open(name, RETRO_VFS_FILE_ACCESS_READ,
                               RETRO_VFS_FILE_ACCESS_HINT_NONE);
 
@@ -2598,6 +2670,10 @@ s32 load_bios(char *name)
 
   filestream_read(fd, bios_rom, 0x4000);
   filestream_close(fd);
+#ifdef ESP_PLATFORM
+  ESP_LOGI(GBA_MEMORY_TAG, "BIOS load: %s in %lld us", name,
+           (long long)(esp_timer_get_time() - t0));
+#endif
   return 0;
 }
 

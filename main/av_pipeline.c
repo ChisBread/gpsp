@@ -4,6 +4,13 @@
 
 #include <string.h>
 
+#include "av_pipeline.h"
+#include "common.h"
+static GPSP_EXTRAM_BSS u16 gba_render_buffer[GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
+static bool audio_enabled;
+
+#ifndef DUAL_CORE_PPU
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -11,7 +18,6 @@
 #include "esp_log.h"
 
 #include "audio_driver.h"
-#include "av_pipeline.h"
 #include "sound.h"
 #include "video.h"
 #include "video_driver.h"
@@ -23,13 +29,11 @@
 static const char *TAG = "gpsp_av";
 
 static GPSP_EXTRAM_BSS u16 gba_framebuffers[AV_PIPELINE_DEPTH][GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
-static GPSP_EXTRAM_BSS u16 gba_render_buffer[GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
-static int16_t audio_buffers[AV_PIPELINE_DEPTH][AUDIO_FRAME_SAMPLES_MAX * 2];
-static uint32_t audio_buffer_frames[AV_PIPELINE_DEPTH];
-static bool skip_video_submit[AV_PIPELINE_DEPTH];
+static GPSP_EXTRAM_BSS int16_t audio_buffers[AV_PIPELINE_DEPTH][AUDIO_FRAME_SAMPLES_MAX * 2];
+static GPSP_EXTRAM_BSS uint32_t audio_buffer_frames[AV_PIPELINE_DEPTH];
+static GPSP_EXTRAM_BSS bool skip_video_submit[AV_PIPELINE_DEPTH];
 static QueueHandle_t av_free_queue;
 static QueueHandle_t av_ready_queue;
-static bool audio_enabled;
 static float audio_frame_samples;
 static float audio_frame_fraction;
 
@@ -95,8 +99,18 @@ static void av_output_task(void *param)
     }
 }
 
+#endif
+
 esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
 {
+#ifdef DUAL_CORE_PPU
+    if (!config) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    audio_enabled = config->audio_enabled;
+    return ESP_OK;
+#else
     uint32_t slot_index;
     BaseType_t task_ret;
 
@@ -138,6 +152,7 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
     }
 
     return ESP_OK;
+#endif
 }
 
 u16 *av_pipeline_default_video_buffer(void)
@@ -148,6 +163,12 @@ u16 *av_pipeline_default_video_buffer(void)
 esp_err_t av_pipeline_acquire_slot(uint32_t *slot_index, u16 **video_buffer,
                                    TickType_t timeout)
 {
+#ifdef DUAL_CORE_PPU
+    (void)slot_index;
+    (void)video_buffer;
+    (void)timeout;
+    return ESP_ERR_INVALID_STATE;
+#else
     uint32_t local_slot_index;
 
     if (!slot_index || !video_buffer) {
@@ -165,10 +186,16 @@ esp_err_t av_pipeline_acquire_slot(uint32_t *slot_index, u16 **video_buffer,
     *slot_index = local_slot_index;
     *video_buffer = gba_framebuffers[local_slot_index];
     return ESP_OK;
+#endif
 }
 
 esp_err_t av_pipeline_release_slot(uint32_t slot_index, TickType_t timeout)
 {
+#ifdef DUAL_CORE_PPU
+    (void)slot_index;
+    (void)timeout;
+    return ESP_ERR_INVALID_STATE;
+#else
     if (slot_index >= AV_PIPELINE_DEPTH) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -182,11 +209,18 @@ esp_err_t av_pipeline_release_slot(uint32_t slot_index, TickType_t timeout)
     }
 
     return ESP_OK;
+#endif
 }
 
 esp_err_t av_pipeline_submit_slot(uint32_t slot_index, bool skip_video,
                                   TickType_t timeout)
 {
+#ifdef DUAL_CORE_PPU
+    (void)slot_index;
+    (void)skip_video;
+    (void)timeout;
+    return ESP_ERR_INVALID_STATE;
+#else
     if (slot_index >= AV_PIPELINE_DEPTH) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -204,6 +238,7 @@ esp_err_t av_pipeline_submit_slot(uint32_t slot_index, bool skip_video,
     }
 
     return ESP_OK;
+#endif
 }
 
 bool av_pipeline_audio_enabled(void)

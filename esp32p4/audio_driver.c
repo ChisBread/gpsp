@@ -18,10 +18,11 @@
 static const char *TAG = "gpsp_audio";
 
 /* One GBA frame produces roughly 550-900 stereo sample pairs depending on
- * the configured audio rate. Size the I2S DMA ring so a whole frame burst
- * usually fits without immediately blocking the writer task. */
+ * the configured audio rate. Keep each DMA buffer under the ESP-IDF I2S
+ * per-descriptor byte limit to avoid the driver silently clamping it and
+ * emitting a warning at startup. */
 #define AUDIO_DMA_DESC_NUM   8
-#define AUDIO_DMA_FRAME_NUM  1024
+#define AUDIO_DMA_FRAME_NUM  1008
 
 /* ---- ES8311 register definitions (subset for playback) ---- */
 #define ES8311_REG_RESET        0x00

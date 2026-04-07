@@ -135,7 +135,7 @@ static TaskHandle_t      s_audio_task;
 static bool              s_audio_on;
 static float             s_audio_spf;          /* samples per frame    */
 static float             s_audio_frac;
-static audio_packet_t    s_audio_packets[AUDIO_QUEUE_DEPTH];
+static GPSP_EXTRAM_BSS audio_packet_t    s_audio_packets[AUDIO_QUEUE_DEPTH];
 
 static u16              *s_render_fb = s_render_fb_storage; /* render framebuffer */
 
@@ -542,20 +542,21 @@ void ppu_pipeline_begin_frame(void)
     int64_t t0 = esp_timer_get_time();
     xSemaphoreTake(s_buf_sem[s_wr], portMAX_DELAY);
     int64_t t1 = esp_timer_get_time();
+
+    ppu_frame_t *f = &s_frames[s_wr];
+    f->next_line = 0;
+    f->skip      = 0;
+
+    /* Snapshot OAM and palette while we are still waiting for frame pacing. */
+    memcpy(f->oam,       oam_ram,               sizeof(f->oam));
+    memcpy(f->palette,   palette_ram_converted,  sizeof(f->palette));
+
     xSemaphoreTake(s_pace, portMAX_DELAY);
     int64_t t2 = esp_timer_get_time();
 
     s_stat_wait_render_us = 0;
     s_stat_wait_buf_us    = t1 - t0;
     s_stat_wait_pace_us   = t2 - t1;
-
-    ppu_frame_t *f = &s_frames[s_wr];
-    f->next_line = 0;
-    f->skip      = 0;
-
-    /* Snapshot OAM and palette (read REAL globals — no redirect here). */
-    memcpy(f->oam,       oam_ram,               sizeof(f->oam));
-    memcpy(f->palette,   palette_ram_converted,  sizeof(f->palette));
 }
 
 /*

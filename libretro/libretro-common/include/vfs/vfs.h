@@ -82,6 +82,9 @@ struct libretro_vfs_implementation_file
    char *buf;
    char* orig_path;
    uint8_t *mapped;
+#ifdef ESP_PLATFORM
+   unsigned buf_size;
+#endif
    int fd;
    unsigned hints;
    enum vfs_scheme scheme;

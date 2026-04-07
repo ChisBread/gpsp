@@ -446,6 +446,20 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
     const char *next_rom_path;
     const char *next_bios_path;
     u8 *backup_snapshot = NULL;
+    int64_t t_total0;
+    int64_t t_bios0;
+    int64_t t_bios1;
+    int64_t t_rom0;
+    int64_t t_rom1;
+    int64_t t_save0;
+    int64_t t_save1;
+    int64_t t_reset0;
+    int64_t t_reset1;
+    int64_t flush_us = 0;
+    int64_t bios_us = 0;
+    int64_t rom_us = 0;
+    int64_t save_us = 0;
+    int64_t reset_us = 0;
 
     if (!command) {
         return ESP_ERR_INVALID_ARG;
@@ -454,15 +468,16 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
     next_rom_path = command->reload_rom ? command->rom_path : s_session.rom_path;
     next_bios_path = command->reload_bios ? command->bios_path : s_session.bios_path;
 
-    if (!path_is_set(next_rom_path)) {
-        return ESP_ERR_INVALID_ARG;
-    }
+    t_total0 = esp_timer_get_time();
 
     if (command->reload_rom && previous.has_content) {
+        t_save0 = esp_timer_get_time();
         if (flush_backup_image(true) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to flush save before ROM reload");
             return ESP_FAIL;
         }
+        t_save1 = esp_timer_get_time();
+        flush_us = t_save1 - t_save0;
     }
 
     if (command->reload_rom) {
@@ -471,7 +486,10 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
     }
 
     if (command->reload_bios) {
+        t_bios0 = esp_timer_get_time();
         apply_bios_image(next_bios_path, &next_builtin_bios);
+        t_bios1 = esp_timer_get_time();
+        bios_us = t_bios1 - t_bios0;
     }
 
     if (command->reload_rom) {
@@ -479,20 +497,29 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
             memset(gamepak_backup, 0xFF, sizeof(gamepak_backup));
         }
 
+        t_rom0 = esp_timer_get_time();
         if (load_gamepak(NULL, next_rom_path, 0, 0, 0) != 0) {
             ESP_LOGE(TAG, "Failed to load ROM: %s", next_rom_path);
             restore_previous_session(&previous, backup_snapshot);
             return ESP_FAIL;
         }
+        t_rom1 = esp_timer_get_time();
+        rom_us = t_rom1 - t_rom0;
 
         ESP_LOGI(TAG, "ROM loaded: %s (%u bytes)", next_rom_path, (unsigned)gamepak_size);
 
+        t_save0 = esp_timer_get_time();
         if (load_backup_image(next_rom_path) != ESP_OK) {
             ESP_LOGW(TAG, "Failed to restore save for %s", next_rom_path);
         }
+        t_save1 = esp_timer_get_time();
+        save_us = t_save1 - t_save0;
     }
 
+    t_reset0 = esp_timer_get_time();
     reset_gba();
+    t_reset1 = esp_timer_get_time();
+    reset_us = t_reset1 - t_reset0;
 
     s_session.has_content = true;
     s_session.builtin_bios_active = next_builtin_bios;
@@ -501,6 +528,14 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
     copy_path(s_session.bios_path, sizeof(s_session.bios_path), next_bios_path);
     s_session.last_autosave_us = esp_timer_get_time();
 
+    ESP_LOGI(TAG,
+             "Content load: total %lld us | flush %lld us bios %lld us rom %lld us save %lld us reset %lld us",
+             (long long)(s_session.last_autosave_us - t_total0),
+             (long long)flush_us,
+             (long long)bios_us,
+             (long long)rom_us,
+             (long long)save_us,
+             (long long)reset_us);
     ESP_LOGI(TAG, "GBA session reset complete");
     return ESP_OK;
 }

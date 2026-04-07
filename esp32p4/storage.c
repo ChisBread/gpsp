@@ -17,11 +17,13 @@
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "esp_idf_version.h"
 #include "sdmmc_cmd.h"
 #include "driver/sdmmc_host.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
+#include "streams/file_stream.h"
 
 /*
  * When ESP-Hosted uses SDIO on Slot 1, it initialises the SDMMC host
@@ -43,12 +45,329 @@ static const char *TAG = "gpsp_storage";
 
 /* LDO channel for SD card power */
 #define SD_PWR_LDO_CHANNEL  4
+#define STORAGE_BENCH_TOTAL_BYTES (1024 * 1024)
+#define STORAGE_BENCH_CHUNK_BYTES (64 * 1024)
 
 static struct {
     sdmmc_card_t *card;
     sd_pwr_ctrl_handle_t pwr_ctrl;
     bool initialized;
+    bool benchmark_done;
 } s_storage;
+
+static uint32_t kib_per_sec(size_t bytes, int64_t us)
+{
+    if (us <= 0) {
+        return 0;
+    }
+    return (uint32_t)((bytes * 1000000ULL) / 1024ULL / (uint64_t)us);
+}
+
+static void storage_log_memcpy_benchmark(const uint8_t *src, size_t size)
+{
+    uint8_t *psram_dst;
+    size_t free_psram;
+    size_t largest_psram;
+    size_t bench_size;
+    size_t copied;
+    int64_t t0;
+    int64_t t1;
+
+    free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    largest_psram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    bench_size = size;
+
+    if (largest_psram < bench_size) {
+        bench_size = largest_psram;
+    }
+    if (bench_size > STORAGE_BENCH_CHUNK_BYTES) {
+        bench_size = STORAGE_BENCH_CHUNK_BYTES;
+    }
+
+    ESP_LOGI(TAG,
+             "Storage bench PSRAM free %u KB | largest %u KB | requested %u KB | test %u KB",
+             (unsigned)(free_psram / 1024),
+             (unsigned)(largest_psram / 1024),
+             (unsigned)(size / 1024),
+             (unsigned)(bench_size / 1024));
+
+    if (bench_size == 0) {
+        ESP_LOGW(TAG, "Storage bench memcpy skipped: no PSRAM block available");
+        return;
+    }
+
+    psram_dst = heap_caps_malloc(bench_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!psram_dst) {
+        ESP_LOGW(TAG, "Storage bench memcpy skipped: PSRAM alloc failed for %u KB",
+                 (unsigned)(bench_size / 1024));
+        return;
+    }
+
+    t0 = esp_timer_get_time();
+    for (copied = 0; copied < size; copied += bench_size) {
+        size_t chunk = size - copied;
+        if (chunk > bench_size) {
+            chunk = bench_size;
+        }
+        memcpy(psram_dst, src, chunk);
+    }
+    t1 = esp_timer_get_time();
+
+    ESP_LOGI(TAG,
+             "Storage bench memcpy->PSRAM: %u KB in %lld us | %u KiB/s",
+             (unsigned)(size / 1024),
+             (long long)(t1 - t0),
+             (unsigned)kib_per_sec(size, t1 - t0));
+
+    heap_caps_free(psram_dst);
+}
+
+static void storage_log_filestream_psram_benchmark(const char *rom_path, size_t size)
+{
+    RFILE *file;
+    uint8_t *psram_dst;
+    int64_t t0;
+    int64_t t1;
+    int64_t got;
+
+    if (!rom_path || rom_path[0] == '\0' || size == 0) {
+        return;
+    }
+
+    psram_dst = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!psram_dst) {
+        ESP_LOGW(TAG, "Storage bench filestream->PSRAM skipped: no PSRAM buffer");
+        return;
+    }
+
+    file = filestream_open(rom_path, RETRO_VFS_FILE_ACCESS_READ,
+                           RETRO_VFS_FILE_ACCESS_HINT_NONE);
+    if (!file) {
+        ESP_LOGW(TAG, "Storage bench filestream->PSRAM skipped: cannot open %s", rom_path);
+        heap_caps_free(psram_dst);
+        return;
+    }
+
+    t0 = esp_timer_get_time();
+    got = filestream_read(file, psram_dst, (int64_t)size);
+    t1 = esp_timer_get_time();
+
+    if (filestream_close(file) != 0) {
+        ESP_LOGW(TAG, "Storage bench filestream->PSRAM close failed");
+    }
+
+    if (got < 0) {
+        ESP_LOGW(TAG, "Storage bench filestream->PSRAM read failed");
+    } else {
+        ESP_LOGI(TAG,
+                 "Storage bench filestream->PSRAM: %u KB in %lld us | %u KiB/s",
+                 (unsigned)(got / 1024),
+                 (long long)(t1 - t0),
+                 (unsigned)kib_per_sec((size_t)got, t1 - t0));
+    }
+
+    heap_caps_free(psram_dst);
+}
+
+static void storage_log_fread_psram_benchmark(const char *rom_path, size_t size)
+{
+    FILE *file;
+    uint8_t *psram_dst;
+    int64_t t0;
+    int64_t t1;
+    size_t got;
+
+    if (!rom_path || rom_path[0] == '\0' || size == 0) {
+        return;
+    }
+
+    psram_dst = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!psram_dst) {
+        ESP_LOGW(TAG, "Storage bench fread->PSRAM skipped: no PSRAM buffer");
+        return;
+    }
+
+    file = fopen(rom_path, "rb");
+    if (!file) {
+        ESP_LOGW(TAG, "Storage bench fread->PSRAM skipped: cannot open %s", rom_path);
+        heap_caps_free(psram_dst);
+        return;
+    }
+
+    t0 = esp_timer_get_time();
+    got = fread(psram_dst, 1, size, file);
+    t1 = esp_timer_get_time();
+
+    fclose(file);
+
+    ESP_LOGI(TAG,
+             "Storage bench fread->PSRAM: %u KB in %lld us | %u KiB/s",
+             (unsigned)(got / 1024),
+             (long long)(t1 - t0),
+             (unsigned)kib_per_sec(got, t1 - t0));
+
+    heap_caps_free(psram_dst);
+}
+
+static void storage_log_raw_psram_benchmark(size_t size)
+{
+    uint8_t *psram_dst;
+    int64_t t0;
+    int64_t t1;
+    size_t sector_size;
+    size_t total_sectors;
+    size_t start_sector = 4096;
+    esp_err_t err;
+
+    if (!s_storage.card || size == 0) {
+        return;
+    }
+
+    sector_size = (size_t)s_storage.card->csd.sector_size;
+    if (sector_size == 0 || (size % sector_size) != 0) {
+        ESP_LOGW(TAG, "Storage bench raw->PSRAM skipped: invalid size %u", (unsigned)size);
+        return;
+    }
+
+    total_sectors = size / sector_size;
+    if ((uint64_t)start_sector + total_sectors > (uint64_t)s_storage.card->csd.capacity) {
+        start_sector = 0;
+    }
+
+    psram_dst = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!psram_dst) {
+        ESP_LOGW(TAG, "Storage bench raw->PSRAM skipped: no PSRAM buffer");
+        return;
+    }
+
+    t0 = esp_timer_get_time();
+    err = sdmmc_read_sectors(s_storage.card, psram_dst, start_sector, total_sectors);
+    t1 = esp_timer_get_time();
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Storage bench raw->PSRAM failed: %s", esp_err_to_name(err));
+        heap_caps_free(psram_dst);
+        return;
+    }
+
+    ESP_LOGI(TAG,
+             "Storage bench raw->PSRAM: %u KB in %lld us | %u KiB/s | start_sector %u",
+             (unsigned)(size / 1024),
+             (long long)(t1 - t0),
+             (unsigned)kib_per_sec(size, t1 - t0),
+             (unsigned)start_sector);
+
+    heap_caps_free(psram_dst);
+}
+
+esp_err_t storage_run_benchmark(const char *rom_path)
+{
+    uint8_t *buffer;
+    size_t bench_total = STORAGE_BENCH_TOTAL_BYTES;
+    size_t chunk_size = STORAGE_BENCH_CHUNK_BYTES;
+    size_t file_total = 0;
+    size_t raw_total = 0;
+    FILE *file = NULL;
+    int64_t t0;
+    int64_t t1;
+
+    if (s_storage.benchmark_done) {
+        return ESP_OK;
+    }
+
+    if (!s_storage.initialized || !s_storage.card || !rom_path || rom_path[0] == '\0') {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    buffer = heap_caps_malloc(chunk_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    if (!buffer) {
+        ESP_LOGW(TAG, "Storage benchmark skipped: no internal DMA buffer");
+        s_storage.benchmark_done = true;
+        return ESP_ERR_NO_MEM;
+    }
+
+    file = fopen(rom_path, "rb");
+    if (file) {
+        t0 = esp_timer_get_time();
+        while (file_total < bench_total) {
+            size_t to_read = bench_total - file_total;
+            if (to_read > chunk_size) {
+                to_read = chunk_size;
+            }
+
+            size_t got = fread(buffer, 1, to_read, file);
+            if (got == 0) {
+                break;
+            }
+            file_total += got;
+            if (got < to_read) {
+                break;
+            }
+        }
+        t1 = esp_timer_get_time();
+        fclose(file);
+        ESP_LOGI(TAG,
+                 "Storage bench fread: %u KB in %lld us | %u KiB/s",
+                 (unsigned)(file_total / 1024),
+                 (long long)(t1 - t0),
+                 (unsigned)kib_per_sec(file_total, t1 - t0));
+    } else {
+        ESP_LOGW(TAG, "Storage bench fread skipped: cannot open %s", rom_path);
+    }
+
+    {
+        size_t sector_size = (size_t)s_storage.card->csd.sector_size;
+        size_t total_sectors = bench_total / sector_size;
+        size_t chunk_sectors = chunk_size / sector_size;
+        size_t start_sector = 4096;
+
+        if (sector_size == 0 || total_sectors == 0 || chunk_sectors == 0) {
+            ESP_LOGW(TAG, "Storage bench raw skipped: invalid sector geometry");
+        } else {
+            if ((uint64_t)start_sector + total_sectors > (uint64_t)s_storage.card->csd.capacity) {
+                start_sector = 0;
+            }
+
+            t0 = esp_timer_get_time();
+            for (size_t done = 0; done < total_sectors; done += chunk_sectors) {
+                size_t sectors = total_sectors - done;
+                if (sectors > chunk_sectors) {
+                    sectors = chunk_sectors;
+                }
+
+                esp_err_t err = sdmmc_read_sectors(
+                    s_storage.card,
+                    buffer,
+                    start_sector + done,
+                    sectors);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "Storage bench raw failed at sector %u: %s",
+                             (unsigned)(start_sector + done), esp_err_to_name(err));
+                    break;
+                }
+                raw_total += sectors * sector_size;
+            }
+            t1 = esp_timer_get_time();
+            ESP_LOGI(TAG,
+                     "Storage bench raw: %u KB in %lld us | %u KiB/s | start_sector %u",
+                     (unsigned)(raw_total / 1024),
+                     (long long)(t1 - t0),
+                     (unsigned)kib_per_sec(raw_total, t1 - t0),
+                     (unsigned)start_sector);
+        }
+    }
+
+    if (file_total > 0) {
+        storage_log_memcpy_benchmark(buffer, file_total);
+        storage_log_fread_psram_benchmark(rom_path, file_total);
+        storage_log_raw_psram_benchmark(file_total);
+        storage_log_filestream_psram_benchmark(rom_path, file_total);
+    }
+
+    heap_caps_free(buffer);
+    s_storage.benchmark_done = true;
+    return ESP_OK;
+}
 
 static void build_content_path(char *path, size_t path_size, const char *dir_path,
                                const char *rom_name, const char *extension,
@@ -150,6 +469,15 @@ esp_err_t storage_init(void)
     }
 
     sdmmc_card_print_info(stdout, s_storage.card);
+    ESP_LOGI(TAG,
+             "SD negotiated: host_req %d kHz host_real %d kHz card_max %u kHz | bus %u-bit | DDR %s UHS-I %s | CSD tr_speed %d",
+             host.max_freq_khz,
+             s_storage.card->real_freq_khz,
+             (unsigned)s_storage.card->max_freq_khz,
+             (unsigned)(1U << s_storage.card->log_bus_width),
+             s_storage.card->is_ddr ? "yes" : "no",
+             s_storage.card->is_uhs1 ? "yes" : "no",
+             s_storage.card->csd.tr_speed);
 
     /* Create saves directory if it doesn't exist */
     struct stat st;
@@ -161,6 +489,7 @@ esp_err_t storage_init(void)
     }
 
     s_storage.initialized = true;
+    s_storage.benchmark_done = false;
     ESP_LOGI(TAG, "SD card mounted at %s (4-bit, %d kHz)",
              STORAGE_MOUNT_POINT, SDMMC_FREQ_HIGHSPEED);
     return ESP_OK;
@@ -351,5 +680,6 @@ void storage_deinit(void)
     }
     /* Note: LDO power handle is typically not freed */
     s_storage.initialized = false;
+    s_storage.benchmark_done = false;
     ESP_LOGI(TAG, "Storage deinitialized");
 }

@@ -29,7 +29,7 @@ typedef struct
   unsigned cheat_count;
 } cheat_type;
 
-cheat_type cheats[MAX_CHEATS];
+GPSP_EXTRAM_BSS cheat_type cheats[MAX_CHEATS];
 u32 max_cheat = 0;
 u32 cheat_master_hook = 0xffffffff;
 

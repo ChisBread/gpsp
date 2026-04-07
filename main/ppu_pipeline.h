@@ -35,7 +35,7 @@ typedef struct {
 /*
  * Initialise the render pipeline.  Creates the render task on the
  * specified core and allocates the double-buffered scanline queue.
- * Must be called after av_pipeline_init() and init_sound().
+ * Must be called after init_sound().
  */
 esp_err_t ppu_pipeline_init(const ppu_pipeline_config_t *config);
 

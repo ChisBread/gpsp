@@ -34,6 +34,12 @@ extern "C" {
 esp_err_t storage_init(void);
 
 /**
+ * Run a one-shot storage throughput benchmark for a ROM file path.
+ * Measures stdio fread and raw sdmmc sector reads for diagnostic purposes.
+ */
+esp_err_t storage_run_benchmark(const char *rom_path);
+
+/**
  * Save battery-backed RAM to a file.
  */
 esp_err_t storage_write_save(const char *rom_name, const void *data, size_t size);

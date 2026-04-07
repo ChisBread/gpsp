@@ -172,18 +172,22 @@ void app_main(void)
         return;
     }
 
-    av_pipeline_config_t av_config = {
-        .task_stack_size = AV_TASK_STACK_SIZE,
-        .output_core = AV_OUTPUT_CORE,
-        .task_priority = configMAX_PRIORITIES - 2,
-        .audio_enabled = audio_ready,
-    };
+#ifndef DUAL_CORE_PPU
+    {
+        av_pipeline_config_t av_config = {
+            .task_stack_size = AV_TASK_STACK_SIZE,
+            .output_core = AV_OUTPUT_CORE,
+            .task_priority = configMAX_PRIORITIES - 2,
+            .audio_enabled = audio_ready,
+        };
 
-    err = av_pipeline_init(&av_config);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "AV pipeline init failed, halting");
-        return;
+        err = av_pipeline_init(&av_config);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "AV pipeline init failed, halting");
+            return;
+        }
     }
+#endif
 
 #ifdef DUAL_CORE_PPU
     {
