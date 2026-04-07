@@ -707,6 +707,12 @@ void gba_emulation_task(void *param)
     /* The render task owns gba_screen_pixels in dual-core mode.
      * The emu core should not render to a fallback buffer. */
     gba_screen_pixels = NULL;
+
+    if (ppu_pipeline_reset_pace() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to reset PPU pace timer");
+        vTaskDelete(NULL);
+        return;
+    }
 #else
     gba_screen_pixels = av_pipeline_default_video_buffer();
 

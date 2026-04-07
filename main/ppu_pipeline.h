@@ -46,6 +46,13 @@ esp_err_t ppu_pipeline_init(const ppu_pipeline_config_t *config);
 void ppu_pipeline_deinit(void);
 
 /*
+ * Re-arm the frame pacing timer from "now" and discard any stale pace tick.
+ * Call this immediately before starting the emulation frame loop so the
+ * 59.7275 Hz pacing phase aligns with emulation start, not pipeline init.
+ */
+esp_err_t ppu_pipeline_reset_pace(void);
+
+/*
  * Called by the emulation core at the start of each frame, before
  * the first scanline.  Blocks if the render task has not yet finished
  * consuming the previous frame's data (backpressure).

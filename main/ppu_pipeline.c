@@ -526,6 +526,28 @@ void ppu_pipeline_deinit(void)
         if (s_buf_sem[i]) { vSemaphoreDelete(s_buf_sem[i]); s_buf_sem[i] = NULL; }
 }
 
+esp_err_t ppu_pipeline_reset_pace(void)
+{
+    if (!s_timer || !s_pace) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = esp_timer_stop(s_timer);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        return err;
+    }
+
+    while (xSemaphoreTake(s_pace, 0) == pdTRUE) {
+    }
+
+    err = esp_timer_start_periodic(s_timer, PPU_FRAME_PERIOD_US);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    return ESP_OK;
+}
+
 /*
  * begin_frame — called at vcount ≈ 0 (start of visible area).
  *
