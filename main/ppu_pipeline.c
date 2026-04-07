@@ -83,6 +83,8 @@
 #define PAL_U16                    512     /* 1 KB */
 #define BUF_COUNT                  2
 #define SHUTDOWN_SENTINEL          0xFFFFFFFFu
+#define AUDIO_QUEUE_DEPTH          4
+#define AUDIO_SHUTDOWN_SENTINEL    0xFFFFFFFFu
 
 #define GBA_FRAME_RATE             59.7275f
 #define GBA_SOUND_HZ               GBA_SOUND_FREQUENCY
@@ -108,6 +110,11 @@ typedef struct {
     int         next_line;              /* write cursor 0..160 */
 } ppu_frame_t;
 
+typedef struct {
+    uint32_t frames;
+    int16_t samples[AUDIO_FRAME_MAX * 2];
+} audio_packet_t;
+
 /* ── module state ──────────────────────────────────────────────────── */
 
 static GPSP_EXTRAM_BSS ppu_frame_t s_frames[BUF_COUNT] __attribute__((aligned(64)));
@@ -116,15 +123,18 @@ static int               s_wr;                /* write buffer index   */
 
 static SemaphoreHandle_t s_buf_sem[BUF_COUNT]; /* "buffer free" tokens */
 static QueueHandle_t     s_queue;              /* completed-buf index  */
+static QueueHandle_t     s_audio_queue;        /* queued audio packet indices */
+static QueueHandle_t     s_audio_free_queue;   /* free audio packet indices */
 static SemaphoreHandle_t s_pace;               /* frame-pacing tick    */
 static SemaphoreHandle_t s_render_done;        /* serialization: render done */
 static esp_timer_handle_t s_timer;
 static TaskHandle_t      s_task;
+static TaskHandle_t      s_audio_task;
 
 static bool              s_audio_on;
 static float             s_audio_spf;          /* samples per frame    */
 static float             s_audio_frac;
-static int16_t           s_audio_buf[AUDIO_FRAME_MAX * 2];
+static audio_packet_t    s_audio_packets[AUDIO_QUEUE_DEPTH];
 
 static u16              *s_render_fb = s_render_fb_storage; /* render framebuffer */
 
@@ -132,6 +142,11 @@ static u16              *s_render_fb = s_render_fb_storage; /* render framebuffe
 static volatile int64_t  s_stat_scanline_us;
 static volatile int64_t  s_stat_video_us;
 static volatile int64_t  s_stat_audio_us;
+static volatile int64_t  s_stat_wait_render_us;
+static volatile int64_t  s_stat_wait_buf_us;
+static volatile int64_t  s_stat_wait_pace_us;
+static volatile uint32_t s_stat_audio_drop_count;
+static volatile uint32_t s_stat_audio_queue_peak;
 
 /* ── frame dump (diagnostic) ───────────────────────────────────────── */
 
@@ -234,6 +249,37 @@ static uint32_t collect_audio(int16_t *buf, size_t max)
     return n;
 }
 
+static void audio_task(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
+        uint32_t packet_idx;
+        if (xQueueReceive(s_audio_queue, &packet_idx, portMAX_DELAY) != pdTRUE)
+            continue;
+
+        if (packet_idx == AUDIO_SHUTDOWN_SENTINEL)
+            break;
+
+        audio_packet_t *packet = &s_audio_packets[packet_idx];
+
+        int64_t t0 = esp_timer_get_time();
+        esp_err_t err = audio_driver_write(packet->samples, packet->frames);
+        int64_t t1 = esp_timer_get_time();
+        s_stat_audio_us = t1 - t0;
+
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "audio write: %s", esp_err_to_name(err));
+            s_audio_on = false;
+        }
+
+        xQueueSend(s_audio_free_queue, &packet_idx, portMAX_DELAY);
+    }
+
+    ESP_LOGI(TAG, "audio task exit");
+    vTaskDelete(NULL);
+}
+
 /* Frame-pacing timer fires at GBA refresh rate. */
 static void pace_cb(void *arg) { (void)arg; xSemaphoreGive(s_pace); }
 
@@ -283,7 +329,7 @@ static void render_task(void *arg)
         ppu_dcache_invalidate(f, sizeof(ppu_frame_t));
         ppu_dcache_invalidate(vram, 1024 * 96);
 
-        int64_t t0 = esp_timer_get_time(), t1, t2, t3;
+        int64_t t0 = esp_timer_get_time(), t1, t2;
 
         if (!f->skip) {
             /*
@@ -342,20 +388,36 @@ static void render_task(void *arg)
 
         t2 = esp_timer_get_time();
 
-        /* Audio */
-        uint32_t af = collect_audio(s_audio_buf, AUDIO_FRAME_MAX);
-        if (s_audio_on && af > 0) {
-            esp_err_t err = audio_driver_write(s_audio_buf, af);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "audio write: %s", esp_err_to_name(err));
-                s_audio_on = false;
+        /* Audio: collect on the render task, write on a dedicated task so
+         * I2S back-pressure does not delay the next frame's scanline work. */
+        if (s_audio_on && s_audio_queue && s_audio_free_queue) {
+            uint32_t packet_idx;
+            if (xQueueReceive(s_audio_free_queue, &packet_idx, 0) == pdTRUE) {
+                audio_packet_t *packet = &s_audio_packets[packet_idx];
+                packet->frames = collect_audio(packet->samples, AUDIO_FRAME_MAX);
+                if (packet->frames > 0) {
+                    if (xQueueSend(s_audio_queue, &packet_idx, 0) != pdTRUE) {
+                        xQueueSend(s_audio_free_queue, &packet_idx, 0);
+                        s_stat_audio_drop_count++;
+                        s_stat_audio_us = 0;
+                    } else {
+                        uint32_t queued = (uint32_t)uxQueueMessagesWaiting(s_audio_queue);
+                        if (queued > s_stat_audio_queue_peak)
+                            s_stat_audio_queue_peak = queued;
+                    }
+                } else {
+                    xQueueSend(s_audio_free_queue, &packet_idx, 0);
+                    s_stat_audio_us = 0;
+                }
+            } else {
+                s_stat_audio_us = 0;
             }
+        } else {
+            s_stat_audio_us = 0;
         }
 
-        t3 = esp_timer_get_time();
         s_stat_scanline_us = t1 - t0;
         s_stat_video_us    = t2 - t1;
-        s_stat_audio_us    = t3 - t2;
     }
 
     ESP_LOGI(TAG, "render task exit");
@@ -377,13 +439,23 @@ esp_err_t ppu_pipeline_init(const ppu_pipeline_config_t *cfg)
     s_audio_spf  = (float)GBA_SOUND_HZ / GBA_FRAME_RATE;
     s_audio_frac = 0.0f;
     s_stat_scanline_us = s_stat_video_us = s_stat_audio_us = 0;
+    s_stat_wait_render_us = s_stat_wait_buf_us = s_stat_wait_pace_us = 0;
+    s_stat_audio_drop_count = 0;
+    s_stat_audio_queue_peak = 0;
 
     s_queue = xQueueCreate(BUF_COUNT, sizeof(uint32_t));
+    s_audio_queue = s_audio_on ? xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(uint32_t)) : NULL;
+    s_audio_free_queue = s_audio_on ? xQueueCreate(AUDIO_QUEUE_DEPTH, sizeof(uint32_t)) : NULL;
     for (int i = 0; i < BUF_COUNT; i++)
         s_buf_sem[i] = xSemaphoreCreateBinary();
 
-    if (!s_queue || !s_buf_sem[0] || !s_buf_sem[1])
+    if (!s_queue || (s_audio_on && (!s_audio_queue || !s_audio_free_queue)) || !s_buf_sem[0] || !s_buf_sem[1])
         return ESP_ERR_NO_MEM;
+
+    if (s_audio_on) {
+        for (uint32_t i = 0; i < AUDIO_QUEUE_DEPTH; i++)
+            xQueueSend(s_audio_free_queue, &i, portMAX_DELAY);
+    }
 
     s_pace = xSemaphoreCreateBinary();
     if (!s_pace) return ESP_ERR_NO_MEM;
@@ -411,6 +483,16 @@ esp_err_t ppu_pipeline_init(const ppu_pipeline_config_t *cfg)
         cfg->render_core);
     if (r != pdPASS) return ESP_FAIL;
 
+    if (s_audio_on) {
+        r = xTaskCreatePinnedToCore(
+            audio_task, "ppu_audio",
+            4096, NULL,
+            cfg->task_priority > 0 ? cfg->task_priority - 1 : cfg->task_priority,
+            &s_audio_task,
+            cfg->render_core);
+        if (r != pdPASS) return ESP_FAIL;
+    }
+
     ESP_LOGI(TAG, "init OK (core %d, buf %zu B × %d, pace %d us)",
              cfg->render_core, sizeof(ppu_frame_t), BUF_COUNT,
              PPU_FRAME_PERIOD_US);
@@ -435,9 +517,18 @@ void ppu_pipeline_deinit(void)
         s_task = NULL;
     }
 
+    if (s_audio_task && s_audio_queue) {
+        uint32_t packet_idx = AUDIO_SHUTDOWN_SENTINEL;
+        xQueueSend(s_audio_queue, &packet_idx, portMAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        s_audio_task = NULL;
+    }
+
     ppu_end_render_frame();
 
     if (s_queue) { vQueueDelete(s_queue); s_queue = NULL; }
+    if (s_audio_queue) { vQueueDelete(s_audio_queue); s_audio_queue = NULL; }
+    if (s_audio_free_queue) { vQueueDelete(s_audio_free_queue); s_audio_free_queue = NULL; }
     for (int i = 0; i < BUF_COUNT; i++)
         if (s_buf_sem[i]) { vSemaphoreDelete(s_buf_sem[i]); s_buf_sem[i] = NULL; }
 }
@@ -455,12 +546,20 @@ void ppu_pipeline_deinit(void)
  */
 void ppu_pipeline_begin_frame(void)
 {
+    int64_t t0 = esp_timer_get_time();
     /* Wait for previous render to finish — serializes emu+render
      * to eliminate any pipelining-induced state divergence. */
     xSemaphoreTake(s_render_done, portMAX_DELAY);
+    int64_t t1 = esp_timer_get_time();
 
     xSemaphoreTake(s_buf_sem[s_wr], portMAX_DELAY);
+    int64_t t2 = esp_timer_get_time();
     xSemaphoreTake(s_pace, portMAX_DELAY);
+    int64_t t3 = esp_timer_get_time();
+
+    s_stat_wait_render_us = t1 - t0;
+    s_stat_wait_buf_us    = t2 - t1;
+    s_stat_wait_pace_us   = t3 - t2;
 
     ppu_frame_t *f = &s_frames[s_wr];
     f->next_line = 0;
@@ -600,6 +699,19 @@ void ppu_pipeline_get_render_stats(int64_t *sl, int64_t *vid, int64_t *aud)
     if (sl)  *sl  = s_stat_scanline_us;
     if (vid) *vid = s_stat_video_us;
     if (aud) *aud = s_stat_audio_us;
+}
+
+void ppu_pipeline_get_wait_stats(int64_t *wait_render_us,
+                                 int64_t *wait_buf_us,
+                                 int64_t *wait_pace_us,
+                                 uint32_t *audio_drop_count,
+                                 uint32_t *audio_queue_peak)
+{
+    if (wait_render_us)  *wait_render_us  = s_stat_wait_render_us;
+    if (wait_buf_us)     *wait_buf_us     = s_stat_wait_buf_us;
+    if (wait_pace_us)    *wait_pace_us    = s_stat_wait_pace_us;
+    if (audio_drop_count) *audio_drop_count = s_stat_audio_drop_count;
+    if (audio_queue_peak) *audio_queue_peak = s_stat_audio_queue_peak;
 }
 
 void ppu_pipeline_dump_start(uint32_t skip, uint32_t count)

@@ -84,6 +84,15 @@ void ppu_pipeline_get_render_stats(int64_t *scanline_us, int64_t *video_us,
                                    int64_t *audio_us);
 
 /*
+ * Read the last begin_frame wait breakdown and audio queue stats.
+ */
+void ppu_pipeline_get_wait_stats(int64_t *wait_render_us,
+                                 int64_t *wait_buf_us,
+                                 int64_t *wait_pace_us,
+                                 uint32_t *audio_drop_count,
+                                 uint32_t *audio_queue_peak);
+
+/*
  * Start recording frames to SD card.
  * Records 'count' frames starting after skipping 'skip' frames.
  * Set count=0 to disable. Auto-disables after completion.

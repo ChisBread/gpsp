@@ -84,6 +84,44 @@ static int64_t s_frame_start_us;
 static uint32_t s_fps_counter;
 static int64_t s_fps_timer_us;
 
+#ifdef CPU_PROFILE_STATS
+static void log_scanline_breakdown(void)
+{
+    if (cpu_prof.frames == 0) {
+        return;
+    }
+
+    const u32 frames = cpu_prof.frames;
+    const u32 order = cpu_prof.scanline_order_cycles / frames;
+    const u32 bg = cpu_prof.scanline_bg_cycles / frames;
+    const u32 obj = cpu_prof.scanline_obj_cycles / frames;
+    const u32 fx = cpu_prof.scanline_effect_cycles / frames;
+    const u32 blank = cpu_prof.scanline_blank_cycles / frames;
+    const u32 affine = cpu_prof.scanline_affine_cycles / frames;
+    const u32 render_total = order + bg + obj + fx + blank + affine;
+    const u32 bg_text_fast = cpu_prof.scanline_bg_text_fast_cycles / frames;
+    const u32 bg_text_mosaic = cpu_prof.scanline_bg_text_mosaic_cycles / frames;
+    const u32 bg_affine = cpu_prof.scanline_bg_affine_cycles / frames;
+    const u32 bg_bitmap = cpu_prof.scanline_bg_bitmap_cycles / frames;
+
+    ESP_LOGI(TAG,
+             "RSCAN cyc/frame: total %u | ord %u bg %u obj %u fx %u blank %u aff %u",
+             (unsigned)render_total,
+             (unsigned)order,
+             (unsigned)bg,
+             (unsigned)obj,
+             (unsigned)fx,
+             (unsigned)blank,
+             (unsigned)affine);
+    ESP_LOGI(TAG,
+             "BG cyc/frame: text_fast %u text_mosaic %u affine %u bitmap %u",
+             (unsigned)bg_text_fast,
+             (unsigned)bg_text_mosaic,
+             (unsigned)bg_affine,
+             (unsigned)bg_bitmap);
+}
+#endif
+
 /* Pre-allocated PSRAM buffer for state/save I/O (serialized access via command queue) */
 static GPSP_EXTRAM_BSS uint8_t s_state_io_buf[GBA_SESSION_STATE_IO_BUF_SIZE] __attribute__((aligned(16)));
 
@@ -767,14 +805,24 @@ void gba_emulation_task(void *param)
             int64_t now = esp_timer_get_time();
             if (now - s_fps_timer_us >= 1000000) {
                 int64_t r_scan, r_video, r_audio;
+                int64_t w_render, w_buf, w_pace;
+                uint32_t a_drop, a_qpeak;
                 ppu_pipeline_get_render_stats(&r_scan, &r_video, &r_audio);
-                ESP_LOGI(TAG, "FPS: %u | cpu: %lld us | wait: %lld us | R: scan %lld vid %lld aud %lld us | heap: %u KB",
+                ppu_pipeline_get_wait_stats(&w_render, &w_buf, &w_pace,
+                                            &a_drop, &a_qpeak);
+                ESP_LOGI(TAG, "FPS: %u | cpu: %lld us | wait: %lld us (rd %lld buf %lld pace %lld) | R: scan %lld vid %lld aud %lld us | A: drop %u qpk %u | heap: %u KB",
                          (unsigned)s_fps_counter,
                          (long long)(t1 - t0),
                          (long long)(t_wait - s_frame_start_us),
+                         (long long)w_render,
+                         (long long)w_buf,
+                         (long long)w_pace,
                          (long long)r_scan, (long long)r_video, (long long)r_audio,
+                         (unsigned)a_drop,
+                         (unsigned)a_qpeak,
                          (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024));
 #ifdef CPU_PROFILE_STATS
+                log_scanline_breakdown();
                 cpu_prof_print();
 #endif
                 s_fps_counter = 0;

@@ -17,6 +17,12 @@
 
 static const char *TAG = "gpsp_audio";
 
+/* One GBA frame produces roughly 550-900 stereo sample pairs depending on
+ * the configured audio rate. Size the I2S DMA ring so a whole frame burst
+ * usually fits without immediately blocking the writer task. */
+#define AUDIO_DMA_DESC_NUM   8
+#define AUDIO_DMA_FRAME_NUM  1024
+
 /* ---- ES8311 register definitions (subset for playback) ---- */
 #define ES8311_REG_RESET        0x00
 #define ES8311_REG_CLK_MGR1     0x01
@@ -154,8 +160,8 @@ esp_err_t audio_driver_init(const audio_driver_config_t *config)
     /* ---- 2. Initialize I2S ---- */
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
-    chan_cfg.dma_desc_num = 4;
-    chan_cfg.dma_frame_num = 512;
+    chan_cfg.dma_desc_num = AUDIO_DMA_DESC_NUM;
+    chan_cfg.dma_frame_num = AUDIO_DMA_FRAME_NUM;
 
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &s_audio.tx_chan, NULL));
 
