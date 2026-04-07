@@ -321,21 +321,26 @@ static void render_task(void *arg)
 
             t1 = esp_timer_get_time();
 
+            /* Rendering is finished at this point: VRAM and the frame
+             * descriptor are no longer read after dump_frame(). Let the
+             * emu core start building the next frame while video submit
+             * pushes the already-rendered framebuffer to the panel. */
+            xSemaphoreGive(s_buf_sem[idx]);
+            xSemaphoreGive(s_render_done);
+
             esp_err_t err = video_driver_submit_frame(s_render_fb);
             if (err != ESP_OK)
                 ESP_LOGW(TAG, "video submit: %s", esp_err_to_name(err));
         } else {
             t1 = t0;
+
+            /* Skipped frames do not touch the framebuffer. Release the
+             * frame descriptor immediately so the emu core can continue. */
+            xSemaphoreGive(s_buf_sem[idx]);
+            xSemaphoreGive(s_render_done);
         }
 
         t2 = esp_timer_get_time();
-
-        /* Release buffer BEFORE audio — emu can start next frame
-         * while we block on I2S output. */
-        xSemaphoreGive(s_buf_sem[idx]);
-
-        /* Signal serialization: render is done with this frame */
-        xSemaphoreGive(s_render_done);
 
         /* Audio */
         uint32_t af = collect_audio(s_audio_buf, AUDIO_FRAME_MAX);
