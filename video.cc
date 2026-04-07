@@ -71,6 +71,7 @@ static u16 *ppu_pal_ptr  = palette_ram_converted;
 
 /* ── render-local VRAM ─────────────────────────────────────────────── */
 
+static u8  *ppu_real_vram = vram;
 static u8  *ppu_vram_ptr  = vram;
 #define vram ppu_vram_ptr
 
@@ -209,12 +210,15 @@ static s32 ppu_affine_ref_y[2];
  * All functions are extern "C" because ppu_pipeline.c is plain C.
  */
 
-extern "C" void ppu_begin_render_frame(const u16 *oam_snap, const u16 *pal_snap)
+extern "C" void ppu_begin_render_frame(const u16 *oam_snap,
+                     const u16 *pal_snap,
+                     u8 *vram_snap)
 {
     memcpy(ppu_oam, oam_snap, sizeof(ppu_oam));
     memcpy(ppu_pal, pal_snap, sizeof(ppu_pal));
     ppu_oam_ptr  = ppu_oam;
     ppu_pal_ptr  = ppu_pal;
+    ppu_vram_ptr = vram_snap;
 }
 
 extern "C" void ppu_begin_render_line(const u16 *io_snap,
@@ -235,6 +239,7 @@ extern "C" void ppu_end_render_frame(void)
     ppu_active_io = io_registers;
     ppu_oam_ptr   = ppu_real_oam;
     ppu_pal_ptr   = ppu_real_pal;
+    ppu_vram_ptr  = ppu_real_vram;
 }
 #endif /* DUAL_CORE_PPU */
 

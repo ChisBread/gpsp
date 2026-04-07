@@ -35,8 +35,9 @@ extern u16* gba_screen_pixels;
  * calling update_scanline().
  */
 
-/* Copy OAM + palette snapshots into render-local arrays. */
-void ppu_begin_render_frame(const u16 *oam_snap, const u16 *pal_snap);
+/* Redirect OAM + palette + VRAM reads to render-local snapshots. */
+void ppu_begin_render_frame(const u16 *oam_snap, const u16 *pal_snap,
+                            u8 *vram_snap);
 
 /* Copy per-line IO snapshot and affine refs; set OAM_UPDATED flag. */
 void ppu_begin_render_line(const u16 *io_snap,

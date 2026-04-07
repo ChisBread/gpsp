@@ -38,10 +38,10 @@
  *      dirty flag so order_obj() re-sorts on the render side, but the
  *      snapshot itself stays the same for the whole frame.
  *
- *   3. VRAM (96 KB) is NOT snapshotted — too large.  The render core
- *      reads VRAM directly.  Serialization (s_render_done) ensures the
- *      render core finishes before the emu core modifies VRAM for the
- *      next frame.
+ *   3. VRAM (96 KB) is snapshotted once per frame after VBlank DMA in
+ *      post_vblank().  The render core reads only that per-frame copy,
+ *      so the emu core can start the next frame immediately instead of
+ *      serializing on render completion.
  *
  *   4. IO registers are snapshotted per scanline (128 B) and copied
  *      into a DRAM-local buffer before rendering each line.
@@ -81,6 +81,7 @@
 #define IO_SNAP_U16                64      /* io_registers[0..63] */
 #define OAM_U16                    512     /* 1 KB */
 #define PAL_U16                    512     /* 1 KB */
+#define VRAM_SNAPSHOT_BYTES        (1024 * 96)
 #define BUF_COUNT                  2
 #define SHUTDOWN_SENTINEL          0xFFFFFFFFu
 #define AUDIO_QUEUE_DEPTH          4
@@ -105,6 +106,7 @@ typedef struct {
     ppu_line_t  line[GBA_LINES];
     u16         oam[OAM_U16];           /* OAM snapshot (1 KB)   */
     u16         palette[PAL_U16];       /* palette snapshot (1 KB) */
+    u8          vram[VRAM_SNAPSHOT_BYTES];
     u8          skip;                   /* non-zero → skip rendering */
     u8          pad[3];
     int         next_line;              /* write cursor 0..160 */
@@ -126,7 +128,6 @@ static QueueHandle_t     s_queue;              /* completed-buf index  */
 static QueueHandle_t     s_audio_queue;        /* queued audio packet indices */
 static QueueHandle_t     s_audio_free_queue;   /* free audio packet indices */
 static SemaphoreHandle_t s_pace;               /* frame-pacing tick    */
-static SemaphoreHandle_t s_render_done;        /* serialization: render done */
 static esp_timer_handle_t s_timer;
 static TaskHandle_t      s_task;
 static TaskHandle_t      s_audio_task;
@@ -287,9 +288,9 @@ static void pace_cb(void *arg) { (void)arg; xSemaphoreGive(s_pace); }
 
 /*
  * ESP32-P4 L1 D-caches are NOT hardware-coherent between cores.
- * The frame descriptor (PSRAM) and VRAM (SRAM) are written by Core 1
- * and read by Core 0.  Without explicit cache management Core 0 may
- * read stale L1 data → wrong sprite positions / scrolling offsets.
+ * The frame descriptor (PSRAM) is written by Core 1 and read by Core 0.
+ * Without explicit cache management Core 0 may read stale L1 data →
+ * wrong sprite positions / scrolling offsets.
  */
 
 static inline void ppu_dcache_writeback(void *addr, size_t size)
@@ -324,20 +325,19 @@ static void render_task(void *arg)
 
         ppu_frame_t *f = &s_frames[idx];
 
-        /* Invalidate Core 0 L1 D-cache for the frame descriptor
-         * and VRAM so we read Core 1's latest data. */
+        /* Invalidate Core 0 L1 D-cache for the frame descriptor so we
+         * read Core 1's latest snapshot contents. */
         ppu_dcache_invalidate(f, sizeof(ppu_frame_t));
-        ppu_dcache_invalidate(vram, 1024 * 96);
 
         int64_t t0 = esp_timer_get_time(), t1, t2;
 
         if (!f->skip) {
             /*
-             * Point the renderer at our private framebuffer and copy
-             * per-frame OAM + palette + VRAM into DRAM-local render arrays.
+             * Point the renderer at our private framebuffer and redirect
+             * OAM/palette/VRAM reads to this frame's private snapshots.
              */
             gba_screen_pixels = s_render_fb;
-            ppu_begin_render_frame(f->oam, f->palette);
+            ppu_begin_render_frame(f->oam, f->palette, f->vram);
 
             u32 saved_skip = skip_next_frame;
             skip_next_frame = 0;
@@ -367,12 +367,11 @@ static void render_task(void *arg)
 
             t1 = esp_timer_get_time();
 
-            /* Rendering is finished at this point: VRAM and the frame
-             * descriptor are no longer read after dump_frame(). Let the
-             * emu core start building the next frame while video submit
-             * pushes the already-rendered framebuffer to the panel. */
+            /* Rendering is finished at this point: the frame descriptor
+             * is no longer read after dump_frame(). Let the emu core
+             * start reusing this buffer while video submit pushes the
+             * already-rendered framebuffer to the panel. */
             xSemaphoreGive(s_buf_sem[idx]);
-            xSemaphoreGive(s_render_done);
 
             esp_err_t err = video_driver_submit_frame(s_render_fb);
             if (err != ESP_OK)
@@ -383,7 +382,6 @@ static void render_task(void *arg)
             /* Skipped frames do not touch the framebuffer. Release the
              * frame descriptor immediately so the emu core can continue. */
             xSemaphoreGive(s_buf_sem[idx]);
-            xSemaphoreGive(s_render_done);
         }
 
         t2 = esp_timer_get_time();
@@ -460,10 +458,6 @@ esp_err_t ppu_pipeline_init(const ppu_pipeline_config_t *cfg)
     s_pace = xSemaphoreCreateBinary();
     if (!s_pace) return ESP_ERR_NO_MEM;
 
-    s_render_done = xSemaphoreCreateBinary();
-    if (!s_render_done) return ESP_ERR_NO_MEM;
-    xSemaphoreGive(s_render_done);  /* first frame has no prior render */
-
     const esp_timer_create_args_t targs = {
         .callback = pace_cb,
         .name     = "ppu_pace",
@@ -508,7 +502,6 @@ void ppu_pipeline_deinit(void)
         s_timer = NULL;
     }
     if (s_pace) { vSemaphoreDelete(s_pace); s_pace = NULL; }
-    if (s_render_done) { vSemaphoreDelete(s_render_done); s_render_done = NULL; }
 
     if (s_task) {
         uint32_t x = SHUTDOWN_SENTINEL;
@@ -547,19 +540,14 @@ void ppu_pipeline_deinit(void)
 void ppu_pipeline_begin_frame(void)
 {
     int64_t t0 = esp_timer_get_time();
-    /* Wait for previous render to finish — serializes emu+render
-     * to eliminate any pipelining-induced state divergence. */
-    xSemaphoreTake(s_render_done, portMAX_DELAY);
-    int64_t t1 = esp_timer_get_time();
-
     xSemaphoreTake(s_buf_sem[s_wr], portMAX_DELAY);
-    int64_t t2 = esp_timer_get_time();
+    int64_t t1 = esp_timer_get_time();
     xSemaphoreTake(s_pace, portMAX_DELAY);
-    int64_t t3 = esp_timer_get_time();
+    int64_t t2 = esp_timer_get_time();
 
-    s_stat_wait_render_us = t1 - t0;
-    s_stat_wait_buf_us    = t2 - t1;
-    s_stat_wait_pace_us   = t3 - t2;
+    s_stat_wait_render_us = 0;
+    s_stat_wait_buf_us    = t1 - t0;
+    s_stat_wait_pace_us   = t2 - t1;
 
     ppu_frame_t *f = &s_frames[s_wr];
     f->next_line = 0;
@@ -666,21 +654,19 @@ void ppu_pipeline_end_frame(bool skip)
 /*
  * post_vblank — called AFTER VBlank DMA completes (still at vcount == 160).
  *
- * Flushes the frame descriptor and VRAM to SRAM, then queues the frame
- * for the render core.  By deferring until after VBlank DMA, the render
- * core sees a consistent VRAM snapshot that includes VBlank DMA changes.
- *
- * Without this split, VBlank DMA writes to VRAM (in Core 1 L1) could be
- * partially evicted to SRAM while the render core reads VRAM, creating a
- * random mix of pre- and post-DMA data — the root cause of sprite
- * flickering on frames where VBlank DMA updates tile data.
+ * Copies VRAM into the frame descriptor after VBlank DMA, flushes the
+ * completed snapshot to memory, then queues the frame for the render core.
+ * This guarantees the render core sees a stable per-frame VRAM image.
  */
 void ppu_pipeline_post_vblank(void)
 {
     uint32_t done = (uint32_t)s_wr;
+    ppu_frame_t *f = &s_frames[done];
+
     asm volatile ("fence rw, rw" ::: "memory");
-    ppu_dcache_writeback(&s_frames[done], sizeof(ppu_frame_t));
-    ppu_dcache_writeback(vram, 1024 * 96);
+    if (!f->skip)
+        memcpy(f->vram, vram, sizeof(f->vram));
+    ppu_dcache_writeback(f, sizeof(*f));
 
     /* Send completed buffer to render task, switch to other buffer. */
     s_wr ^= 1;

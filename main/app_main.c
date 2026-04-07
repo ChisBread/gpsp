@@ -224,6 +224,11 @@ void app_main(void)
         return;
     }
 
+    ESP_LOGI(TAG, "Before emu task: free internal RAM %u KB, free PSRAM %u KB, emu stack %u B",
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+             (unsigned)CONFIG_GPSP_EMU_TASK_STACK_SIZE);
+
     /* Start emulation on the configured core */
     BaseType_t ret = xTaskCreatePinnedToCore(
         gba_emulation_task,

@@ -806,12 +806,15 @@ void gba_emulation_task(void *param)
             if (now - s_fps_timer_us >= 1000000) {
                 int64_t r_scan, r_video, r_audio;
                 int64_t w_render, w_buf, w_pace;
+                int64_t emu_wall;
                 uint32_t a_drop, a_qpeak;
                 ppu_pipeline_get_render_stats(&r_scan, &r_video, &r_audio);
                 ppu_pipeline_get_wait_stats(&w_render, &w_buf, &w_pace,
                                             &a_drop, &a_qpeak);
-                ESP_LOGI(TAG, "FPS: %u | cpu: %lld us | wait: %lld us (rd %lld buf %lld pace %lld) | R: scan %lld vid %lld aud %lld us | A: drop %u qpk %u | heap: %u KB",
+                emu_wall = t1 - s_frame_start_us;
+                ESP_LOGI(TAG, "FPS: %u | emu: %lld us | cpu: %lld us | wait: %lld us (rd %lld buf %lld hz60 %lld) | R: scan %lld vid %lld aud %lld us | A: drop %u qpk %u | heap: %u KB",
                          (unsigned)s_fps_counter,
+                         (long long)emu_wall,
                          (long long)(t1 - t0),
                          (long long)(t_wait - s_frame_start_us),
                          (long long)w_render,

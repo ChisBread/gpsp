@@ -66,8 +66,8 @@ void ppu_pipeline_submit_scanline(void);
 void ppu_pipeline_end_frame(bool skip_frame);
 
 /*
- * Called AFTER VBlank DMA completes.  Flushes the frame descriptor
- * and VRAM to SRAM, then queues the frame for the render core.
+ * Called AFTER VBlank DMA completes. Copies VRAM into the completed
+ * frame snapshot and queues it for the render core.
  */
 void ppu_pipeline_post_vblank(void);
 

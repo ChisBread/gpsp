@@ -9,9 +9,8 @@
  *
  * The key difference from sequential simulation: while the render thread
  * is rendering frame N, the CPU thread is already emulating frame N+1.
- * This means VRAM (which is NOT snapshotted) is read by the render thread
- * while the CPU thread writes to it — reproducing the same race condition
- * as the real ESP32-P4 dual-core setup.
+ * VRAM is snapshotted into the per-frame descriptor at post_vblank(),
+ * matching the aggressive dual-core pipeline used on ESP32-P4.
  */
 
 #ifdef DUAL_CORE_PPU
@@ -29,6 +28,7 @@
 #define IO_SNAP_U16     64
 #define OAM_U16         512
 #define PAL_U16         512
+#define VRAM_SNAPSHOT_BYTES (1024 * 96)
 #define BUF_COUNT       2
 
 /* ── per-scanline descriptor ───────────────────────────────────────── */
@@ -46,6 +46,7 @@ typedef struct {
     ppu_line_t  line[GBA_LINES];
     u16         oam[OAM_U16];
     u16         palette[PAL_U16];
+    u8          vram[VRAM_SNAPSHOT_BYTES];
     u8          skip;
     int         next_line;
 } ppu_frame_t;
@@ -155,7 +156,7 @@ static void *render_thread_func(void *arg)
 
         if (!f->skip) {
             gba_screen_pixels = s_render_fb;
-            ppu_begin_render_frame(f->oam, f->palette);
+            ppu_begin_render_frame(f->oam, f->palette, f->vram);
 
             u32 saved_skip = skip_next_frame;
             skip_next_frame = 0;
@@ -298,6 +299,11 @@ void ppu_pipeline_end_frame(bool skip)
 
 void ppu_pipeline_post_vblank(void)
 {
+    ppu_frame_t *f = &s_frames[s_wr];
+
+    if (!f->skip)
+        memcpy(f->vram, vram, sizeof(f->vram));
+
     /* Send completed buffer to render thread, switch to other buffer */
     int done = s_wr;
     s_wr ^= 1;
