@@ -216,6 +216,25 @@ void app_main(void)
         .bios_path = bios_path,
     };
 
+    ESP_LOGI(TAG,
+             "GBA config: rom=%s bios=%s boot=%s dynarec=%d sprite_limit=%d audio=%d",
+             session_config.rom_path,
+             session_config.bios_path,
+             selected_boot_mode == boot_bios ? "bios" : "game",
+             dynarec_enable ? 1 : 0,
+             sprite_limit ? 1 : 0,
+             audio_ready ? 1 : 0);
+#ifdef DUAL_CORE_PPU
+    ESP_LOGI(TAG, "GBA renderer: dual_core=1 emu_core=%d render_core=%d c6_remote=%d",
+             CONFIG_GPSP_EMULATION_CORE,
+             AV_OUTPUT_CORE,
+             CONFIG_GPSP_ENABLE_C6_REMOTE ? 1 : 0);
+#else
+    ESP_LOGI(TAG, "GBA renderer: dual_core=0 output_core=%d c6_remote=%d",
+             AV_OUTPUT_CORE,
+             CONFIG_GPSP_ENABLE_C6_REMOTE ? 1 : 0);
+#endif
+
     err = gba_session_init(&session_config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "GBA init failed, halting");

@@ -55,10 +55,11 @@ typedef struct {
     struct sockaddr_in addr;
 } netpacket_peer_state_t;
 
+static void netpacket_close_socket(void);
+
 u32 netplay_num_clients = 0;
 u32 netplay_client_id = 0;
 
-#if CONFIG_GPSP_NETPLAY_UDP_ENABLE
 static const char *TAG = "gpsp_netpacket";
 static int netpacket_socket_fd = -1;
 static int64_t netpacket_last_open_attempt_us;
@@ -70,6 +71,7 @@ static netpacket_peer_state_t netpacket_peers[MAX_RFU_NETPLAYERS];
 static uint64_t netpacket_local_node_uid;
 static bool netpacket_local_assigned;
 
+#if CONFIG_GPSP_NETPLAY_UDP_ENABLE
 static uint8_t netpacket_local_preferred_client_id(void)
 {
     if (gpsp_netplay_local_client_id_override < 0 ||
