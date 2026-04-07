@@ -601,7 +601,7 @@ const u8 bit_count[256] =
   {                                                                           \
     REG_MODE(MODE_IRQ)[6] = reg[REG_PC] + 4;                                  \
     REG_SPSR(MODE_IRQ) = reg[REG_CPSR];                                       \
-    reg[REG_CPSR] = 0xD2;                                                     \
+    reg[REG_CPSR] = (reg[REG_CPSR] & 0xF0000000) | 0xD2;                      \
     reg[REG_PC] = 0x00000018;                                                 \
     set_cpu_mode(MODE_IRQ);                                                   \
       CPU_PROF_SWITCH_TO_ARM();                                                 \
@@ -1426,7 +1426,7 @@ u32 check_and_raise_interrupts()
     // Interrupt handler in BIOS
     REG_MODE(MODE_IRQ)[6] = reg[REG_PC] + 4;
     REG_SPSR(MODE_IRQ) = reg[REG_CPSR];
-    reg[REG_CPSR] = 0xD2;
+    reg[REG_CPSR] = (reg[REG_CPSR] & 0xF0000000) | 0xD2;
     reg[REG_PC] = 0x00000018;
 
     set_cpu_mode(MODE_IRQ);

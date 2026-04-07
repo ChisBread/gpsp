@@ -1,7 +1,6 @@
 # Standalone GBA emulator test harness for QEMU RV32
 # Usage:
-#   make                  # build interpreter-only
-#   make MODE=jit         # build with JIT dynarec
+#   make
 #   make run BIOS=bios.bin ROM=test.gba
 
 CROSS   ?= /opt/riscv32-linux-musl-cross/bin/riscv32-linux-musl-
@@ -49,7 +48,7 @@ LRC_C   = $(LRC)/streams/file_stream.c \
           $(LRC)/compat/fopen_utf8.c
 
 # Our harness
-HARNESS_C = harness_main.c harness_stubs.c trace_instr.c
+HARNESS_C = harness_main.c harness_stubs.c
 
 # --- Flags ---
 INCS    = -I$(ROOT) \
@@ -59,7 +58,6 @@ INCS    = -I$(ROOT) \
           -I.
 
 DEFS    = -DQEMU_HARNESS \
-          -DTRACE_INSTRUCTIONS \
           $(JIT_DEF)
 
 CFLAGS  = $(MARCH) -static -O2 -g -Wall -Wno-unused $(DEFS) $(INCS)

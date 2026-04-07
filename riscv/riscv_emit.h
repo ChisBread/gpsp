@@ -70,34 +70,77 @@ u32 function_cc execute_load_u32(u32 address)
     return read_memory32(address);
 }
 
-void function_cc execute_store_u8(u32 address, u32 source)
+cpu_alert_type function_cc execute_store_u8(u32 address, u32 source)
 {
-    write_memory8(address, source);
+    cpu_alert_type alert = write_memory8(address, source);
+    u8 region = address >> 24;
+    if (region == 0x03) {
+        if (iwram[address & 0x7FFF])
+            alert |= CPU_ALERT_SMC;
+    } else if (region == 0x02) {
+        if (ewram[(address & 0x3FFFF) + 0x40000])
+            alert |= CPU_ALERT_SMC;
+    }
+    return alert;
 }
 
-void function_cc execute_store_u16(u32 address, u32 source)
+cpu_alert_type function_cc execute_store_u16(u32 address, u32 source)
 {
-    write_memory16(address, source);
+    cpu_alert_type alert = write_memory16(address, source);
+    u8 region = address >> 24;
+    if (region == 0x03) {
+        u32 offset = (address & 0x7FFF) & ~1;
+        if (*(u16*)(iwram + offset))
+            alert |= CPU_ALERT_SMC;
+    } else if (region == 0x02) {
+        u32 offset = ((address & 0x3FFFF) & ~1) + 0x40000;
+        if (*(u16*)(ewram + offset))
+            alert |= CPU_ALERT_SMC;
+    }
+    return alert;
 }
 
-void function_cc execute_store_u32(u32 address, u32 source)
+cpu_alert_type function_cc execute_store_u32(u32 address, u32 source)
 {
-    write_memory32(address, source);
+    cpu_alert_type alert = write_memory32(address, source);
+    u8 region = address >> 24;
+    if (region == 0x03) {
+        u32 offset = (address & 0x7FFF) & ~3;
+        if (*(u32*)(iwram + offset))
+            alert |= CPU_ALERT_SMC;
+    } else if (region == 0x02) {
+        u32 offset = ((address & 0x3FFFF) & ~3) + 0x40000;
+        if (*(u32*)(ewram + offset))
+            alert |= CPU_ALERT_SMC;
+    }
+    return alert;
 }
 
-void function_cc execute_store_aligned_u32(u32 address, u32 source)
+cpu_alert_type function_cc execute_store_aligned_u32(u32 address, u32 source)
 {
-    write_memory32(address, source);
+    return write_memory32(address, source);
 }
 
-void execute_aligned_store32(u32 addr, u32 data)
+cpu_alert_type execute_aligned_store32(u32 addr, u32 data)
 {
-    execute_store_aligned_u32(addr, data);
+    return execute_store_aligned_u32(addr, data);
 }
 
 u32 execute_aligned_load32(u32 addr)
 {
     return read_memory32(addr);
+}
+
+u32 rv_handle_store_alert(u32 alert, int cycles)
+{
+    if (alert & CPU_ALERT_SMC)
+        flush_translation_cache_ram();
+    if (alert & CPU_ALERT_IRQ)
+        check_and_raise_interrupts();
+    if (alert & CPU_ALERT_HALT) {
+        return update_gba(cycles);
+    }
+    return cycles;
 }
 
 void rv_bad_pc_trap(u32 bad_pc)
@@ -119,7 +162,7 @@ u32 execute_spsr_restore_body(u32 address)
     {
         REG_MODE(MODE_IRQ)[6] = address + 4;
         REG_SPSR(MODE_IRQ) = reg[REG_CPSR];
-        reg[REG_CPSR] = 0xD2;
+        reg[REG_CPSR] = (reg[REG_CPSR] & 0xF0000000) | 0xD2;
         address = 0x00000018;
         set_cpu_mode(MODE_IRQ);
     }
@@ -141,7 +184,7 @@ u32 execute_store_cpsr_body(u32 _cpsr, u32 address, u32 store_mask)
         {
             REG_MODE(MODE_IRQ)[6] = address + 4;
             REG_SPSR(MODE_IRQ) = _cpsr;
-            reg[REG_CPSR] = 0xD2;
+            reg[REG_CPSR] = (reg[REG_CPSR] & 0xF0000000) | 0xD2;
             set_cpu_mode(MODE_IRQ);
             return 0x00000018;
         }
@@ -438,10 +481,28 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     }                                                                           \
 
 #define generate_indirect_branch_arm()                                         \
-    generate_indirect_branch_no_cycle_update(arm)                              \
+    {                                                                          \
+        if (condition == 0x0E)                                                 \
+        {                                                                      \
+            generate_indirect_branch_cycle_update(arm);                        \
+        }                                                                      \
+        else                                                                   \
+        {                                                                      \
+            generate_indirect_branch_no_cycle_update(arm);                     \
+        }                                                                      \
+    }
 
 #define generate_indirect_branch_dual()                                        \
-    generate_indirect_branch_no_cycle_update(dual)                             \
+    {                                                                          \
+        if (condition == 0x0E)                                                 \
+        {                                                                      \
+            generate_indirect_branch_cycle_update(dual);                       \
+        }                                                                      \
+        else                                                                   \
+        {                                                                      \
+            generate_indirect_branch_no_cycle_update(dual);                    \
+        }                                                                      \
+    }
 
 #define check_store_reg_pc_no_flags(reg_index)                                 \
     if (reg_index == REG_PC)                                                   \
@@ -877,21 +938,26 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define generate_op_adds_reg(_rd, _rn, _rm)                                   \
     rv_mv(reg_temp3, _rn);                                                    \
+    rv_mv(reg_save0, _rm);                                                    \
     rv_add(_rd, _rn, _rm);                                                    \
-    generate_op_add_flags(_rd, reg_temp3, _rm)                                \
+    generate_op_add_flags(_rd, reg_temp3, reg_save0)                          \
 
 #define generate_op_subs_reg(_rd, _rn, _rm)                                   \
     rv_mv(reg_temp3, _rn);                                                    \
+    rv_mv(reg_save0, _rm);                                                    \
     rv_sub(_rd, _rn, _rm);                                                    \
-    generate_op_sub_flags(_rd, reg_temp3, _rm)                                \
+    generate_op_sub_flags(_rd, reg_temp3, reg_save0)                          \
 
 #define generate_op_rsbs_reg(_rd, _rn, _rm)                                   \
     rv_mv(reg_temp3, _rm);                                                    \
+    rv_mv(reg_save0, _rn);                                                    \
     rv_sub(_rd, _rm, _rn);                                                    \
-    generate_op_sub_flags(_rd, reg_temp3, _rn)                                      \
+    generate_op_sub_flags(_rd, reg_temp3, reg_save0)                          \
 
 #define generate_op_adcs_reg(_rd, _rn, _rm)                                   \
 {                                                                             \
+    if (check_generate_v_flag)                                                \
+        rv_mv(reg_v_cache, _rm);         /* save _rm for V flag */            \
     rv_add(reg_temp3, _rm, reg_c_cache);                                      \
     rv_sltu(reg_temp2, reg_temp3, _rm);                                       \
     rv_mv(reg_save0, _rn);                                                    \
@@ -901,7 +967,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     if (check_generate_v_flag)                                                \
     {                                                                         \
         rv_xor(reg_temp, reg_save0, _rd);                                     \
-        rv_xor(reg_temp2, _rm, _rd);                                          \
+        rv_xor(reg_temp2, reg_v_cache, _rd);                                  \
         rv_and(reg_v_cache, reg_temp, reg_temp2);                             \
         rv_srli(reg_v_cache, reg_v_cache, 31);                                \
     }                                                                         \
@@ -910,6 +976,8 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define generate_op_sbcs_reg(_rd, _rn, _rm)                                   \
 {                                                                             \
+    if (check_generate_v_flag)                                                \
+        rv_mv(reg_v_cache, _rm);         /* save _rm for V flag */            \
     rv_xori(reg_temp3, reg_c_cache, 1);                                       \
     rv_add(reg_temp2, _rm, reg_temp3);                                        \
     rv_sltu(reg_temp3, reg_temp2, _rm);                                       \
@@ -920,7 +988,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     rv_xori(reg_c_cache, reg_c_cache, 1);                                     \
     if (check_generate_v_flag)                                                \
     {                                                                         \
-        rv_xor(reg_temp, reg_save0, _rm);                                     \
+        rv_xor(reg_temp, reg_save0, reg_v_cache);                             \
         rv_xor(reg_temp2, reg_save0, _rd);                                    \
         rv_and(reg_v_cache, reg_temp, reg_temp2);                             \
         rv_srli(reg_v_cache, reg_v_cache, 31);                                \
@@ -930,6 +998,8 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define generate_op_rscs_reg(_rd, _rn, _rm)                                   \
 {                                                                             \
+    if (check_generate_v_flag)                                                \
+        rv_mv(reg_v_cache, _rn);         /* save _rn for V flag */            \
     rv_xori(reg_temp3, reg_c_cache, 1);                                       \
     rv_add(reg_temp2, _rn, reg_temp3);                                        \
     rv_sltu(reg_temp3, reg_temp2, _rn);                                       \
@@ -940,7 +1010,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     rv_xori(reg_c_cache, reg_c_cache, 1);                                     \
     if (check_generate_v_flag)                                                \
     {                                                                         \
-        rv_xor(reg_temp, reg_save0, _rn);                                     \
+        rv_xor(reg_temp, reg_save0, reg_v_cache);                             \
         rv_xor(reg_temp2, reg_save0, _rd);                                    \
         rv_and(reg_v_cache, reg_temp, reg_temp2);                             \
         rv_srli(reg_v_cache, reg_v_cache, 31);                                \
@@ -1576,14 +1646,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 }                                                                             \
 
 #define thumb_generate_shift_imm(name)                                        \
-    if (check_generate_c_flag)                                                \
-    {                                                                         \
-        generate_shift_imm_##name##_flags(rd, rs, imm);                       \
-    }                                                                         \
-    else                                                                      \
-    {                                                                         \
-        generate_shift_imm_##name##_no_flags(rd, rs, imm);                    \
-    }                                                                         \
+    generate_shift_imm_##name##_flags(rd, rs, imm);                           \
     if (rs != rd)                                                             \
     {                                                                         \
         generate_mov(rd, rs);                                                 \
@@ -1592,14 +1655,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define thumb_generate_shift_reg(name)                                        \
 {                                                                             \
     u32 original_rd = rd;                                                     \
-    if (check_generate_c_flag)                                                \
-    {                                                                         \
-        generate_shift_reg_##name##_flags(rd, rs);                            \
-    }                                                                         \
-    else                                                                      \
-    {                                                                         \
-        generate_shift_reg_##name##_no_flags(rd, rs);                         \
-    }                                                                         \
+    generate_shift_reg_##name##_flags(rd, rs);                                \
     rv_mv(arm_to_rv_reg[original_rd], reg_a0);                                \
 }                                                                             \
 
@@ -1727,10 +1783,11 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     u32 base_reg = arm_to_rv_reg[arm_base_reg];                               \
                                                                               \
     thumb_block_address_preadjust_##pre_op(base_reg);                         \
-    thumb_block_address_postadjust_##post_op(base_reg);                       \
                                                                               \
     generate_load_imm(reg_temp, ~3u);                                         \
     rv_and(reg_save0, reg_save0, reg_temp);                                   \
+                                                                              \
+    thumb_block_address_postadjust_##post_op(base_reg);                       \
                                                                               \
     for (i = 0; i < 8; i++)                                                   \
     {                                                                         \

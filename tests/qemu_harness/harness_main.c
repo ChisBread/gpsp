@@ -13,7 +13,6 @@
 #include <string.h>
 #include <sys/mman.h>
 #include "common.h"
-#include "trace_instr.h"
 
 /* Defined in harness_stubs.c */
 extern void harness_load_rom_direct(const char *path);
@@ -37,6 +36,17 @@ extern u16 *gba_screen_pixels;
 /* Some globals that the emulator expects */
 u32 num_skipped_frames = 0;
 
+/* Frame buffer dump: writes raw 240x160 RGB565 files */
+static void dump_framebuffer(int frame_num, const char *tag)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "frames_%s/frame_%05d.raw", tag, frame_num);
+    FILE *fp = fopen(path, "wb");
+    if (!fp) return;
+    fwrite(screen_pixels, sizeof(u16), 240 * 160, fp);
+    fclose(fp);
+}
+
 static void print_regs(void)
 {
     int i;
@@ -54,29 +64,42 @@ int main(int argc, char **argv)
     const char *rom_path = NULL;
     int frames = 10;
     int use_jit = 1; /* default: JIT */
+    int dump_from = -1; /* frame to start dumping framebuffer, -1 = disabled */
 
     if (argc < 2) {
-        printf("Usage: %s [--interp] [bios.bin] <rom.gba> [frames]\n", argv[0]);
+        printf("Usage: %s [--interp] [--dump-from N] [bios.bin] <rom.gba> [frames]\n", argv[0]);
         return 1;
     }
 
-    /* Parse --interp flag */
+    /* Parse flags */
     int argi = 1;
-    if (argi < argc && strcmp(argv[argi], "--interp") == 0) {
-        use_jit = 0;
-        argi++;
+    while (argi < argc && argv[argi][0] == '-' && argv[argi][1] == '-') {
+        if (strcmp(argv[argi], "--interp") == 0) {
+            use_jit = 0;
+            argi++;
+        } else if (strcmp(argv[argi], "--dump-from") == 0 && argi + 1 < argc) {
+            dump_from = atoi(argv[argi + 1]);
+            argi += 2;
+        } else {
+            break;
+        }
     }
 
     int remaining = argc - argi;
     if (remaining == 1) {
         rom_path = argv[argi];
     } else if (remaining == 2) {
-        bios_path = argv[argi];
-        rom_path = argv[argi + 1];
+        rom_path = argv[argi];
+        frames = atoi(argv[argi + 1]);
     } else if (remaining >= 3) {
         bios_path = argv[argi];
         rom_path = argv[argi + 1];
         frames = atoi(argv[argi + 2]);
+    }
+
+    if (!rom_path) {
+        printf("[harness] ERROR: missing ROM path\n");
+        return 1;
     }
 
     printf("[harness] ROM: %s\n", rom_path);
@@ -89,6 +112,26 @@ int main(int argc, char **argv)
     /* Initialize memory subsystem */
     printf("[harness] init_gamepak_buffer...\n"); fflush(stdout);
     init_gamepak_buffer();
+
+#ifdef MMAP_JIT_CACHE
+    /* Allocate JIT caches via mmap (RWX) BEFORE reset_gba(), since
+       init_dynarec_caches() dereferences rom_translation_cache. */
+    {
+        extern void *map_jit_block(unsigned size);
+        extern u8* rom_translation_cache;
+        extern u8* ram_translation_cache;
+        rom_translation_cache = (u8 *)map_jit_block(
+            ROM_TRANSLATION_CACHE_SIZE + RAM_TRANSLATION_CACHE_SIZE);
+        if (!rom_translation_cache) {
+            printf("[harness] ERROR: failed to allocate JIT caches\n");
+            return 1;
+        }
+        ram_translation_cache = &rom_translation_cache[ROM_TRANSLATION_CACHE_SIZE];
+        printf("[harness] JIT caches allocated at %p (ROM %u + RAM %u bytes)\n",
+               (void *)rom_translation_cache,
+               ROM_TRANSLATION_CACHE_SIZE, RAM_TRANSLATION_CACHE_SIZE);
+    }
+#endif
 
     /* reset_gba calls init_memory, init_main, init_cpu, reset_sound */
     printf("[harness] reset_gba...\n"); fflush(stdout);
@@ -108,7 +151,9 @@ int main(int argc, char **argv)
     /* Set up screen buffer for video rendering */
     gba_screen_pixels = screen_pixels;
 
-    /* Mark translation caches as executable for QEMU user-mode */
+    /* Mark translation caches as executable.
+       With MMAP_JIT_CACHE, caches are mmap'd with PROT_EXEC already. */
+#ifndef MMAP_JIT_CACHE
     {
         extern u8 rom_translation_cache[];
         extern u8 ram_translation_cache[];
@@ -127,6 +172,7 @@ int main(int argc, char **argv)
         }
         printf("[harness] translation caches marked RWX\n");
     }
+#endif
     init_emitter(gamepak_must_swap());
     dynarec_enable = use_jit;
 
@@ -135,9 +181,16 @@ int main(int argc, char **argv)
     printf("[harness] Starting emulation for %d frames...\n", frames);
     fflush(stdout);
 
-#ifdef TRACE_INSTRUCTIONS
-    trace_open(use_jit ? "trace_jit.log" : "trace_interp.log");
-#endif
+    /* Create frame dump directory if needed */
+    if (dump_from >= 0) {
+        const char *tag = use_jit ? "jit" : "interp";
+        char mkdir_cmd[256];
+        snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p frames_%s", tag);
+        system(mkdir_cmd);
+        printf("[harness] Will dump framebuffers from frame %d into frames_%s/\n",
+               dump_from, tag);
+        fflush(stdout);
+    }
 
     int f;
     for (f = 0; f < frames; f++) {
@@ -147,16 +200,18 @@ int main(int argc, char **argv)
             clear_gamepak_stickybits();
             execute_arm(execute_cycles);
         }
-        printf("[harness] Frame %d done, PC=%08x CPSR=%08x\n",
-               f, reg[REG_PC], reg[REG_CPSR]);
+        if (f % 100 == 0 || f < 5) {
+            printf("[harness] Frame %d done, PC=%08x CPSR=%08x cycles_left=%d\n",
+                   f, reg[REG_PC], reg[REG_CPSR], execute_cycles);
+            fflush(stdout);
+        }
+        if (dump_from >= 0 && f >= dump_from) {
+            dump_framebuffer(f, use_jit ? "jit" : "interp");
+        }
     }
 
     printf("[harness] Final state:\n");
     print_regs();
-
-#ifdef TRACE_INSTRUCTIONS
-    trace_close();
-#endif
 
     return 0;
 }

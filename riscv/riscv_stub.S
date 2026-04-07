@@ -532,8 +532,8 @@ defsymbl(rv_execute_aligned_load32)
 
 defsymbl(rv_execute_store_u8)
     sw   ra, REG_SAVE(gp)
-    sw   a2, REG_PC(gp)
     store_registers()
+    sw   a2, REG_PC(gp)
     consolidate_flags(t0, t1)
     mv   s11, gp
     mv   s10, tp
@@ -541,6 +541,7 @@ defsymbl(rv_execute_store_u8)
     lw   tp, REG_SAVE6(s11)
     jit_enable_interrupts()
     call execute_store_u8
+    bnez a0, .Lstore_alert
     jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
@@ -551,8 +552,8 @@ defsymbl(rv_execute_store_u8)
 
 defsymbl(rv_execute_store_u16)
     sw   ra, REG_SAVE(gp)
-    sw   a2, REG_PC(gp)
     store_registers()
+    sw   a2, REG_PC(gp)
     consolidate_flags(t0, t1)
     mv   s11, gp
     mv   s10, tp
@@ -560,6 +561,7 @@ defsymbl(rv_execute_store_u16)
     lw   tp, REG_SAVE6(s11)
     jit_enable_interrupts()
     call execute_store_u16
+    bnez a0, .Lstore_alert
     jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
@@ -570,8 +572,8 @@ defsymbl(rv_execute_store_u16)
 
 defsymbl(rv_execute_store_u32)
     sw   ra, REG_SAVE(gp)
-    sw   a2, REG_PC(gp)
     store_registers()
+    sw   a2, REG_PC(gp)
     consolidate_flags(t0, t1)
     mv   s11, gp
     mv   s10, tp
@@ -579,6 +581,7 @@ defsymbl(rv_execute_store_u32)
     lw   tp, REG_SAVE6(s11)
     jit_enable_interrupts()
     call execute_store_u32
+    bnez a0, .Lstore_alert
     jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
@@ -589,8 +592,8 @@ defsymbl(rv_execute_store_u32)
 
 defsymbl(rv_execute_aligned_store32)
     sw   ra, REG_SAVE(gp)
-    sw   a2, REG_PC(gp)
     store_registers()
+    sw   a2, REG_PC(gp)
     consolidate_flags(t0, t1)
     mv   s11, gp
     mv   s10, tp
@@ -598,6 +601,7 @@ defsymbl(rv_execute_aligned_store32)
     lw   tp, REG_SAVE6(s11)
     jit_enable_interrupts()
     call execute_aligned_store32
+    bnez a0, .Lstore_alert
     jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
@@ -605,6 +609,46 @@ defsymbl(rv_execute_aligned_store32)
     load_registers()
     lw   ra, REG_SAVE(gp)
     ret
+
+/*
+ * Store alert handler (shared by all rv_execute_store_* stubs).
+ *
+ * On entry (C ABI context, interrupts enabled):
+ *   a0  = cpu_alert_type (non-zero, bitmask of HALT/SMC/IRQ)
+ *   s11 = saved JIT gp (register base)
+ *   s10 = saved JIT tp (cycle count)
+ *   gp/tp = C ABI values (restored from REG_SAVE5/6)
+ *   Registers and flags already saved to reg[] / CPSR
+ *
+ * Mirrors x86 write_epilogue behaviour:
+ *   1. CPU_ALERT_SMC  (bit 1) → flush_translation_cache_ram
+ *   2. CPU_ALERT_IRQ  (bit 2) → check_and_raise_interrupts
+ *   3. CPU_ALERT_HALT (bit 0) → update_gba (sleep loop)
+ *   Then re-enter translation via .Llookup_pc / .Lcpu_sleep_loop.
+ */
+.Lstore_alert:
+    /* a0 = alert type, s11 = JIT gp, s10 = JIT tp (cycles) */
+    /* Call C helper: rv_handle_store_alert(alert, cycles) */
+    mv   a1, s10                /* arg1 = remaining cycles */
+    call rv_handle_store_alert
+    /* Return value: updated cycle count after alert handling */
+    blt  a0, zero, .Lreturn_cycles_sleep
+
+    /* SMC may have flushed the translation cache.
+     * Force a block re-lookup by jumping to .Llookup_pc.
+     * Set the new cycle count and restore JIT context first. */
+    slli s10, a0, 2
+    srli s10, s10, 2
+
+.Lstore_alert_done:
+    jit_disable_interrupts()
+    mv   gp, s11
+    mv   tp, s10
+    sw   tp, 60(sp)
+    sw   gp, 64(sp)
+    lw   t0, CPU_HALT_STATE(gp)
+    bnez t0, .Lcpu_sleep_loop
+    j    .Llookup_pc
 
 defsymbl(rv_cheat_hook)
     sw   ra, REG_SAVE(gp)

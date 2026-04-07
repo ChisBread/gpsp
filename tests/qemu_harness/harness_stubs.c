@@ -10,6 +10,8 @@
 #include <string.h>
 #include "common.h"
 #include "main.h"
+#include <streams/file_stream.h>
+#include <vfs/vfs_implementation.h>
 
 /* --- Global variables normally provided by app_main.c / libretro.c --- */
 u32 skip_next_frame = 0;
@@ -64,6 +66,18 @@ void harness_load_rom_direct(const char *path)
     printf("[harness] ROM read into %u blocks, %u bytes remaining\n", block, remaining);
     fflush(stdout);
 
+    /* Keep the ROM file open via libretro filestream for demand paging
+       (load_gamepak_page uses gamepak_file_large) */
+    {
+        extern RFILE *gamepak_file_large;
+        gamepak_file_large = filestream_open(path,
+            RETRO_VFS_FILE_ACCESS_READ, RETRO_VFS_FILE_ACCESS_HINT_NONE);
+        if (!gamepak_file_large) {
+            printf("[harness] WARNING: could not reopen ROM for demand paging\n");
+        }
+    }
+    fflush(stdout);
+
     /* Round size to 32KB pages */
     gamepak_size = (gamepak_size + 0x7FFF) & ~0x7FFF;
 
@@ -76,14 +90,10 @@ void harness_load_rom_direct(const char *path)
             u32 phyn = i * 32 + j;
             u8 *blkptr = &gamepak_buffers[i][32 * 1024 * j];
             /* Map to 0x08000000, 0x0A000000, 0x0C000000 regions with mirroring */
-            unsigned mcount;
-            for (mcount = 0; mcount < 1024; mcount += rom_blocks) {
-                memory_map_read[(0x8000000 / (32 * 1024)) + phyn + mcount] = blkptr;
-                memory_map_read[(0xA000000 / (32 * 1024)) + phyn + mcount] = blkptr;
-            }
-            for (mcount = 0; mcount < 512; mcount += rom_blocks) {
-                memory_map_read[(0xC000000 / (32 * 1024)) + phyn + mcount] = blkptr;
-            }
+            memory_map_read[(0x8000000 / (32 * 1024)) + phyn] = blkptr;
+            memory_map_read[(0xA000000 / (32 * 1024)) + phyn] = blkptr;
+            if (phyn < 512)
+                memory_map_read[(0xC000000 / (32 * 1024)) + phyn] = blkptr;
         }
     }
 

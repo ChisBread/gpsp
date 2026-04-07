@@ -120,10 +120,10 @@ u32 function_cc execute_load_u16(u32 address);
 u32 function_cc execute_load_u32(u32 address);
 u32 function_cc execute_load_s8(u32 address);
 u32 function_cc execute_load_s16(u32 address);
-void function_cc execute_store_u8(u32 address, u32 source);
-void function_cc execute_store_u16(u32 address, u32 source);
-void function_cc execute_store_u32(u32 address, u32 source);
-void function_cc execute_store_aligned_u32(u32 address, u32 source);
+cpu_alert_type function_cc execute_store_u8(u32 address, u32 source);
+cpu_alert_type function_cc execute_store_u16(u32 address, u32 source);
+cpu_alert_type function_cc execute_store_u32(u32 address, u32 source);
+cpu_alert_type function_cc execute_store_aligned_u32(u32 address, u32 source);
 u32 execute_arm_translate(u32 cycles);
 void init_translater(void);
 
