@@ -6,7 +6,7 @@
 
 #include "av_pipeline.h"
 #include "common.h"
-static GPSP_EXTRAM_BSS u16 gba_render_buffer[GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
+
 static bool audio_enabled;
 
 #ifndef DUAL_CORE_PPU
@@ -28,6 +28,7 @@ static bool audio_enabled;
 
 static const char *TAG = "gpsp_av";
 
+static GPSP_EXTRAM_BSS u16 gba_render_buffer[GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
 static GPSP_EXTRAM_BSS u16 gba_framebuffers[AV_PIPELINE_DEPTH][GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
 static GPSP_EXTRAM_BSS int16_t audio_buffers[AV_PIPELINE_DEPTH][AUDIO_FRAME_SAMPLES_MAX * 2];
 static GPSP_EXTRAM_BSS uint32_t audio_buffer_frames[AV_PIPELINE_DEPTH];
@@ -157,7 +158,11 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
 
 u16 *av_pipeline_default_video_buffer(void)
 {
+#ifdef DUAL_CORE_PPU
+    return NULL;
+#else
     return gba_render_buffer;
+#endif
 }
 
 esp_err_t av_pipeline_acquire_slot(uint32_t *slot_index, u16 **video_buffer,

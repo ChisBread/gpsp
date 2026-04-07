@@ -558,9 +558,11 @@ esp_err_t gba_session_init(const gba_session_boot_config_t *config)
     init_main();
     init_sound();
 
+#ifndef DUAL_CORE_PPU
     if (!gba_screen_pixels) {
         gba_screen_pixels = av_pipeline_default_video_buffer();
     }
+#endif
 
     memset(&command, 0, sizeof(command));
     command.type = GBA_SESSION_CMD_RELOAD;
@@ -702,10 +704,9 @@ void gba_emulation_task(void *param)
     s_fps_timer_us = esp_timer_get_time();
 
 #ifdef DUAL_CORE_PPU
-    /* The render task owns gba_screen_pixels.  The emu core does not
-     * render, so it does not need it.  Set a dummy buffer so any
-     * stray accesses don't crash (e.g. init code). */
-    gba_screen_pixels = av_pipeline_default_video_buffer();
+    /* The render task owns gba_screen_pixels in dual-core mode.
+     * The emu core should not render to a fallback buffer. */
+    gba_screen_pixels = NULL;
 #else
     gba_screen_pixels = av_pipeline_default_video_buffer();
 
