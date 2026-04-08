@@ -53,9 +53,6 @@
 #include "esp_heap_caps.h"
 #include "esp_cache.h"
 
-/* Frame pacing: 1000000 / 59.7275 ≈ 16743 µs */
-#define PPU_FRAME_PERIOD_US        16743
-
 #include "ppu_pipeline.h"
 
 #ifdef DUAL_CORE_PPU
@@ -121,8 +118,6 @@ static SemaphoreHandle_t s_buf_sem[BUF_COUNT]; /* "buffer free" tokens */
 static QueueHandle_t     s_queue;              /* completed-buf index  */
 static QueueHandle_t     s_audio_queue;        /* queued audio packet indices */
 static QueueHandle_t     s_audio_free_queue;   /* free audio packet indices */
-static SemaphoreHandle_t s_pace;               /* frame-pacing tick    */
-static esp_timer_handle_t s_timer;
 static TaskHandle_t      s_task;
 static TaskHandle_t      s_audio_task;
 
@@ -275,9 +270,6 @@ static void audio_task(void *arg)
     vTaskDelete(NULL);
 }
 
-/* Frame-pacing timer fires at GBA refresh rate. */
-static void pace_cb(void *arg) { (void)arg; xSemaphoreGive(s_pace); }
-
 /* ── D-cache sync helpers ──────────────────────────────────────────── */
 
 /*
@@ -323,11 +315,11 @@ static void render_task(void *arg)
         if (idx == SHUTDOWN_SENTINEL)
             break;
 
-        /* Frame pacing: wait for the 59.7275 Hz tick before rendering
-         * so the display cadence is consistent regardless of how fast
-         * the CPU core produces frames. */
+        /* Complete the previous frame's async PPA and wait for DPI
+         * VSYNC.  The VSYNC wait (~16.5 ms @ ~60.5 Hz) replaces the
+         * separate pace timer — the LCD panel drives the cadence. */
         int64_t tp0 = esp_timer_get_time();
-        xSemaphoreTake(s_pace, portMAX_DELAY);
+        video_driver_await_frame();
         s_stat_wait_pace_us = esp_timer_get_time() - tp0;
 
         ppu_frame_t *f = &s_frames[idx];
@@ -502,18 +494,6 @@ esp_err_t ppu_pipeline_init(const ppu_pipeline_config_t *cfg)
             xQueueSend(s_audio_free_queue, &i, portMAX_DELAY);
     }
 
-    s_pace = xSemaphoreCreateBinary();
-    if (!s_pace) return ESP_ERR_NO_MEM;
-
-    const esp_timer_create_args_t targs = {
-        .callback = pace_cb,
-        .name     = "ppu_pace",
-    };
-    esp_err_t e = esp_timer_create(&targs, &s_timer);
-    if (e != ESP_OK) return e;
-    e = esp_timer_start_periodic(s_timer, PPU_FRAME_PERIOD_US);
-    if (e != ESP_OK) return e;
-
     for (int i = 0; i < BUF_COUNT; i++)
         xSemaphoreGive(s_buf_sem[i]);
 
@@ -540,22 +520,14 @@ esp_err_t ppu_pipeline_init(const ppu_pipeline_config_t *cfg)
         if (r != pdPASS) return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "init OK (core %d, buf %zu B × %d, pace %d us)",
-             cfg->render_core, sizeof(ppu_frame_t), BUF_COUNT,
-             PPU_FRAME_PERIOD_US);
+    ESP_LOGI(TAG, "init OK (core %d, buf %zu B × %d)",
+             cfg->render_core, sizeof(ppu_frame_t), BUF_COUNT);
     dump_open();
     return ESP_OK;
 }
 
 void ppu_pipeline_deinit(void)
 {
-    if (s_timer) {
-        esp_timer_stop(s_timer);
-        esp_timer_delete(s_timer);
-        s_timer = NULL;
-    }
-    if (s_pace) { vSemaphoreDelete(s_pace); s_pace = NULL; }
-
     if (s_task) {
         uint32_t x = SHUTDOWN_SENTINEL;
         xQueueSend(s_queue, &x, portMAX_DELAY);
@@ -581,23 +553,7 @@ void ppu_pipeline_deinit(void)
 
 esp_err_t ppu_pipeline_reset_pace(void)
 {
-    if (!s_timer || !s_pace) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    esp_err_t err = esp_timer_stop(s_timer);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
-
-    while (xSemaphoreTake(s_pace, 0) == pdTRUE) {
-    }
-
-    err = esp_timer_start_periodic(s_timer, PPU_FRAME_PERIOD_US);
-    if (err != ESP_OK) {
-        return err;
-    }
-
+    /* Pace is now driven by LCD VSYNC — nothing to reset. */
     return ESP_OK;
 }
 

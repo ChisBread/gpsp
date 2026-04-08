@@ -7,6 +7,8 @@
 #include "video_driver.h"
 
 #include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
@@ -18,6 +20,7 @@
 #include "driver/gpio.h"
 #include "driver/ppa.h"
 #include "esp_cache.h"
+#include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_st7701.h"
 
 static const char *TAG = "gpsp_video";
@@ -59,6 +62,10 @@ static struct {
     uint16_t lcd_v_res;
     bool     use_ppa;
     bool     direct_dpi_fb;     /* true → out_buf IS a DPI panel FB */
+    bool     ppa_async;         /* true → PPA runs non-blocking */
+    bool     ppa_pending;       /* a non-blocking PPA is in flight */
+    SemaphoreHandle_t ppa_done; /* signalled from PPA ISR callback */
+    SemaphoreHandle_t vsync;    /* signalled from DPI refresh-done ISR */
     bool     initialized;
 } s_video;
 
@@ -146,6 +153,28 @@ static const st7701_lcd_init_cmd_t jc4880_st7701_init_cmds[] = {
     {0x29, (uint8_t []){0x00}, 1, 20},
 };
 
+/* PPA transaction-done ISR callback (non-blocking mode). */
+static bool ppa_trans_done_cb(ppa_client_handle_t client,
+                              ppa_event_data_t *event_data,
+                              void *user_data)
+{
+    (void)client; (void)event_data; (void)user_data;
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_video.ppa_done, &woken);
+    return (woken == pdTRUE);
+}
+
+/* DPI refresh-done ISR callback — fires once per panel VSYNC. */
+static bool IRAM_ATTR dpi_refresh_done_cb(esp_lcd_panel_handle_t panel,
+                                          esp_lcd_dpi_panel_event_data_t *edata,
+                                          void *user_ctx)
+{
+    (void)panel; (void)edata; (void)user_ctx;
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_video.vsync, &woken);
+    return (woken == pdTRUE);
+}
+
 /* ---- Backlight initialization ---- */
 static esp_err_t backlight_init(void)
 {
@@ -217,6 +246,12 @@ esp_err_t video_driver_init(const video_driver_config_t *config)
                         TAG, "Create panel IO (DBI) failed");
 
     /* ---- 5. Configure DPI panel (video mode) ---- */
+    /*
+     * DPI clock: PLL_F240M / 7 = 34.2857 MHz (integer divider).
+     * Blanking is tuned so that h_total × v_total = 577 × 995 = 574115,
+     * giving a refresh rate of 34285714 / 574115 ≈ 59.7274 Hz — matching
+     * the GBA's 59.7275 Hz to within 0.0002 %.
+     */
     esp_lcd_dpi_panel_config_t dpi_config = {
         .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
         .dpi_clock_freq_mhz = 34,
@@ -229,10 +264,10 @@ esp_err_t video_driver_init(const video_driver_config_t *config)
             .v_size = config->lcd_v_res,
             .hsync_back_porch = 42,
             .hsync_pulse_width = 12,
-            .hsync_front_porch = 42,
+            .hsync_front_porch = 43,
             .vsync_back_porch = 8,
             .vsync_pulse_width = 2,
-            .vsync_front_porch = 166,
+            .vsync_front_porch = 185,
         },
     };
 
@@ -263,6 +298,24 @@ esp_err_t video_driver_init(const video_driver_config_t *config)
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_video.panel), TAG, "Panel reset failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_video.panel), TAG, "Panel init failed");
     ESP_LOGI(TAG, "ST7701 panel initialized: %ux%u", config->lcd_h_res, config->lcd_v_res);
+
+    /* ---- 7b. Register DPI VSYNC callback for tear-free swap ---- */
+    s_video.vsync = xSemaphoreCreateBinary();
+    if (s_video.vsync) {
+        esp_lcd_dpi_panel_event_callbacks_t dpi_cbs = {
+            .on_refresh_done = dpi_refresh_done_cb,
+        };
+        esp_err_t vcb_err = esp_lcd_dpi_panel_register_event_callbacks(s_video.panel,
+                                                                       &dpi_cbs, NULL);
+        if (vcb_err != ESP_OK) {
+            ESP_LOGW(TAG, "DPI vsync callback registration failed: %s",
+                     esp_err_to_name(vcb_err));
+            vSemaphoreDelete(s_video.vsync);
+            s_video.vsync = NULL;
+        } else {
+            ESP_LOGI(TAG, "DPI VSYNC callback registered — tear-free swap enabled");
+        }
+    }
 
     /* ---- 8. Scaled output buffer ---- */
     s_video.out_buf_size = config->lcd_h_res * config->lcd_v_res * sizeof(uint16_t);
@@ -326,6 +379,10 @@ esp_err_t video_driver_init(const video_driver_config_t *config)
     }
 
     /* ---- 9. Initialize PPA for hardware rotation + scaling (optional) ---- */
+    s_video.ppa_async = false;
+    s_video.ppa_pending = false;
+    s_video.ppa_done = NULL;
+
     if (s_video.use_ppa) {
         ppa_client_config_t ppa_config = {
             .oper_type = PPA_OPERATION_SRM,
@@ -336,6 +393,26 @@ esp_err_t video_driver_init(const video_driver_config_t *config)
             ESP_LOGW(TAG, "PPA SRM client failed: %s, using software fallback", esp_err_to_name(err));
             s_video.use_ppa = false;
         } else {
+            /* Enable non-blocking PPA when double-buffered DPI is available
+             * so PPA DMA runs in parallel with other render work. */
+            if (s_video.direct_dpi_fb && s_video.dpi_fb_count == 2) {
+                s_video.ppa_done = xSemaphoreCreateBinary();
+                if (s_video.ppa_done) {
+                    ppa_event_callbacks_t cbs = {
+                        .on_trans_done = ppa_trans_done_cb,
+                    };
+                    err = ppa_client_register_event_callbacks(s_video.ppa_srm_client, &cbs);
+                    if (err == ESP_OK) {
+                        s_video.ppa_async = true;
+                        ESP_LOGI(TAG, "PPA async mode enabled (double-buffered DPI)");
+                    } else {
+                        vSemaphoreDelete(s_video.ppa_done);
+                        s_video.ppa_done = NULL;
+                        ESP_LOGW(TAG, "PPA callback reg failed, using blocking: %s",
+                                 esp_err_to_name(err));
+                    }
+                }
+            }
             ESP_LOGI(TAG, "PPA: %ux%u → rotate 90° → x%d → %ux%u, centered at y=%u",
                      GBA_WIDTH, GBA_HEIGHT, SCALE_FACTOR,
                      SCALED_W, SCALED_H, s_video.offset_y);
@@ -388,7 +465,8 @@ esp_err_t video_driver_submit_frame(const uint16_t *gba_framebuffer)
             .scale_y = (float)SCALE_FACTOR,
             .rgb_swap = false,
             .byte_swap = false,
-            .mode = PPA_TRANS_MODE_BLOCKING,
+            .mode = s_video.ppa_async ? PPA_TRANS_MODE_NON_BLOCKING
+                                      : PPA_TRANS_MODE_BLOCKING,
         };
 
         esp_err_t err = ppa_do_scale_rotate_mirror(s_video.ppa_srm_client, &srm_config);
@@ -396,42 +474,80 @@ esp_err_t video_driver_submit_frame(const uint16_t *gba_framebuffer)
             ESP_LOGW(TAG, "PPA SRM failed: %s", esp_err_to_name(err));
             return err;
         }
+
+        if (s_video.ppa_async) {
+            s_video.ppa_pending = true;
+            return ESP_OK;  /* DPI swap deferred to await_frame */
+        }
     } else {
         /* Software path: rotate 90° CCW + 3x nearest-neighbor scale */
         sw_rotate_scale(gba_framebuffer, s_video.out_buf,
                         s_video.lcd_h_res, s_video.offset_y);
     }
 
+    /* Synchronous completion path (SW fallback or blocking PPA) */
     if (s_video.direct_dpi_fb) {
-        /* For SW fallback, flush CPU cache writes to PSRAM. */
         if (!(s_video.use_ppa && s_video.ppa_srm_client)) {
             esp_cache_msync(s_video.out_buf, s_video.out_buf_size,
                             ESP_CACHE_MSYNC_FLAG_DIR_C2M);
         }
 
         if (s_video.dpi_fb_count == 2) {
-            /*
-             * Double-buffered: we just finished drawing into dpi_fbs[draw_idx].
-             * Call draw_bitmap with this FB pointer — the DPI driver detects
-             * it is one of its internal FBs and does a zero-copy swap
-             * (just updates cur_fb_index, no memcpy).
-             */
+            /* Set cur_fb_index FIRST, then wait for DMA-trans-done ISR
+             * to pick it up before we swap.  Same order as await_frame. */
             esp_lcd_panel_draw_bitmap(s_video.panel,
                                       0, 0,
                                       s_video.lcd_h_res, s_video.lcd_v_res,
                                       s_video.out_buf);
-            /* Swap: next frame draws into the other buffer */
+            if (s_video.vsync) {
+                while (xSemaphoreTake(s_video.vsync, 0) == pdTRUE) {}
+                xSemaphoreTake(s_video.vsync, portMAX_DELAY);
+            }
             s_video.dpi_draw_idx ^= 1;
             s_video.out_buf = s_video.dpi_fbs[s_video.dpi_draw_idx];
         }
-        /* Single-buffered: nothing more to do, DPI scans directly. */
     } else {
-        /* Blit full LCD buffer (including black bars) to DPI panel */
         esp_lcd_panel_draw_bitmap(s_video.panel,
                                   0, 0,
                                   s_video.lcd_h_res, s_video.lcd_v_res,
                                   s_video.out_buf);
     }
+
+    return ESP_OK;
+}
+
+esp_err_t video_driver_await_frame(void)
+{
+    if (!s_video.ppa_pending)
+        return ESP_OK;
+
+    /* Wait for the async PPA DMA to finish. */
+    xSemaphoreTake(s_video.ppa_done, portMAX_DELAY);
+    s_video.ppa_pending = false;
+
+    /* Schedule the buffer switch: draw_bitmap sets cur_fb_index so
+     * the DPI DMA ISR will pick it up at the next frame boundary.
+     * This MUST happen BEFORE the VSYNC wait — the ISR reads
+     * cur_fb_index first, then restarts DMA, then fires the
+     * callback.  If we set cur_fb_index after the callback we’d
+     * be one frame too late and PPA would race with DPI. */
+    esp_lcd_panel_draw_bitmap(s_video.panel,
+                              0, 0,
+                              s_video.lcd_h_res, s_video.lcd_v_res,
+                              s_video.out_buf);
+
+    /* Wait for the DPI ISR to confirm it switched to our buffer.
+     * Drain stale tokens first — a VSYNC may have fired while PPA
+     * was still running. */
+    if (s_video.vsync) {
+        while (xSemaphoreTake(s_video.vsync, 0) == pdTRUE) {}
+        xSemaphoreTake(s_video.vsync, portMAX_DELAY);
+    }
+
+    /* The old buffer is now free (DPI switched away from it).
+     * Swap so the next PPA writes into the freed buffer. */
+    s_video.dpi_draw_idx ^= 1;
+    s_video.out_buf = s_video.dpi_fbs[s_video.dpi_draw_idx];
 
     return ESP_OK;
 }

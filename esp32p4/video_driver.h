@@ -41,8 +41,19 @@ esp_err_t video_driver_init(const video_driver_config_t *config);
 /**
  * Submit a completed GBA frame (240x160 RGB565) for display.
  * Uses PPA to scale and center the frame on the LCD.
+ * When async PPA is enabled (double-buffered DPI), this starts a
+ * non-blocking DMA and returns immediately.  Call
+ * video_driver_await_frame() before reusing the source framebuffer.
  */
 esp_err_t video_driver_submit_frame(const uint16_t *gba_framebuffer);
+
+/**
+ * Wait for the previous async PPA transfer to complete and swap the
+ * DPI framebuffer.  No-op when PPA is synchronous or no transfer is
+ * pending.  Must be called before the next submit or before writing
+ * to the source framebuffer.
+ */
+esp_err_t video_driver_await_frame(void);
 
 /**
  * Set LCD backlight brightness (0-100%).
