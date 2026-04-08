@@ -53,13 +53,6 @@ void ppu_pipeline_deinit(void);
 esp_err_t ppu_pipeline_reset_pace(void);
 
 /*
- * Called by the emulation core at the start of each frame, before
- * the first scanline.  Blocks if the render task has not yet finished
- * consuming the previous frame's data (backpressure).
- */
-void ppu_pipeline_begin_frame(void);
-
-/*
  * Called by the emulation core at each visible H-Draw → HBlank
  * transition (vcount 0..159).  Snapshots io_registers and pushes
  * a descriptor into the current write buffer.
@@ -67,16 +60,12 @@ void ppu_pipeline_begin_frame(void);
 void ppu_pipeline_submit_scanline(void);
 
 /*
- * Called by the emulation core at VBlank (vcount == 160), BEFORE VBlank DMA.
- * Reloads affine accumulators and marks the frame skip flag.
+ * Called at vcount == 228 (end of VBlank) after all DMA and CPU
+ * activity.  Generates audio (render_gbc_sound + drain), snapshots
+ * OAM/palette/VRAM, flushes caches, and queues the frame (with
+ * embedded audio) for the render core.
  */
-void ppu_pipeline_end_frame(bool skip_frame);
-
-/*
- * Called AFTER VBlank DMA completes. Copies VRAM into the completed
- * frame snapshot and queues it for the render core.
- */
-void ppu_pipeline_post_vblank(void);
+void ppu_pipeline_flush_frame(bool skip_frame);
 
 /*
  * Whether audio output is enabled on the render pipeline.

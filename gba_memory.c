@@ -2522,6 +2522,10 @@ unsigned memory_write_savestate(u8 *dst)
 static s32 load_gamepak_raw(const char *name)
 {
   unsigned i, j;
+  size_t bytes_loaded = 0;
+  u32 ldblks = 0;
+  u32 buf_blocks = 0;
+  u32 rom_blocks = 0;
 #ifdef ESP_PLATFORM
   int64_t t_open0 = esp_timer_get_time();
   int64_t t_open1;
@@ -2531,10 +2535,6 @@ static s32 load_gamepak_raw(const char *name)
   int64_t t_stage1;
   int64_t read_us = 0;
   int64_t map_us = 0;
-  size_t bytes_loaded = 0;
-  u32 ldblks = 0;
-  u32 buf_blocks = 0;
-  u32 rom_blocks = 0;
 #endif
   gamepak_file_large = filestream_open(name, RETRO_VFS_FILE_ACCESS_READ,
                                        RETRO_VFS_FILE_ACCESS_HINT_NONE);

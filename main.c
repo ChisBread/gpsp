@@ -220,9 +220,8 @@ u32 function_cc update_gba(int remaining_cycles)
           dispstat |= 0x01;
 
 #ifdef DUAL_CORE_PPU
-          /* Reload affine accumulators for the next frame.
-           * VBlank DMA may further override via BG2X handler. */
-          ppu_pipeline_end_frame(skip_next_frame);
+          /* Affine reload is handled by the render core from IO
+           * snapshots — nothing to do here in dual-core mode. */
 #else
           // Reinit affine transformation counters for the next frame
           video_reload_counters();
@@ -264,18 +263,18 @@ u32 function_cc update_gba(int remaining_cycles)
           flush_ram_count = 0;
 
           // Force audio generation. Need to flush samples for this frame.
+#ifndef DUAL_CORE_PPU
           CPU_PROF_SCOPE_BEGIN(sound_begin);
           render_gbc_sound();
           CPU_PROF_SCOPE_ACC(sound_cycles, sound_begin);
+#endif
 
 #ifdef DUAL_CORE_PPU
           /* All VBlank processing is now complete (VBlank DMA at
            * vcount=160 AND CPU instructions during vcount 161-227).
-           * Flush VRAM + frame descriptor and queue the frame for the
-           * render core.  By deferring until the very end of VBlank
-           * we guarantee no more VRAM writes from the emu core while
-           * the render core reads VRAM. */
-          ppu_pipeline_post_vblank();
+           * Snapshot OAM/palette/VRAM and queue the frame for the
+           * render core. */
+          ppu_pipeline_flush_frame(skip_next_frame);
 #endif
 
           // We completed a frame, tell the dynarec to exit to the main thread

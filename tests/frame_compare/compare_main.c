@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "common.h"
+#include "sound.h"
 
 /* Defined in compare_stubs.c */
 extern void harness_load_rom_direct(const char *path);
@@ -47,16 +48,26 @@ extern void ppu_sim_init(void);
 extern void ppu_sim_wait_render(void);
 extern u16 *ppu_sim_render_fb(void);
 extern void ppu_sim_shutdown(void);
-extern void ppu_pipeline_begin_frame(void);
 extern void ppu_sim_get_last_crc(uint32_t *oam_crc, uint32_t *io0_crc);
-/* submit_scanline and end_frame are called from within update_gba() */
+extern uint32_t ppu_sim_get_audio(int16_t **samples);
+/* submit_scanline and flush_frame are called from within update_gba() */
 #endif
 
 /* Frame dump state */
 static FILE       *s_dump_fp;
 static FILE       *s_crc_fp;
+static FILE       *s_audio_fp;
 static uint32_t    s_dump_frame;
 static uint32_t    s_dump_total;
+
+/* Audio collection: 65536 Hz / 59.7275 ≈ 1097 frames per video frame */
+#define AUDIO_SPF_INT   1097
+#define AUDIO_SPF_MAX   1200
+#ifndef DUAL_CORE_PPU
+static int16_t     s_audio_buf[AUDIO_SPF_MAX * 2];
+static float       s_audio_spf;
+static float       s_audio_frac;
+#endif
 
 static uint32_t crc32_simple(const void *data, size_t len)
 {
@@ -181,6 +192,7 @@ int main(int argc, char **argv)
 
     printf("[compare] reset_gba...\n"); fflush(stdout);
     reset_gba();
+    init_sound();
 
     if (bios_path)
         harness_load_bios_direct(bios_path);
@@ -211,6 +223,28 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Open audio PCM output (s16le stereo @ 65536 Hz) */
+    {
+        const char *apath;
+#ifdef DUAL_CORE_PPU
+        apath = "audio_dual.pcm";
+#else
+        apath = "audio_single.pcm";
+#endif
+        s_audio_fp = fopen(apath, "wb");
+        if (!s_audio_fp) {
+            perror("[compare] cannot open audio file");
+            return 1;
+        }
+#ifndef DUAL_CORE_PPU
+        s_audio_spf = (float)GBA_SOUND_FREQUENCY / 59.7275f;
+        s_audio_frac = 0.0f;
+#endif
+        printf("[compare] Audio:  %s (%.1f samples/frame)\n", apath,
+               (float)GBA_SOUND_FREQUENCY / 59.7275f);
+        fflush(stdout);
+    }
+
 #ifdef DUAL_CORE_PPU
     s_crc_fp = fopen("crc_dual.bin", "wb");
     if (!s_crc_fp) {
@@ -223,10 +257,6 @@ int main(int argc, char **argv)
 
     /* --- Main loop --- */
     for (int f = 0; f < frames; f++) {
-#ifdef DUAL_CORE_PPU
-        ppu_pipeline_begin_frame();
-#endif
-
         if (dynarec_enable) {
             execute_arm_translate(execute_cycles);
         } else {
@@ -262,6 +292,31 @@ int main(int argc, char **argv)
 #else
         dump_current_frame();
 #endif
+
+        /* --- Drain audio for this frame --- */
+#ifdef DUAL_CORE_PPU
+        {
+            /* Audio was collected inside flush_frame (ppu_sim),
+             * mirroring the real ppu_pipeline.c path. */
+            int16_t *samples;
+            uint32_t n = ppu_sim_get_audio(&samples);
+            if (n > 0)
+                fwrite(samples, sizeof(int16_t), n * 2, s_audio_fp);
+        }
+#else
+        {
+            render_gbc_sound();
+            uint32_t n = (uint32_t)s_audio_spf;
+            s_audio_frac += s_audio_spf - (float)n;
+            if (s_audio_frac >= 1.0f) { n++; s_audio_frac -= 1.0f; }
+            if (n > AUDIO_SPF_MAX) n = AUDIO_SPF_MAX;
+
+            uint32_t got = sound_read_samples(s_audio_buf, n);
+            if (got < n)
+                memset(s_audio_buf + got * 2, 0, (n - got) * 2 * sizeof(int16_t));
+            fwrite(s_audio_buf, sizeof(int16_t), n * 2, s_audio_fp);
+        }
+#endif
     }
 
     /* --- Cleanup --- */
@@ -269,6 +324,7 @@ int main(int argc, char **argv)
     ppu_sim_shutdown();
     if (s_crc_fp) fclose(s_crc_fp);
 #endif
+    if (s_audio_fp) fclose(s_audio_fp);
     fclose(s_dump_fp);
     printf("[compare] Done. Wrote %u frames to %s\n",
            s_dump_frame, output_path);

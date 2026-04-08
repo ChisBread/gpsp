@@ -36,6 +36,7 @@
 #define GBA_SESSION_AUTOSAVE_PERIOD_US (5 * 1000 * 1000)
 #define GBA_SESSION_STATE_MAGIC 0x53545347u
 #define GBA_SESSION_STATE_VERSION 1u
+#define GBA_SESSION_STATS_WINDOW 240
 #define GBA_SESSION_STATE_IO_BUF_SIZE \
     (sizeof(gba_session_state_file_header_t) + GBA_STATE_MEM_SIZE + sizeof(gamepak_backup))
 
@@ -78,11 +79,237 @@ typedef struct {
     int64_t last_autosave_us;
 } gba_session_state_t;
 
+typedef struct {
+    int64_t samples[GBA_SESSION_STATS_WINDOW];
+    size_t next_index;
+    size_t count;
+} frame_stat_window_t;
+
+typedef struct {
+    int64_t last_us;
+    int64_t avg_us;
+    int64_t p99_us;
+    size_t sample_count;
+} frame_stat_summary_t;
+
+typedef struct {
+    frame_stat_window_t cpu_us;
+    frame_stat_window_t copy_us;
+    frame_stat_window_t submit_us;
+    frame_stat_window_t acquire_us;
+#ifdef DUAL_CORE_PPU
+    frame_stat_window_t emu_us;
+    frame_stat_window_t wait_us;
+    frame_stat_window_t wait_render_us;
+    frame_stat_window_t wait_buf_us;
+    frame_stat_window_t wait_pace_us;
+    frame_stat_window_t render_scan_us;
+    frame_stat_window_t render_video_us;
+    frame_stat_window_t render_audio_us;
+#endif
+} gba_session_perf_stats_t;
+
 static const char *TAG = "gpsp_session";
 static gba_session_state_t s_session;
 static int64_t s_frame_start_us;
 static uint32_t s_fps_counter;
 static int64_t s_fps_timer_us;
+static gba_session_perf_stats_t s_perf_stats;
+
+static int compare_int64_ascending(const void *lhs, const void *rhs)
+{
+    const int64_t left = *(const int64_t *)lhs;
+    const int64_t right = *(const int64_t *)rhs;
+
+    if (left < right) {
+        return -1;
+    }
+    if (left > right) {
+        return 1;
+    }
+    return 0;
+}
+
+static void frame_stat_window_push(frame_stat_window_t *window, int64_t value_us)
+{
+    if (!window) {
+        return;
+    }
+
+    window->samples[window->next_index] = value_us;
+    window->next_index = (window->next_index + 1) % GBA_SESSION_STATS_WINDOW;
+    if (window->count < GBA_SESSION_STATS_WINDOW) {
+        window->count++;
+    }
+}
+
+static frame_stat_summary_t frame_stat_window_summarize(const frame_stat_window_t *window)
+{
+    frame_stat_summary_t summary = {0};
+
+    if (!window || window->count == 0) {
+        return summary;
+    }
+
+    int64_t ordered[GBA_SESSION_STATS_WINDOW];
+    int64_t total_us = 0;
+    size_t last_index = (window->next_index + GBA_SESSION_STATS_WINDOW - 1) % GBA_SESSION_STATS_WINDOW;
+
+    for (size_t i = 0; i < window->count; i++) {
+        ordered[i] = window->samples[i];
+        total_us += ordered[i];
+    }
+
+    qsort(ordered, window->count, sizeof(ordered[0]), compare_int64_ascending);
+
+    summary.last_us = window->samples[last_index];
+    summary.avg_us = total_us / (int64_t)window->count;
+    summary.p99_us = ordered[((window->count * 99) + 99) / 100 - 1];
+    summary.sample_count = window->count;
+    return summary;
+}
+
+static void format_frame_stat_summary(char *buffer, size_t buffer_size,
+                                      const frame_stat_summary_t *summary)
+{
+    if (!buffer || buffer_size == 0) {
+        return;
+    }
+
+    if (!summary || summary->sample_count == 0) {
+        snprintf(buffer, buffer_size, "n/a");
+        return;
+    }
+
+    snprintf(buffer, buffer_size,
+             "last %lld avg %lld top99 %lld us",
+             (long long)summary->last_us,
+             (long long)summary->avg_us,
+             (long long)summary->p99_us);
+}
+
+static void gba_session_perf_reset(void)
+{
+    memset(&s_perf_stats, 0, sizeof(s_perf_stats));
+}
+
+#ifndef DUAL_CORE_PPU
+static void gba_session_perf_push_single_core(int64_t cpu_us,
+                                              int64_t copy_us,
+                                              int64_t submit_us,
+                                              int64_t acquire_us)
+{
+    frame_stat_window_push(&s_perf_stats.cpu_us, cpu_us);
+    frame_stat_window_push(&s_perf_stats.copy_us, copy_us);
+    frame_stat_window_push(&s_perf_stats.submit_us, submit_us);
+    frame_stat_window_push(&s_perf_stats.acquire_us, acquire_us);
+}
+
+static void gba_session_perf_log_single_core(void)
+{
+    char cpu_buf[48];
+    char copy_buf[48];
+    char submit_buf[48];
+    char acquire_buf[48];
+    frame_stat_summary_t cpu = frame_stat_window_summarize(&s_perf_stats.cpu_us);
+    frame_stat_summary_t copy = frame_stat_window_summarize(&s_perf_stats.copy_us);
+    frame_stat_summary_t submit = frame_stat_window_summarize(&s_perf_stats.submit_us);
+    frame_stat_summary_t acquire = frame_stat_window_summarize(&s_perf_stats.acquire_us);
+
+    format_frame_stat_summary(cpu_buf, sizeof(cpu_buf), &cpu);
+    format_frame_stat_summary(copy_buf, sizeof(copy_buf), &copy);
+    format_frame_stat_summary(submit_buf, sizeof(submit_buf), &submit);
+    format_frame_stat_summary(acquire_buf, sizeof(acquire_buf), &acquire);
+
+    ESP_LOGI(TAG,
+             "Frame CPU (%u samples): run [%s] | copy [%s]",
+             (unsigned)cpu.sample_count,
+             cpu_buf,
+             copy_buf);
+    ESP_LOGI(TAG,
+             "Frame IO  (%u samples): submit [%s] | acquire [%s] | heap %u KB",
+             (unsigned)submit.sample_count,
+             submit_buf,
+             acquire_buf,
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024));
+}
+#else
+static void gba_session_perf_push_dual_core(int64_t emu_us,
+                                            int64_t cpu_us,
+                                            int64_t wait_us,
+                                            int64_t wait_render_us,
+                                            int64_t wait_buf_us,
+                                            int64_t wait_pace_us,
+                                            int64_t render_scan_us,
+                                            int64_t render_video_us,
+                                            int64_t render_audio_us)
+{
+    frame_stat_window_push(&s_perf_stats.emu_us, emu_us);
+    frame_stat_window_push(&s_perf_stats.cpu_us, cpu_us);
+    frame_stat_window_push(&s_perf_stats.wait_us, wait_us);
+    frame_stat_window_push(&s_perf_stats.wait_render_us, wait_render_us);
+    frame_stat_window_push(&s_perf_stats.wait_buf_us, wait_buf_us);
+    frame_stat_window_push(&s_perf_stats.wait_pace_us, wait_pace_us);
+    frame_stat_window_push(&s_perf_stats.render_scan_us, render_scan_us);
+    frame_stat_window_push(&s_perf_stats.render_video_us, render_video_us);
+    frame_stat_window_push(&s_perf_stats.render_audio_us, render_audio_us);
+}
+
+static void gba_session_perf_log_dual_core(uint32_t audio_drop_count,
+                                           uint32_t audio_queue_peak)
+{
+    char emu_buf[48];
+    char cpu_buf[48];
+    char wait_buf[48];
+    char wait_render_buf[48];
+    char wait_pipe_buf[48];
+    char wait_pace_buf[48];
+    char render_scan_buf[48];
+    char render_video_buf[48];
+    char render_audio_buf[48];
+    frame_stat_summary_t emu = frame_stat_window_summarize(&s_perf_stats.emu_us);
+    frame_stat_summary_t cpu = frame_stat_window_summarize(&s_perf_stats.cpu_us);
+    frame_stat_summary_t wait = frame_stat_window_summarize(&s_perf_stats.wait_us);
+    frame_stat_summary_t wait_render = frame_stat_window_summarize(&s_perf_stats.wait_render_us);
+    frame_stat_summary_t wait_pipe = frame_stat_window_summarize(&s_perf_stats.wait_buf_us);
+    frame_stat_summary_t wait_pace = frame_stat_window_summarize(&s_perf_stats.wait_pace_us);
+    frame_stat_summary_t render_scan = frame_stat_window_summarize(&s_perf_stats.render_scan_us);
+    frame_stat_summary_t render_video = frame_stat_window_summarize(&s_perf_stats.render_video_us);
+    frame_stat_summary_t render_audio = frame_stat_window_summarize(&s_perf_stats.render_audio_us);
+
+    format_frame_stat_summary(emu_buf, sizeof(emu_buf), &emu);
+    format_frame_stat_summary(cpu_buf, sizeof(cpu_buf), &cpu);
+    format_frame_stat_summary(wait_buf, sizeof(wait_buf), &wait);
+    format_frame_stat_summary(wait_render_buf, sizeof(wait_render_buf), &wait_render);
+    format_frame_stat_summary(wait_pipe_buf, sizeof(wait_pipe_buf), &wait_pipe);
+    format_frame_stat_summary(wait_pace_buf, sizeof(wait_pace_buf), &wait_pace);
+    format_frame_stat_summary(render_scan_buf, sizeof(render_scan_buf), &render_scan);
+    format_frame_stat_summary(render_video_buf, sizeof(render_video_buf), &render_video);
+    format_frame_stat_summary(render_audio_buf, sizeof(render_audio_buf), &render_audio);
+
+    ESP_LOGI(TAG,
+             "Frame CPU    (%u samples): emu [%s] | core [%s] | wait [%s]",
+             (unsigned)emu.sample_count,
+             emu_buf,
+             cpu_buf,
+             wait_buf);
+    ESP_LOGI(TAG,
+             "Frame Wait   (%u samples): render [%s] | buffer [%s] | pace [%s]",
+             (unsigned)wait_render.sample_count,
+             wait_render_buf,
+             wait_pipe_buf,
+             wait_pace_buf);
+    ESP_LOGI(TAG,
+             "Frame Render (%u samples): scan [%s] | video [%s] | audio [%s] | adrop %u qpeak %u | heap %u KB",
+             (unsigned)render_scan.sample_count,
+             render_scan_buf,
+             render_video_buf,
+             render_audio_buf,
+             (unsigned)audio_drop_count,
+             (unsigned)audio_queue_peak,
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024));
+}
+#endif
 
 #ifdef CPU_PROFILE_STATS
 static void log_scanline_breakdown(void)
@@ -702,6 +929,7 @@ void gba_emulation_task(void *param)
 #endif
 
     s_fps_timer_us = esp_timer_get_time();
+    gba_session_perf_reset();
 
 #ifdef DUAL_CORE_PPU
     /* The render task owns gba_screen_pixels in dual-core mode.
@@ -726,9 +954,6 @@ void gba_emulation_task(void *param)
     while (1) {
         s_frame_start_us = esp_timer_get_time();
         int64_t t0, t1;
-#ifdef DUAL_CORE_PPU
-        int64_t t_wait;
-#endif
 
         if (gba_session_process_pending() != ESP_OK) {
             ESP_LOGW(TAG, "Failed to process pending GBA session request");
@@ -753,13 +978,6 @@ void gba_emulation_task(void *param)
             write_ioreg(REG_P1, ~keys & 0x3FF);
         }
         skip_next_frame = 0;
-
-#ifdef DUAL_CORE_PPU
-        /* Wait for the render task to finish the previous frame before
-         * we start writing new scanline descriptors. */
-        ppu_pipeline_begin_frame();
-        t_wait = esp_timer_get_time();
-#endif
 
         t0 = esp_timer_get_time();
 
@@ -811,18 +1029,19 @@ void gba_emulation_task(void *param)
             }
 
             t4 = esp_timer_get_time();
+            gba_session_perf_push_single_core(t1 - t0,
+                                              t2 - t1,
+                                              t3 - t2,
+                                              t4 - t3);
 
             s_fps_counter++;
             {
                 int64_t now = esp_timer_get_time();
                 if (now - s_fps_timer_us >= 1000000) {
-                    ESP_LOGI(TAG, "FPS: %u | cpu: %lld us | copy: %lld us | submit: %lld us | acquire: %lld us | heap: %u KB",
+                    ESP_LOGI(TAG, "FPS: %u | stats window %u frames",
                              (unsigned)s_fps_counter,
-                             (long long)(t1 - t0),
-                             (long long)(t2 - t1),
-                             (long long)(t3 - t2),
-                             (long long)(t4 - t3),
-                             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024));
+                             (unsigned)GBA_SESSION_STATS_WINDOW);
+                    gba_session_perf_log_single_core();
 #ifdef CPU_PROFILE_STATS
                     cpu_prof_print();
 #endif
@@ -854,18 +1073,19 @@ void gba_emulation_task(void *param)
                 ppu_pipeline_get_wait_stats(&w_render, &w_buf, &w_pace,
                                             &a_drop, &a_qpeak);
                 emu_wall = t1 - s_frame_start_us;
-                ESP_LOGI(TAG, "FPS: %u | emu: %lld us | cpu: %lld us | wait: %lld us (rd %lld buf %lld hz60 %lld) | R: scan %lld vid %lld aud %lld us | A: drop %u qpk %u | heap: %u KB",
+                gba_session_perf_push_dual_core(emu_wall,
+                                                t1 - t0,
+                                                t0 - s_frame_start_us,
+                                                w_render,
+                                                w_buf,
+                                                w_pace,
+                                                r_scan,
+                                                r_video,
+                                                r_audio);
+                ESP_LOGI(TAG, "FPS: %u | stats window %u frames",
                          (unsigned)s_fps_counter,
-                         (long long)emu_wall,
-                         (long long)(t1 - t0),
-                         (long long)(t_wait - s_frame_start_us),
-                         (long long)w_render,
-                         (long long)w_buf,
-                         (long long)w_pace,
-                         (long long)r_scan, (long long)r_video, (long long)r_audio,
-                         (unsigned)a_drop,
-                         (unsigned)a_qpeak,
-                         (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024));
+                         (unsigned)GBA_SESSION_STATS_WINDOW);
+                gba_session_perf_log_dual_core(a_drop, a_qpeak);
 #ifdef CPU_PROFILE_STATS
                 log_scanline_breakdown();
                 cpu_prof_print();

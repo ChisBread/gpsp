@@ -49,8 +49,7 @@ void ppu_end_render_frame(void);
 
 /* Called by update_gba() — implemented in ppu_pipeline.c */
 void ppu_pipeline_submit_scanline(void);
-void ppu_pipeline_end_frame(bool skip_frame);
-void ppu_pipeline_post_vblank(void);
+void ppu_pipeline_flush_frame(bool skip_frame);
 #endif
 
 #endif
