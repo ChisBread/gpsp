@@ -11,10 +11,11 @@ tools/generate_cc_lut
 JC4880P443C_I_W/
 build/
 managed_components/
-frames_interp/
-frames_jit/
-tests/*_harness/test_gba*
+tests/harness/test_gba*
+tests/harness/build_*/
+tests/harness/frames_*/
+tests/harness/*.bin
+tests/harness/*.pcm
 bios/game.gba
 bios/gba_bios.bin
-diff*png
 *.mp4

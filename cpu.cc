@@ -21,7 +21,7 @@ extern "C" {
   #include "common.h"
   #include "cpu_instrument.h"
 #ifdef TRACE_INSTRUCTIONS
-  #include "tests/qemu_harness/trace_instr.h"
+  #include "tests/harness/trace_instr.h"
 #endif
 }
 
