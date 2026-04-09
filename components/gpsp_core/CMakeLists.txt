@@ -100,6 +100,9 @@ if(CONFIG_GPSP_ROM_BUFFER_SIZE)
     )
 endif()
 
+# Aggressive optimization for hot emulation code
+target_compile_options(${COMPONENT_LIB} PRIVATE -O3)
+
 # Suppress warnings in upstream code (treated as errors by IDF default)
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error

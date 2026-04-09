@@ -268,13 +268,38 @@
     rv_or(rd, rd, tmp2);                                   \
 } while(0)
 
-/* ---- Load 32-bit immediate (2-instruction sequence) ---- */
+/* ---- Load 32-bit immediate (variable length: 1 or 2 instructions) ----
+ * Zero -> mv (1 inst), small +/-2047 -> addi (1), upper-only -> lui (1),
+ * otherwise -> lui+addi (2).
+ *
+ * Any codegen macro with a hardcoded branch offset that spans across a
+ * generate_load_imm() expansion must either inline the load (rv_addi for
+ * small constants) or use rv_load_imm32_2inst.  Affected sites:
+ *   - shift_reg_{lsl,lsr,asr}_flags  (use rv_addi for constant 32)
+ *   - generate_function_call          (uses rv_load_imm32_2inst)
+ */
 #define rv_load_imm32(rd, imm32) do {                       \
+    u32 _val = (u32)(imm32);                                \
+    if (_val == 0) {                                        \
+        rv_mv(rd, rv_zero);                                 \
+    } else if ((s32)_val >= -2048 && (s32)_val <= 2047) {   \
+        rv_addi(rd, rv_zero, (s32)_val);                    \
+    } else if ((_val & 0xFFF) == 0) {                       \
+        rv_lui(rd, _val);                                   \
+    } else {                                                \
+        u32 _hi = _val & 0xFFFFF000;                        \
+        u32 _lo = _val & 0xFFF;                             \
+        if (_lo & 0x800) _hi += 0x1000;                     \
+        rv_lui(rd, _hi);                                    \
+        rv_addi(rd, rd, (s32)(_lo << 20) >> 20);            \
+    }                                                       \
+} while(0)
+
+/* Always emits exactly 2 instructions (8 bytes). */
+#define rv_load_imm32_2inst(rd, imm32) do {                 \
     u32 _val = (u32)(imm32);                                \
     u32 _hi = _val & 0xFFFFF000;                            \
     u32 _lo = _val & 0xFFF;                                 \
-    /* Sign-extend correction: if lo bit 11 is set,         \
-       LUI needs +1 page because ADDI will sign-extend */   \
     if (_lo & 0x800) _hi += 0x1000;                         \
     rv_lui(rd, _hi);                                        \
     rv_addi(rd, rd, (s32)(_lo << 20) >> 20);                \

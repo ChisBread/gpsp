@@ -36,6 +36,7 @@ u32 rv_execute_load_u16(u32 address);
 u32 rv_execute_load_s16(u32 address);
 u32 rv_execute_load_u32(u32 address);
 u32 rv_execute_aligned_load32(u32 address);
+
 void rv_execute_store_u8(u32 address, u32 source);
 void rv_execute_store_u16(u32 address, u32 source);
 void rv_execute_store_u32(u32 address, u32 source);
@@ -346,7 +347,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     rv_load_imm32(ireg, imm)                                                    \
 
 #define generate_load_pc_2inst(ireg, new_pc)                                  \
-    rv_load_imm32(ireg, new_pc)                                                 \
+    rv_load_imm32_2inst(ireg, new_pc)                                                 \
 
 #define generate_load_pc(ireg, new_pc)                                        \
 {                                                                             \
@@ -390,7 +391,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define generate_function_call(function_location)                             \
 {                                                                             \
-    rv_load_imm32(reg_temp, (u32)(uintptr_t)(function_location));               \
+    rv_load_imm32_2inst(reg_temp, (u32)(uintptr_t)(function_location));         \
     rv_jalr(rv_ra, reg_temp, 0);                                                \
 }
 
@@ -685,8 +686,8 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
-    rv_beqz(reg_a1, 32);                                                       \
-    generate_load_imm(reg_temp2, 32);                                          \
+    rv_beqz(reg_a1, 28);                                                       \
+    rv_addi(reg_temp2, rv_zero, 32);                                           \
     rv_bgeu(reg_a1, reg_temp2, 24);                                            \
     rv_addi(reg_temp, reg_a1, -1);                                             \
     rv_sll(reg_c_cache, reg_a0, reg_temp);                                     \
@@ -705,8 +706,8 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
-    rv_beqz(reg_a1, 28);                                                       \
-    generate_load_imm(reg_temp2, 32);                                          \
+    rv_beqz(reg_a1, 24);                                                       \
+    rv_addi(reg_temp2, rv_zero, 32);                                           \
     rv_bgeu(reg_a1, reg_temp2, 24);                                            \
     rv_addi(reg_temp, reg_a1, -1);                                             \
     rv_srl(reg_c_cache, reg_a0, reg_temp);                                     \
@@ -725,8 +726,8 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
-    rv_beqz(reg_a1, 24);                                                       \
-    generate_load_imm(reg_temp2, 32);                                          \
+    rv_beqz(reg_a1, 20);                                                       \
+    rv_addi(reg_temp2, rv_zero, 32);                                           \
     rv_bltu(reg_a1, reg_temp2, 16);                                            \
     rv_srli(reg_c_cache, reg_a0, 31);                                          \
     rv_srai(reg_a0, reg_a0, 31);                                               \

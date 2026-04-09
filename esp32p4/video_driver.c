@@ -52,9 +52,9 @@ static struct {
     ppa_client_handle_t      ppa_srm_client;
 
     uint16_t *out_buf;           /* Current draw target (may be a DPI panel FB) */
-    uint16_t *dpi_fbs[2];        /* DPI panel framebuffers (when double-buffered) */
-    int       dpi_draw_idx;      /* Index of the FB we are drawing into (0 or 1) */
-    int       dpi_fb_count;      /* Number of DPI FBs (1 or 2) */
+    uint16_t *dpi_fbs[3];        /* DPI panel framebuffers (up to triple-buffered) */
+    int       dpi_draw_idx;      /* Index of the FB we are drawing into */
+    int       dpi_fb_count;      /* Number of DPI FBs (1, 2, or 3) */
     size_t    out_buf_size;
     uint16_t  offset_y;          /* Vertical centering offset: (800-720)/2 = 40 */
 
@@ -325,17 +325,46 @@ esp_err_t video_driver_init(const video_driver_config_t *config)
     /*
      * Try to get the DPI panel's internal framebuffer(s) so PPA can output
      * directly into them, eliminating the ~768 KB CPU memcpy in draw_bitmap.
-     * With 2 FBs we get tear-free output: draw into the back buffer while
-     * the DPI controller scans out the front buffer, then swap.
+     *
+     * With 2 FBs: tear-free double buffering (draw back, display front, swap).
+     * With 3 FBs: triple buffering — decouples render timing from display
+     * timing, eliminating per-frame jitter visible in side-scrolling games.
+     * The DPI controller always scans from one buffer; PPA writes into the
+     * next free buffer; the third is the "just completed" frame queued for
+     * display.  This absorbs render-time variance without frame drops.
      */
     s_video.dpi_fb_count = 0;
     s_video.dpi_draw_idx = 0;
     s_video.dpi_fbs[0] = NULL;
     s_video.dpi_fbs[1] = NULL;
+    s_video.dpi_fbs[2] = NULL;
     s_video.direct_dpi_fb = false;
 
     int requested_fbs = config->num_fbs > 0 ? config->num_fbs : 1;
-    if (requested_fbs >= 2) {
+    if (requested_fbs >= 3) {
+        void *fb0 = NULL, *fb1 = NULL, *fb2 = NULL;
+        if (esp_lcd_dpi_panel_get_frame_buffer(s_video.panel, 3, &fb0, &fb1, &fb2) == ESP_OK
+            && fb0 && fb1 && fb2) {
+            s_video.dpi_fbs[0] = (uint16_t *)fb0;
+            s_video.dpi_fbs[1] = (uint16_t *)fb1;
+            s_video.dpi_fbs[2] = (uint16_t *)fb2;
+            s_video.dpi_fb_count = 3;
+            s_video.dpi_draw_idx = 1;  /* fb0 displayed, start drawing into fb1 */
+            s_video.out_buf = s_video.dpi_fbs[s_video.dpi_draw_idx];
+            s_video.direct_dpi_fb = true;
+            for (int i = 0; i < 3; i++) {
+                memset(s_video.dpi_fbs[i], 0, s_video.out_buf_size);
+                esp_cache_msync(s_video.dpi_fbs[i], s_video.out_buf_size,
+                                ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+            }
+            ESP_LOGI(TAG, "Direct DPI FB x3 — triple-buffered PPA -> LCD");
+        } else {
+            /* Fall back to requesting 2 */
+            requested_fbs = 2;
+        }
+    }
+
+    if (!s_video.direct_dpi_fb && requested_fbs >= 2) {
         void *fb0 = NULL, *fb1 = NULL;
         if (esp_lcd_dpi_panel_get_frame_buffer(s_video.panel, 2, &fb0, &fb1) == ESP_OK
             && fb0 && fb1) {
@@ -393,9 +422,9 @@ esp_err_t video_driver_init(const video_driver_config_t *config)
             ESP_LOGW(TAG, "PPA SRM client failed: %s, using software fallback", esp_err_to_name(err));
             s_video.use_ppa = false;
         } else {
-            /* Enable non-blocking PPA when double-buffered DPI is available
+            /* Enable non-blocking PPA when multi-buffered DPI is available
              * so PPA DMA runs in parallel with other render work. */
-            if (s_video.direct_dpi_fb && s_video.dpi_fb_count == 2) {
+            if (s_video.direct_dpi_fb && s_video.dpi_fb_count >= 2) {
                 s_video.ppa_done = xSemaphoreCreateBinary();
                 if (s_video.ppa_done) {
                     ppa_event_callbacks_t cbs = {
@@ -492,9 +521,7 @@ esp_err_t video_driver_submit_frame(const uint16_t *gba_framebuffer)
                             ESP_CACHE_MSYNC_FLAG_DIR_C2M);
         }
 
-        if (s_video.dpi_fb_count == 2) {
-            /* Set cur_fb_index FIRST, then wait for DMA-trans-done ISR
-             * to pick it up before we swap.  Same order as await_frame. */
+        if (s_video.dpi_fb_count >= 2) {
             esp_lcd_panel_draw_bitmap(s_video.panel,
                                       0, 0,
                                       s_video.lcd_h_res, s_video.lcd_v_res,
@@ -503,7 +530,7 @@ esp_err_t video_driver_submit_frame(const uint16_t *gba_framebuffer)
                 while (xSemaphoreTake(s_video.vsync, 0) == pdTRUE) {}
                 xSemaphoreTake(s_video.vsync, portMAX_DELAY);
             }
-            s_video.dpi_draw_idx ^= 1;
+            s_video.dpi_draw_idx = (s_video.dpi_draw_idx + 1) % s_video.dpi_fb_count;
             s_video.out_buf = s_video.dpi_fbs[s_video.dpi_draw_idx];
         }
     } else {
@@ -526,28 +553,43 @@ esp_err_t video_driver_await_frame(void)
     s_video.ppa_pending = false;
 
     /* Schedule the buffer switch: draw_bitmap sets cur_fb_index so
-     * the DPI DMA ISR will pick it up at the next frame boundary.
-     * This MUST happen BEFORE the VSYNC wait — the ISR reads
-     * cur_fb_index first, then restarts DMA, then fires the
-     * callback.  If we set cur_fb_index after the callback we’d
-     * be one frame too late and PPA would race with DPI. */
+     * the DPI DMA ISR will pick it up at the next frame boundary. */
     esp_lcd_panel_draw_bitmap(s_video.panel,
                               0, 0,
                               s_video.lcd_h_res, s_video.lcd_v_res,
                               s_video.out_buf);
 
-    /* Wait for the DPI ISR to confirm it switched to our buffer.
-     * Drain stale tokens first — a VSYNC may have fired while PPA
-     * was still running. */
-    if (s_video.vsync) {
-        while (xSemaphoreTake(s_video.vsync, 0) == pdTRUE) {}
-        xSemaphoreTake(s_video.vsync, portMAX_DELAY);
+    if (s_video.dpi_fb_count >= 3) {
+        /* Triple buffering: pace to VSYNC but do NOT drain stale
+         * semaphore counts first.  With 3 rotating buffers the draw
+         * target is always 2 positions behind — guaranteed free after
+         * two VSYNC switches.  By skipping the drain we let a frame
+         * that finished *after* the VSYNC deadline consume the
+         * already-given semaphore instantly instead of waiting for the
+         * NEXT VSYNC (which would impose the same 2-VSYNC penalty as
+         * double buffering).
+         *
+         * Fast frame (done before VSYNC): blocks here until VSYNC
+         *   → paced to ~59.7 Hz, no tearing.
+         * Late frame (done after VSYNC):  semaphore already given,
+         *   take returns immediately → next frame starts without
+         *   extra latency, eliminating the scroll-jitter visible in
+         *   side-scrolling games like Kirby. */
+        if (s_video.vsync) {
+            xSemaphoreTake(s_video.vsync, portMAX_DELAY);
+        }
+        s_video.dpi_draw_idx = (s_video.dpi_draw_idx + 1) % s_video.dpi_fb_count;
+        s_video.out_buf = s_video.dpi_fbs[s_video.dpi_draw_idx];
+    } else {
+        /* Double buffering: must wait for VSYNC to confirm the DPI
+         * controller switched away from our target buffer. */
+        if (s_video.vsync) {
+            while (xSemaphoreTake(s_video.vsync, 0) == pdTRUE) {}
+            xSemaphoreTake(s_video.vsync, portMAX_DELAY);
+        }
+        s_video.dpi_draw_idx = (s_video.dpi_draw_idx + 1) % s_video.dpi_fb_count;
+        s_video.out_buf = s_video.dpi_fbs[s_video.dpi_draw_idx];
     }
-
-    /* The old buffer is now free (DPI switched away from it).
-     * Swap so the next PPA writes into the freed buffer. */
-    s_video.dpi_draw_idx ^= 1;
-    s_video.out_buf = s_video.dpi_fbs[s_video.dpi_draw_idx];
 
     return ESP_OK;
 }
