@@ -593,25 +593,13 @@ void function_cc write_eeprom(u32 unused_address, u32 value)
   ((((addr) & ~3) >> 1) & 0xFFFF) | (((((addr) & ~3) + 2) >> 1) << 16)
 
 #define read_open8()                                                          \
-  if(!(reg[REG_CPSR] & 0x20))                                                 \
-    value = read_memory8(reg[REG_PC] + 8 + (address & 0x03));                 \
-  else                                                                        \
-    value = read_memory8(reg[REG_PC] + 4 + (address & 0x01))                  \
+  value = (u8)(reg[REG_BUS_VALUE] >> ((address & 0x03) << 3))                 \
 
 #define read_open16()                                                         \
-  if(!(reg[REG_CPSR] & 0x20))                                                 \
-    value = read_memory16(reg[REG_PC] + 8 + (address & 0x02));                \
-  else                                                                        \
-    value = read_memory16(reg[REG_PC] + 4)                                    \
+  value = (u16)(reg[REG_BUS_VALUE] >> ((address & 0x02) << 3))                \
 
 #define read_open32()                                                         \
-  if(!(reg[REG_CPSR] & 0x20))                                                 \
-    value = read_memory32(reg[REG_PC] + 8);                                   \
-  else                                                                        \
-  {                                                                           \
-    u32 current_instruction = read_memory16(reg[REG_PC] + 4);                 \
-    value = current_instruction | (current_instruction << 16);                \
-  }                                                                           \
+  value = reg[REG_BUS_VALUE]                                                  \
 
 u32 function_cc read_eeprom(void)
 {
