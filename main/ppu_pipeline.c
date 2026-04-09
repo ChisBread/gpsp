@@ -504,6 +504,12 @@ esp_err_t ppu_pipeline_init(const ppu_pipeline_config_t *cfg)
     s_frames[0].next_line = 0;
     s_frames[0].skip      = 0;
 
+    /* Seed the first frame's bulk data so vcount 0..159 rendering has
+     * valid VRAM/OAM/palette before the first flush_frame() runs. */
+    memcpy(s_frames[0].oam,     oam_ram,              sizeof(s_frames[0].oam));
+    memcpy(s_frames[0].palette, palette_ram_converted, sizeof(s_frames[0].palette));
+    memcpy(s_frames[0].vram,    vram,                  sizeof(s_frames[0].vram));
+
     BaseType_t r = xTaskCreatePinnedToCoreWithCaps(
         render_task, "ppu_render",
         cfg->task_stack_size, NULL,
@@ -586,8 +592,16 @@ void ppu_pipeline_submit_scanline(void)
 /*
  * flush_frame — called at vcount == 228 (end of VBlank).
  *
- * Generates audio, snapshots OAM/palette/VRAM, flushes L1 D-cache,
- * then queues the frame (with embedded audio) for the render core.
+ * Generates audio, flushes L1 D-cache, queues the completed frame for
+ * the render core, then acquires the next buffer and immediately
+ * snapshots VRAM/OAM/palette into it.
+ *
+ * The bulk snapshot is placed into the NEXT frame's descriptor because
+ * at vcount 228 the game's VBlank handler has finished updating scroll
+ * registers, VRAM tile maps, OAM and palette for the upcoming frame.
+ * This is the same state that single-core update_scanline() would see
+ * at vcount 0.  The subsequent submit_scanline() calls (vcount 0..159)
+ * will add per-scanline IO snapshots into the same descriptor.
  */
 void ppu_pipeline_flush_frame(bool skip)
 {
@@ -600,12 +614,6 @@ void ppu_pipeline_flush_frame(bool skip)
      * state machine must advance so we don't lose samples. */
     render_gbc_sound();
     f->audio_frames = s_audio_on ? collect_audio(f->audio_samples, AUDIO_FRAME_MAX) : 0;
-
-    if (!skip) {
-        memcpy(f->oam,     oam_ram,              sizeof(f->oam));
-        memcpy(f->palette, palette_ram_converted, sizeof(f->palette));
-        memcpy(f->vram,    vram,                  sizeof(f->vram));
-    }
 
     asm volatile ("fence rw, rw" ::: "memory");
     ppu_dcache_writeback(f, sizeof(*f));
@@ -622,6 +630,14 @@ void ppu_pipeline_flush_frame(bool skip)
     ppu_frame_t *nf = &s_frames[s_wr];
     nf->next_line = 0;
     nf->skip      = 0;
+
+    /* Snapshot VRAM/OAM/palette into the NEXT frame's descriptor.
+     * At this point (vcount 228) the game's VBlank handler has finished,
+     * so these buffers reflect exactly what update_scanline() would read
+     * at vcount 0 in single-core mode. */
+    memcpy(nf->oam,     oam_ram,              sizeof(nf->oam));
+    memcpy(nf->palette, palette_ram_converted, sizeof(nf->palette));
+    memcpy(nf->vram,    vram,                  sizeof(nf->vram));
 
     s_stat_wait_buf_us = t1 - t0;
 }

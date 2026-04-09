@@ -61,9 +61,9 @@ void ppu_pipeline_submit_scanline(void);
 
 /*
  * Called at vcount == 228 (end of VBlank) after all DMA and CPU
- * activity.  Generates audio (render_gbc_sound + drain), snapshots
- * OAM/palette/VRAM, flushes caches, and queues the frame (with
- * embedded audio) for the render core.
+ * activity.  Generates audio, flushes caches, queues the current
+ * frame, then snapshots VRAM/OAM/palette into the next frame's
+ * descriptor (matching vcount-0 state for the upcoming frame).
  */
 void ppu_pipeline_flush_frame(bool skip_frame);
 
