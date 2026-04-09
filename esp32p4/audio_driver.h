@@ -26,10 +26,12 @@ extern "C" {
 
 /* ES8311 I2C address */
 #define ES8311_I2C_ADDR       0x18
+#define AUDIO_PCM_SOURCE_RATE 65536u
 
 /* Audio configuration */
 typedef struct {
-    uint32_t sample_rate;      /* Output sample rate (e.g., 32768 or 44100) */
+    uint32_t sample_rate;      /* Hardware output sample rate (e.g., 32000, 44100, 64000) */
+    uint32_t source_sample_rate; /* Incoming PCM sample rate before resampling */
 } audio_driver_config_t;
 
 /**

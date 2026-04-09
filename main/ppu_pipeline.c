@@ -44,6 +44,7 @@
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
@@ -503,20 +504,22 @@ esp_err_t ppu_pipeline_init(const ppu_pipeline_config_t *cfg)
     s_frames[0].next_line = 0;
     s_frames[0].skip      = 0;
 
-    BaseType_t r = xTaskCreatePinnedToCore(
+    BaseType_t r = xTaskCreatePinnedToCoreWithCaps(
         render_task, "ppu_render",
         cfg->task_stack_size, NULL,
         cfg->task_priority, &s_task,
-        cfg->render_core);
+        cfg->render_core,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (r != pdPASS) return ESP_FAIL;
 
     if (s_audio_on) {
-        r = xTaskCreatePinnedToCore(
+        r = xTaskCreatePinnedToCoreWithCaps(
             audio_task, "ppu_audio",
             4096, NULL,
             cfg->task_priority > 0 ? cfg->task_priority - 1 : cfg->task_priority,
             &s_audio_task,
-            cfg->render_core);
+            cfg->render_core,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (r != pdPASS) return ESP_FAIL;
     }
 
@@ -561,6 +564,12 @@ esp_err_t ppu_pipeline_reset_pace(void)
  * submit_scanline — called at each H-Draw → HBlank transition (vcount 0..159).
  *
  * Snapshots IO registers and captures the OAM dirty flag.
+ * On the first visible line (y==0), also snapshots VRAM, OAM and palette
+ * so that the bulk-data snapshot is taken at the same point in time as
+ * the IO snapshot — i.e. AFTER the previous frame's VBlank processing
+ * but BEFORE the current frame's HBlank DMAs.  This keeps the tile-map
+ * content consistent with the scroll register values captured per-line.
+ *
  * After this function returns, HBlank DMA may fire and write BG2X/VRAM.
  */
 void ppu_pipeline_submit_scanline(void)
@@ -568,6 +577,14 @@ void ppu_pipeline_submit_scanline(void)
     ppu_frame_t *f = &s_frames[s_wr];
     int y = f->next_line;
     if (y >= GBA_LINES) return;
+
+    /* Snapshot bulk data at the start of the visible frame so that
+     * VRAM/OAM/palette are coherent with the line-0 IO snapshot. */
+    if (y == 0) {
+        memcpy(f->oam,     oam_ram,              sizeof(f->oam));
+        memcpy(f->palette, palette_ram_converted, sizeof(f->palette));
+        memcpy(f->vram,    vram,                  sizeof(f->vram));
+    }
 
     ppu_line_t *L = &f->line[y];
 
@@ -583,8 +600,11 @@ void ppu_pipeline_submit_scanline(void)
 /*
  * flush_frame — called at vcount == 228 (end of VBlank).
  *
- * Generates audio, snapshots OAM/palette/VRAM, flushes L1 D-cache,
- * then queues the frame (with embedded audio) for the render core.
+ * Generates audio, flushes L1 D-cache, then queues the frame
+ * (with embedded audio) for the render core.
+ *
+ * NOTE: VRAM/OAM/palette are snapshotted at submit_scanline(y==0)
+ * so that their content is coherent with the per-scanline IO snapshots.
  */
 void ppu_pipeline_flush_frame(bool skip)
 {
@@ -597,12 +617,6 @@ void ppu_pipeline_flush_frame(bool skip)
      * state machine must advance so we don't lose samples. */
     render_gbc_sound();
     f->audio_frames = s_audio_on ? collect_audio(f->audio_samples, AUDIO_FRAME_MAX) : 0;
-
-    if (!skip) {
-        memcpy(f->oam,     oam_ram,              sizeof(f->oam));
-        memcpy(f->palette, palette_ram_converted, sizeof(f->palette));
-        memcpy(f->vram,    vram,                  sizeof(f->vram));
-    }
 
     asm volatile ("fence rw, rw" ::: "memory");
     ppu_dcache_writeback(f, sizeof(*f));

@@ -12,6 +12,7 @@ idf_component_register(
     INCLUDE_DIRS "${HAL_DIR}"
     REQUIRES
         driver
+        esp_codec_dev
         esp_lcd
         esp_driver_ppa
         esp_driver_i2s

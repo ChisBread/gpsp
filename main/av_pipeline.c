@@ -12,6 +12,7 @@ static bool audio_enabled;
 #ifndef DUAL_CORE_PPU
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
@@ -85,6 +86,10 @@ static void av_output_task(void *param)
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "Video submit failed: %s", esp_err_to_name(err));
             }
+            /* Complete any async PPA and swap the DPI framebuffer.
+             * Without this call, ppa_async mode leaves frames
+             * invisible (draw_bitmap + FB rotation never happen). */
+            video_driver_await_frame();
         }
 
         if (audio_enabled && audio_buffer_frames[slot_index] > 0) {
@@ -139,14 +144,15 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
         xQueueSend(av_free_queue, &slot_index, 0);
     }
 
-    task_ret = xTaskCreatePinnedToCore(
+    task_ret = xTaskCreatePinnedToCoreWithCaps(
         av_output_task,
         "gba_av",
         config->task_stack_size,
         NULL,
         config->task_priority,
         NULL,
-        config->output_core
+        config->output_core,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
     );
     if (task_ret != pdPASS) {
         return ESP_FAIL;

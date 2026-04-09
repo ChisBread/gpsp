@@ -443,6 +443,7 @@ static void web_server_start_task(void *arg)
 
 void web_server_start_async(int core_id)
 {
-    xTaskCreatePinnedToCore(web_server_start_task, "web_srv_init", 4096, NULL,
-                           tskIDLE_PRIORITY + 1, NULL, core_id);
+    xTaskCreatePinnedToCoreWithCaps(web_server_start_task, "web_srv_init", 4096, NULL,
+                                    tskIDLE_PRIORITY + 1, NULL, core_id,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }

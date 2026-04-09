@@ -39,13 +39,14 @@ menu "gpSP ESP32-P4 Platform (JC4880P443C_I_W)"
     menu "Audio (ES8311 Codec)"
         config GPSP_AUDIO_SAMPLE_RATE
             int "Audio sample rate (Hz)"
-            default 65536
+            default 64000
             range 32000 96000
             help
-                gpsp core currently produces 16-bit stereo PCM at 65536 Hz.
-                The ESP32-P4 port feeds the codec at that native rate, so
-                values other than 65536 are currently ignored unless a
-                resampler is added.
+                gpsp core produces 16-bit stereo PCM at 65536 Hz.
+                The ESP32-P4 audio driver resamples that stream to this
+                hardware output rate before sending it to ES8311.
+                Use a standard codec-friendly rate such as 32000, 44100,
+                48000, or 64000.
 
         config GPSP_AUDIO_VOLUME
             int "Default volume (%)"

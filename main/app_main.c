@@ -50,7 +50,8 @@ u32 idle_loop_target_pc = 0xFFFFFFFF;
 u32 translation_gate_target_pc[MAX_TRANSLATION_GATES];
 u32 translation_gate_targets = 0;
 
-#define GPSP_AUDIO_OUTPUT_RATE   GBA_SOUND_FREQUENCY
+#define GPSP_AUDIO_SOURCE_RATE   GBA_SOUND_FREQUENCY
+#define GPSP_AUDIO_OUTPUT_RATE   CONFIG_GPSP_AUDIO_SAMPLE_RATE
 #define AV_TASK_STACK_SIZE       8192
 #define AV_OUTPUT_CORE           ((CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0)
 
@@ -103,12 +104,10 @@ static esp_err_t init_platform(bool *audio_ready)
     /* ---- Initialize audio (ES8311 codec via I2C + I2S) ---- */
     audio_driver_config_t audio_config = {
         .sample_rate = GPSP_AUDIO_OUTPUT_RATE,
+        .source_sample_rate = GPSP_AUDIO_SOURCE_RATE,
     };
-    if (CONFIG_GPSP_AUDIO_SAMPLE_RATE != GPSP_AUDIO_OUTPUT_RATE) {
-        ESP_LOGW(TAG,
-                 "CONFIG_GPSP_AUDIO_SAMPLE_RATE=%d ignored; gpsp core currently outputs %d Hz PCM",
-                 CONFIG_GPSP_AUDIO_SAMPLE_RATE, GPSP_AUDIO_OUTPUT_RATE);
-    }
+    ESP_LOGI(TAG, "Audio path: gpsp PCM %d Hz -> codec output %d Hz",
+             GPSP_AUDIO_SOURCE_RATE, GPSP_AUDIO_OUTPUT_RATE);
     err = audio_driver_init(&audio_config);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Audio init failed: %s (continuing without sound)",
@@ -272,7 +271,10 @@ void app_main(void)
     );
 
     if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create emulation task");
+        ESP_LOGE(TAG,
+                 "Failed to create emulation task (largest internal block %u B, free internal %u B)",
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
         return;
     }
 

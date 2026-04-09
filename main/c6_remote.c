@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 
 #include "esp_log.h"
@@ -359,14 +360,15 @@ static void c6_remote_task(void *param)
 
 esp_err_t c6_remote_start_task(BaseType_t core_id, UBaseType_t priority)
 {
-    BaseType_t task_ret = xTaskCreatePinnedToCore(
+    BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(
         c6_remote_task,
         "c6_remote",
         C6_REMOTE_TASK_STACK_SIZE,
         NULL,
         priority,
         NULL,
-        core_id
+        core_id,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
     );
 
     if (task_ret != pdPASS) {
