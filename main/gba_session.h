@@ -36,6 +36,12 @@ esp_err_t gba_session_shutdown(void);
 esp_err_t gba_session_process_pending(void);
 void gba_emulation_task(void *param);
 
+/**
+ * Write a JSON snapshot of current rolling-window performance stats into buf.
+ * Returns the number of bytes written (excluding NUL), or -1 on error.
+ */
+int gba_session_stats_json(char *buf, size_t buf_size);
+
 #ifdef __cplusplus
 }
 #endif

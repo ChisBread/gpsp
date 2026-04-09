@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>gpsp Console</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0c0c1a;color:#e0e0e0;font-family:system-ui,sans-serif;padding:12px;max-width:540px;margin:0 auto}
+h1{font-size:1.2em;color:#8af;margin-bottom:10px;text-align:center}
+nav{display:flex;gap:8px;margin-bottom:14px;justify-content:center}
+nav a{color:#8af;text-decoration:none;padding:5px 14px;border:1px solid #334;border-radius:6px;font-size:.82em;transition:background .15s}
+nav a:hover,nav a.active{background:#2a2a4a;border-color:#88f}
+.card{background:#121a2e;border:1px solid #293;border-radius:8px;padding:12px;margin-bottom:12px}
+.card h2{font-size:.9em;color:#8af;margin-bottom:8px}
+/* Stats bar */
+.hdr{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
+.hdr .fps{font-size:1.6em;font-weight:bold;color:#6f6;font-family:monospace}
+.hdr .sub{font-size:.75em;color:#888}
+/* Chart */
+.chart-wrap{position:relative;width:100%;height:180px;background:#0a0f1a;border:1px solid #1a2a3a;border-radius:4px;overflow:hidden}
+canvas{width:100%;height:100%}
+.legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;font-size:.72em}
+.legend .item{display:flex;align-items:center;gap:4px}
+.legend .swatch{width:10px;height:10px;border-radius:2px}
+/* Stats table */
+.st{width:100%;border-collapse:collapse;font-size:.78em;font-family:monospace;margin-top:8px}
+.st td{padding:3px 6px;border-bottom:1px solid #1a2030}
+.st td:first-child{color:#888;width:40%}
+.st .v{text-align:right;color:#afa}
+.st .p99{text-align:right;color:#fa8}
+/* Settings */
+.row{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid #1a2030}
+.row:last-child{border-bottom:none}
+.row label{color:#ccc;font-size:.82em}
+.toggle{position:relative;width:42px;height:22px;cursor:pointer}
+.toggle input{opacity:0;width:0;height:0}
+.toggle .sl{position:absolute;inset:0;background:#333;border-radius:11px;transition:.2s}
+.toggle .sl:before{content:'';position:absolute;width:16px;height:16px;left:3px;bottom:3px;background:#888;border-radius:50%;transition:.2s}
+.toggle input:checked+.sl{background:#2a5a2a}
+.toggle input:checked+.sl:before{transform:translateX(20px);background:#afa}
+select{background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:3px 8px;font-size:.82em}
+.msg{text-align:center;font-size:.75em;min-height:18px;margin-top:6px}
+.msg.ok{color:#6f6}.msg.err{color:#f66}
+</style>
+</head>
+<body>
+<h1>gpsp Console</h1>
+<nav>
+  <a href="/" class="active">主页</a>
+  <a href="/input">手柄</a>
+</nav>
+
+<div class="card">
+  <div class="hdr">
+    <div><span class="fps" id="fps">--</span> <span class="sub">FPS</span></div>
+    <div class="sub">Heap: <span id="heap">--</span> KB</div>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="chart"></canvas>
+  </div>
+  <div class="legend" id="legend"></div>
+  <table class="st" id="tbl"></table>
+</div>
+
+<div class="card">
+  <h2>设置</h2>
+  <div class="row">
+    <label>动态重编译 (JIT)</label>
+    <label class="toggle"><input type="checkbox" id="cfg_dynarec"><span class="sl"></span></label>
+  </div>
+  <div class="row">
+    <label>精灵数量限制</label>
+    <label class="toggle"><input type="checkbox" id="cfg_sprite"><span class="sl"></span></label>
+  </div>
+  <div class="row">
+    <label>启动模式</label>
+    <select id="cfg_boot">
+      <option value="game">直接进入游戏</option>
+      <option value="bios">BIOS 动画</option>
+    </select>
+  </div>
+  <div class="msg" id="msg"></div>
+</div>
+
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+const FRAME_US = 16743;
+const MAX_PTS = 60;
+
+/* Series config: key in JSON → label, color */
+const SERIES = [
+  {key:'core',  label:'Core(CPU)', color:'#50c878'},
+  {key:'scan',  label:'扫描线',    color:'#4a90d9'},
+  {key:'video', label:'视频',      color:'#d9a84a'},
+  {key:'audio', label:'音频',      color:'#8b5cf6'},
+  {key:'wait',  label:'等待',      color:'#444c5e'},
+  /* fallback for single-core */
+  {key:'cpu',   label:'CPU',       color:'#50c878'},
+  {key:'copy',  label:'拷贝',      color:'#d9a84a'},
+  {key:'submit',label:'提交',      color:'#8b5cf6'},
+  {key:'acquire',label:'获取',     color:'#4a90d9'},
+];
+
+let history = [];  /* array of {ts, ...key: avg_us} */
+let activeSeries = [];
+
+/* ── Chart ────────────────────────────────────────── */
+const canvas = $('chart');
+const ctx = canvas.getContext('2d');
+let dpr = window.devicePixelRatio || 1;
+
+function resizeCanvas(){
+  const r = canvas.getBoundingClientRect();
+  canvas.width = r.width * dpr;
+  canvas.height = r.height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+function drawChart(){
+  const W = canvas.width / dpr, H = canvas.height / dpr;
+  ctx.clearRect(0, 0, W, H);
+
+  if (history.length < 2) return;
+
+  const n = history.length;
+  const dx = W / (MAX_PTS - 1);
+  const yMax = FRAME_US;  /* 1 frame = 100% */
+
+  /* Grid lines at 25%, 50%, 75%, 100% */
+  ctx.strokeStyle = '#1a2a3a';
+  ctx.lineWidth = 0.5;
+  for (let pct of [25, 50, 75, 100]) {
+    const y = H - (pct / 100) * H;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+
+  /* Right-side % labels */
+  ctx.fillStyle = '#445';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'right';
+  for (let pct of [25, 50, 75, 100]) {
+    ctx.fillText(pct + '%', W - 2, H - (pct / 100) * H - 2);
+  }
+
+  /* Independent line chart — each series drawn separately */
+  for (const s of activeSeries) {
+    const startX = (MAX_PTS - n) * dx;
+
+    /* Filled area under line */
+    ctx.beginPath();
+    ctx.moveTo(startX, H);
+    for (let i = 0; i < n; i++) {
+      const x = startX + i * dx;
+      const y = H - ((history[i][s.key] || 0) / yMax) * H;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(startX + (n - 1) * dx, H);
+    ctx.closePath();
+    ctx.fillStyle = s.color + '30';
+    ctx.fill();
+
+    /* Line */
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = startX + i * dx;
+      const y = H - ((history[i][s.key] || 0) / yMax) * H;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+/* ── Legend ────────────────────────────────────────── */
+function buildLegend(){
+  const el = $('legend');
+  el.innerHTML = '';
+  for (const s of activeSeries) {
+    const d = document.createElement('div');
+    d.className = 'item';
+    d.innerHTML = `<div class="swatch" style="background:${s.color}"></div>${s.label}`;
+    el.appendChild(d);
+  }
+}
+
+/* ── Stats table ──────────────────────────────────── */
+function updateTable(data){
+  let html = '<tr><td></td><td class="v">avg µs</td><td class="p99">p99 µs</td></tr>';
+  for (const s of activeSeries) {
+    const d = data[s.key];
+    if (!d) continue;
+    html += `<tr><td>${s.label}</td><td class="v">${d.avg}</td><td class="p99">${d.p99}</td></tr>`;
+  }
+  /* Add emu total if available */
+  if (data.emu) html += `<tr><td>帧总计</td><td class="v">${data.emu.avg}</td><td class="p99">${data.emu.p99}</td></tr>`;
+  $('tbl').innerHTML = html;
+}
+
+/* ── Polling ──────────────────────────────────────── */
+async function poll(){
+  try {
+    const r = await fetch('/api/stats');
+    if (!r.ok) return;
+    const d = await r.json();
+
+    $('fps').textContent = d.fps ?? '--';
+    $('heap').textContent = d.heap_kb ?? '--';
+
+    /* Determine active series on first data */
+    if (activeSeries.length === 0) {
+      activeSeries = SERIES.filter(s => d[s.key] && d[s.key].avg !== undefined);
+      buildLegend();
+    }
+
+    /* Build history point */
+    const pt = {ts: Date.now()};
+    for (const s of activeSeries) {
+      pt[s.key] = d[s.key] ? d[s.key].avg : 0;
+    }
+    history.push(pt);
+    if (history.length > MAX_PTS) history.shift();
+
+    updateTable(d);
+    drawChart();
+  } catch(e){}
+}
+
+setInterval(poll, 1000);
+poll();
+
+/* ── Settings ─────────────────────────────────────── */
+async function loadSettings(){
+  try {
+    const r = await fetch('/api/settings');
+    if (!r.ok) return;
+    const j = await r.json();
+    $('cfg_dynarec').checked = !!j.dynarec_enable;
+    $('cfg_sprite').checked = !!j.sprite_limit;
+    $('cfg_boot').value = j.boot_mode || 'game';
+  } catch(e){}
+}
+loadSettings();
+
+async function saveSettings(){
+  const body = {
+    dynarec_enable: $('cfg_dynarec').checked ? 1 : 0,
+    sprite_limit: $('cfg_sprite').checked ? 1 : 0,
+    boot_mode: $('cfg_boot').value
+  };
+  try {
+    const r = await fetch('/api/settings', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    const j = await r.json();
+    const m = $('msg');
+    if(j.ok){ m.textContent='已保存'; m.className='msg ok'; }
+    else { m.textContent=j.error||'失败'; m.className='msg err'; }
+    setTimeout(()=>{ m.textContent=''; },2000);
+  } catch(e){ $('msg').textContent='网络错误'; $('msg').className='msg err'; }
+}
+
+$('cfg_dynarec').addEventListener('change', saveSettings);
+$('cfg_sprite').addEventListener('change', saveSettings);
+$('cfg_boot').addEventListener('change', saveSettings);
+})();
+</script>
+</body>
+</html>

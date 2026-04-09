@@ -7,6 +7,7 @@ idf_component_register(
         "netpacket_bridge.c"
         "ppu_pipeline.c"
         "runtime_config.c"
+        "web_server.c"
     INCLUDE_DIRS "."
     REQUIRES
         gpsp_core
@@ -14,6 +15,10 @@ idf_component_register(
         esp_timer
         esp_psram
         lwip
+        esp_http_server
+    EMBED_FILES
+        "web_server.html"
+        "web_home.html"
 )
 
 if(CONFIG_GPSP_CPU_PROFILE_STATS)

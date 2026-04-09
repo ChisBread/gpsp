@@ -27,6 +27,8 @@ int gpsp_netplay_local_client_id_override;
 
 char gpsp_netplay_broadcast_addr[16];
 
+bool gpsp_web_server_enabled;
+
 static int parse_bool_value(const char *value, int *out)
 {
     if (!value || !out) {
@@ -88,6 +90,8 @@ static void gpsp_runtime_config_set_defaults(void)
     strlcpy(gpsp_netplay_broadcast_addr,
             CONFIG_GPSP_NETPLAY_BROADCAST_ADDR,
             sizeof(gpsp_netplay_broadcast_addr));
+
+    gpsp_web_server_enabled = true;
 }
 
 static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
@@ -183,6 +187,14 @@ static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
         }
     }
 
+    if (strcmp(key, "web_server_enable") == 0) {
+        int enabled;
+        if (parse_bool_value(value, &enabled)) {
+            gpsp_web_server_enabled = enabled;
+        }
+        return;
+    }
+
     ESP_LOGW(TAG, "Ignoring unknown or invalid config entry: %s=%s", key, value);
 }
 
@@ -200,6 +212,7 @@ esp_err_t gpsp_runtime_config_save(void)
             "dynarec_enable=%d\n"
             "sprite_limit=%d\n"
             "bios_animation=%d\n"
+            "web_server_enable=%d\n"
             "netplay_udp_enable=%d\n"
             "netplay_udp_port=%u\n"
             "netplay_broadcast_addr=%s\n"
@@ -209,6 +222,7 @@ esp_err_t gpsp_runtime_config_save(void)
             dynarec_enable ? 1 : 0,
             sprite_limit ? 1 : 0,
             selected_boot_mode == boot_bios ? 1 : 0,
+            gpsp_web_server_enabled ? 1 : 0,
             gpsp_netplay_udp_enabled ? 1 : 0,
             gpsp_netplay_udp_port,
             gpsp_netplay_broadcast_addr,

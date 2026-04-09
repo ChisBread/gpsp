@@ -26,6 +26,7 @@
 #include "sound.h"
 #include "storage.h"
 #include "video.h"
+#include "web_server.h"
 
 #ifdef DUAL_CORE_PPU
 #include "ppu_pipeline.h"
@@ -112,6 +113,7 @@ static const char *TAG = "gpsp_session";
 static gba_session_state_t s_session;
 static int64_t s_frame_start_us;
 static uint32_t s_fps_counter;
+static uint32_t s_fps_last;
 static int64_t s_fps_timer_us;
 static gba_session_perf_stats_t s_perf_stats;
 
@@ -971,6 +973,23 @@ void gba_emulation_task(void *param)
 
         {
             uint16_t keys = input_driver_read();
+            keys |= web_server_input_read();
+
+            /* Check P1CNT keypad interrupt on new presses (matches libretro) */
+            uint16_t old_keys = ~read_ioreg(REG_P1) & 0x3FF;
+            if ((keys | old_keys) != old_keys) {
+                u32 p1_cnt = read_ioreg(REG_P1CNT);
+                if ((p1_cnt >> 14) & 0x01) {
+                    u32 key_intersection = (p1_cnt & keys) & 0x3FF;
+                    if ((p1_cnt >> 15)
+                        ? (key_intersection == (p1_cnt & 0x3FF))
+                        : (key_intersection != 0)) {
+                        flag_interrupt(IRQ_KEYPAD);
+                        check_and_raise_interrupts();
+                    }
+                }
+            }
+
             write_ioreg(REG_P1, ~keys & 0x3FF);
         }
         skip_next_frame = 0;
@@ -1041,6 +1060,7 @@ void gba_emulation_task(void *param)
 #ifdef CPU_PROFILE_STATS
                     cpu_prof_print();
 #endif
+                    s_fps_last = s_fps_counter;
                     s_fps_counter = 0;
                     s_fps_timer_us = now;
                 }
@@ -1087,6 +1107,7 @@ void gba_emulation_task(void *param)
                 log_scanline_breakdown();
                 cpu_prof_print();
 #endif
+                s_fps_last = s_fps_counter;
                 s_fps_counter = 0;
                 s_fps_timer_us = now;
             }
@@ -1105,4 +1126,60 @@ void gba_emulation_task(void *param)
     s_session.initialized = false;
     ESP_LOGI(TAG, "Emulation task stopped");
     vTaskDelete(NULL);
+}
+
+/* ── Public JSON stats snapshot ──────────────────────────────────── */
+
+static int json_stat(char *p, char *end, const char *name,
+                     const frame_stat_window_t *w)
+{
+    frame_stat_summary_t s = frame_stat_window_summarize(w);
+    int n = snprintf(p, end - p,
+                     "\"%s\":{\"avg\":%lld,\"p99\":%lld,\"n\":%u},",
+                     name,
+                     (long long)s.avg_us,
+                     (long long)s.p99_us,
+                     (unsigned)s.sample_count);
+    return (n > 0 && p + n < end) ? n : 0;
+}
+
+int gba_session_stats_json(char *buf, size_t buf_size)
+{
+    if (!buf || buf_size < 4) return -1;
+    char *p = buf;
+    char *end = buf + buf_size - 1;
+
+    *p++ = '{';
+
+    p += snprintf(p, end - p, "\"fps\":%u,\"heap_kb\":%u,",
+                  (unsigned)s_fps_last,
+                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024));
+    if (p >= end) goto trunc;
+
+#ifdef DUAL_CORE_PPU
+    p += json_stat(p, end, "emu",          &s_perf_stats.emu_us);
+    p += json_stat(p, end, "core",         &s_perf_stats.cpu_us);
+    p += json_stat(p, end, "wait",         &s_perf_stats.wait_us);
+    p += json_stat(p, end, "wait_render",  &s_perf_stats.wait_render_us);
+    p += json_stat(p, end, "wait_buf",     &s_perf_stats.wait_buf_us);
+    p += json_stat(p, end, "wait_pace",    &s_perf_stats.wait_pace_us);
+    p += json_stat(p, end, "scan",         &s_perf_stats.render_scan_us);
+    p += json_stat(p, end, "video",        &s_perf_stats.render_video_us);
+    p += json_stat(p, end, "audio",        &s_perf_stats.render_audio_us);
+#else
+    p += json_stat(p, end, "cpu",     &s_perf_stats.cpu_us);
+    p += json_stat(p, end, "copy",    &s_perf_stats.copy_us);
+    p += json_stat(p, end, "submit",  &s_perf_stats.submit_us);
+    p += json_stat(p, end, "acquire", &s_perf_stats.acquire_us);
+#endif
+
+    if (p >= end) goto trunc;
+    if (p > buf + 1 && *(p - 1) == ',') p--;
+    *p++ = '}';
+    *p = '\0';
+    return (int)(p - buf);
+
+trunc:
+    buf[0] = '\0';
+    return -1;
 }

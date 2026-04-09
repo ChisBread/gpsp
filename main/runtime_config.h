@@ -23,6 +23,8 @@ extern uint32_t gpsp_netplay_hello_interval_ms;
 extern int gpsp_netplay_local_client_id_override;
 extern char gpsp_netplay_broadcast_addr[16];
 
+extern bool gpsp_web_server_enabled;
+
 esp_err_t gpsp_runtime_config_init(void);
 esp_err_t gpsp_runtime_config_save(void);
 

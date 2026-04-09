@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>GBA Web Input</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-user-select:none;user-select:none}
+body{background:#1a1a2e;color:#e0e0e0;font-family:system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:10px;touch-action:manipulation}
+h1{font-size:1.2em;margin:8px 0;color:#8af}
+.status{font-size:0.8em;margin:4px 0 12px;padding:4px 12px;border-radius:12px;background:#333}
+.status.ok{background:#1a4a1a;color:#6f6}.status.err{background:#4a1a1a;color:#f66}
+.pad{display:flex;justify-content:space-between;width:100%;max-width:480px;margin:10px 0;align-items:center}
+/* D-pad */
+.dpad{display:grid;grid-template:repeat(3,52px)/repeat(3,52px);gap:2px}
+.dpad .btn{background:#2a2a4a;border:2px solid #444;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:1.2em;color:#aaa;transition:background 0.05s}
+.dpad .btn.active{background:#4a4a8a;border-color:#88f;color:#fff}
+.dpad .empty{visibility:hidden}
+/* AB buttons */
+.ab{display:flex;gap:12px;align-items:center}
+.ab .btn{width:64px;height:64px;border-radius:50%;background:#4a2a2a;border:2px solid #644;font-size:1.4em;font-weight:bold;color:#faa;display:flex;align-items:center;justify-content:center;transition:background 0.05s}
+.ab .btn.active{background:#8a3a3a;border-color:#f88;color:#fff}
+/* Shoulder */
+.shoulders{display:flex;gap:60px;margin:6px 0}
+.shoulders .btn{width:72px;height:36px;border-radius:8px 8px 4px 4px;background:#2a3a2a;border:2px solid #464;font-size:0.9em;color:#afa;display:flex;align-items:center;justify-content:center}
+.shoulders .btn.active{background:#3a6a3a;border-color:#8f8;color:#fff}
+/* Start/Select */
+.meta{display:flex;gap:20px;margin:8px 0}
+.meta .btn{width:64px;height:28px;border-radius:14px;background:#333;border:2px solid #555;font-size:0.7em;color:#ccc;display:flex;align-items:center;justify-content:center}
+.meta .btn.active{background:#555;border-color:#aaa;color:#fff}
+/* Stats panel */
+.stats{width:100%;max-width:480px;margin-top:16px;background:#16213e;border:1px solid #334;border-radius:8px;padding:12px;font-size:0.8em;font-family:monospace}
+.stats h2{font-size:0.9em;color:#8af;margin-bottom:8px}
+.stats table{width:100%;border-collapse:collapse}
+.stats td{padding:3px 6px;border-bottom:1px solid #223}
+.stats td:first-child{color:#888}
+.stats td:last-child{text-align:right;color:#afa;font-weight:bold}
+.bar{display:flex;align-items:center;gap:6px;margin-top:8px}
+.bar-label{width:80px;color:#888;font-size:0.75em}
+.bar-track{flex:1;height:8px;background:#223;border-radius:4px;overflow:hidden;position:relative}
+.bar-fill{height:100%;border-radius:4px;transition:width 0.2s}
+.bar-net{background:#4a8af5}
+.bar-emu{background:#f5a84a}
+.bar-val{width:50px;text-align:right;font-size:0.75em;color:#ccc}
+</style>
+</head>
+<body>
+<h1>GBA Web Debug Input</h1>
+<div style="text-align:center;margin-bottom:8px"><a href="/" style="color:#8af;font-size:.8em;text-decoration:none;border:1px solid #334;padding:4px 12px;border-radius:6px">← 主页</a></div>
+<div class="status" id="status">连接中...</div>
+
+<div class="shoulders">
+  <div class="btn" data-key="9" id="k9">L</div>
+  <div class="btn" data-key="8" id="k8">R</div>
+</div>
+
+<div class="pad">
+  <div class="dpad">
+    <div class="empty"></div>
+    <div class="btn" data-key="6" id="k6">▲</div>
+    <div class="empty"></div>
+    <div class="btn" data-key="5" id="k5">◀</div>
+    <div class="empty"></div>
+    <div class="btn" data-key="4" id="k4">▶</div>
+    <div class="empty"></div>
+    <div class="btn" data-key="7" id="k7">▼</div>
+    <div class="empty"></div>
+  </div>
+  <div class="ab">
+    <div class="btn" data-key="1" id="k1">B</div>
+    <div class="btn" data-key="0" id="k0">A</div>
+  </div>
+</div>
+
+<div class="meta">
+  <div class="btn" data-key="2" id="k2">SELECT</div>
+  <div class="btn" data-key="3" id="k3">START</div>
+</div>
+
+<div class="stats">
+  <h2>延迟统计</h2>
+  <table>
+    <tr><td>网络 RTT</td><td id="s_rtt">-- ms</td></tr>
+    <tr><td>网络延迟 (单程)</td><td id="s_net">-- ms</td></tr>
+    <tr><td>模拟延迟</td><td id="s_emu">-- ms</td></tr>
+    <tr><td>总延迟</td><td id="s_total">-- ms</td></tr>
+    <tr><td>按键次数</td><td id="s_cnt">0</td></tr>
+    <tr><td>丢包率</td><td id="s_loss">0%</td></tr>
+  </table>
+  <div class="bar">
+    <div class="bar-label">网络</div>
+    <div class="bar-track"><div class="bar-fill bar-net" id="bar_net" style="width:0%"></div></div>
+    <div class="bar-val" id="bv_net">0ms</div>
+  </div>
+  <div class="bar">
+    <div class="bar-label">模拟</div>
+    <div class="bar-track"><div class="bar-fill bar-emu" id="bar_emu" style="width:0%"></div></div>
+    <div class="bar-val" id="bv_emu">0ms</div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const KEY_MAP = {
+    'KeyZ':'0','KeyX':'1','Backspace':'2','Enter':'3',
+    'ArrowRight':'4','ArrowLeft':'5','ArrowUp':'6','ArrowDown':'7',
+    'KeyA':'8','KeyS':'9',
+    'KeyJ':'0','KeyK':'1'
+  };
+
+  let ws = null, keys = 0, pingTimer = null;
+  let sentCount = 0, ackCount = 0;
+  let rttHistory = [], emuHistory = [];
+  const MAX_HIST = 50;
+
+  function avg(arr){ return arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : 0; }
+
+  function connect(){
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws');
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+      document.getElementById('status').textContent = '已连接';
+      document.getElementById('status').className = 'status ok';
+      pingTimer = setInterval(sendPing, 1000);
+    };
+
+    ws.onclose = () => {
+      document.getElementById('status').textContent = '已断开，重连中...';
+      document.getElementById('status').className = 'status err';
+      clearInterval(pingTimer);
+      setTimeout(connect, 2000);
+    };
+
+    ws.onerror = () => ws.close();
+
+    ws.onmessage = (ev) => {
+      const d = new Uint8Array(ev.data);
+      if(d[0] === 0x81 && d.length >= 9){
+        /* Button ACK */
+        ackCount++;
+        const ts = d[1]|(d[2]<<8)|(d[3]<<16)|(d[4]<<24);
+        const rtt = performance.now() - ts;
+        const emuUs = d[5]|(d[6]<<8)|(d[7]<<16)|(d[8]<<24);
+        const emuMs = emuUs / 1000;
+
+        rttHistory.push(rtt); if(rttHistory.length > MAX_HIST) rttHistory.shift();
+        emuHistory.push(emuMs); if(emuHistory.length > MAX_HIST) emuHistory.shift();
+        updateStats();
+      } else if(d[0] === 0x82 && d.length >= 5){
+        /* Pong */
+        const ts = d[1]|(d[2]<<8)|(d[3]<<16)|(d[4]<<24);
+        const rtt = performance.now() - ts;
+        rttHistory.push(rtt); if(rttHistory.length > MAX_HIST) rttHistory.shift();
+        updateStats();
+      }
+    };
+  }
+
+  function sendKeys(){
+    if(!ws || ws.readyState !== 1) return;
+    const buf = new Uint8Array(7);
+    buf[0] = 0x01;
+    buf[1] = keys & 0xFF;
+    buf[2] = (keys >> 8) & 0xFF;
+    const ts = performance.now() & 0xFFFFFFFF;
+    buf[3] = ts & 0xFF; buf[4] = (ts>>8)&0xFF; buf[5] = (ts>>16)&0xFF; buf[6] = (ts>>24)&0xFF;
+    ws.send(buf.buffer);
+    sentCount++;
+  }
+
+  function sendPing(){
+    if(!ws || ws.readyState !== 1) return;
+    const buf = new Uint8Array(5);
+    buf[0] = 0x02;
+    const ts = performance.now() & 0xFFFFFFFF;
+    buf[1] = ts & 0xFF; buf[2] = (ts>>8)&0xFF; buf[3] = (ts>>16)&0xFF; buf[4] = (ts>>24)&0xFF;
+    ws.send(buf.buffer);
+  }
+
+  function updateStats(){
+    const rtt = avg(rttHistory);
+    const net = rtt / 2;
+    const emu = avg(emuHistory);
+    const total = net + emu;
+    const loss = sentCount > 0 ? ((sentCount - ackCount) / sentCount * 100) : 0;
+
+    document.getElementById('s_rtt').textContent = rtt.toFixed(1) + ' ms';
+    document.getElementById('s_net').textContent = net.toFixed(1) + ' ms';
+    document.getElementById('s_emu').textContent = emu.toFixed(1) + ' ms';
+    document.getElementById('s_total').textContent = total.toFixed(1) + ' ms';
+    document.getElementById('s_cnt').textContent = ackCount;
+    document.getElementById('s_loss').textContent = loss.toFixed(1) + '%';
+
+    const maxBar = 50; /* ms full scale */
+    const np = Math.min(net/maxBar*100, 100);
+    const ep = Math.min(emu/maxBar*100, 100);
+    document.getElementById('bar_net').style.width = np + '%';
+    document.getElementById('bar_emu').style.width = ep + '%';
+    document.getElementById('bv_net').textContent = net.toFixed(1)+'ms';
+    document.getElementById('bv_emu').textContent = emu.toFixed(1)+'ms';
+  }
+
+  function setKey(bit, pressed){
+    const prev = keys;
+    if(pressed) keys |= (1 << bit); else keys &= ~(1 << bit);
+    const el = document.getElementById('k'+bit);
+    if(el) el.classList.toggle('active', !!(keys & (1<<bit)));
+    if(keys !== prev) sendKeys();
+  }
+
+  /* Touch events */
+  document.querySelectorAll('[data-key]').forEach(el => {
+    const bit = parseInt(el.dataset.key);
+    el.addEventListener('touchstart', e => { e.preventDefault(); setKey(bit, true); });
+    el.addEventListener('touchend', e => { e.preventDefault(); setKey(bit, false); });
+    el.addEventListener('touchcancel', e => { e.preventDefault(); setKey(bit, false); });
+    el.addEventListener('mousedown', e => { e.preventDefault(); setKey(bit, true); });
+    el.addEventListener('mouseup', e => { e.preventDefault(); setKey(bit, false); });
+    el.addEventListener('mouseleave', e => { setKey(bit, false); });
+  });
+
+  /* Keyboard events */
+  document.addEventListener('keydown', e => {
+    if(e.repeat) return;
+    const bit = KEY_MAP[e.code];
+    if(bit !== undefined){ e.preventDefault(); setKey(parseInt(bit), true); }
+  });
+  document.addEventListener('keyup', e => {
+    const bit = KEY_MAP[e.code];
+    if(bit !== undefined){ e.preventDefault(); setKey(parseInt(bit), false); }
+  });
+
+  connect();
+})();
+</script>
+</body>
+</html>

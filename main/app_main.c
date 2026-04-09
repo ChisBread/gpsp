@@ -33,6 +33,7 @@
 #include "c6_remote.h"
 #include "runtime_config.h"
 #include "storage.h"
+#include "web_server.h"
 #ifdef DUAL_CORE_PPU
 #include "ppu_pipeline.h"
 #endif
@@ -245,6 +246,13 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create C6 remote task: %s", esp_err_to_name(err));
         return;
+    }
+
+    /* Start embedded HTTP/WebSocket server after network is ready (async, render core) */
+    if (gpsp_web_server_enabled) {
+        web_server_start_async(AV_OUTPUT_CORE);
+    } else {
+        ESP_LOGI(TAG, "Web server disabled by config");
     }
 
     ESP_LOGI(TAG, "Before emu task: free internal RAM %u KB, free PSRAM %u KB, emu stack %u B",

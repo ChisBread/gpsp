@@ -286,6 +286,24 @@ static inline void rv_patch_jal(u32 *inst, const void *target)
     *inst = base;
 }
 
+/* Patch a 2-instruction AUIPC+JALR sequence (±2 GB range).
+ * inst points to the AUIPC; inst+1 is the JALR.  reg_temp (t0) is
+ * used as the scratch register — it is caller-saved and safe to
+ * clobber at block-exit points where branch fillers are emitted. */
+static inline void rv_patch_far_jump(u32 *inst, const void *target)
+{
+    s32 offset = rv_jal_offset(target, inst);
+    u32 hi = (u32)offset & 0xFFFFF000;
+    u32 lo = (u32)offset & 0x00000FFF;
+    /* Sign-extend correction: if lo bit 11 is set, JALR sign-extends
+     * the 12-bit immediate, so AUIPC needs +0x1000 to compensate. */
+    if (lo & 0x800) hi += 0x1000;
+    /* AUIPC t0, hi  (opcode 0x17, rd=t0=5) */
+    inst[0] = hi | (rv_t0 << 7) | RV_OP_AUIPC;
+    /* JALR  zero, t0, lo  (opcode 0x67, rd=0, rs1=t0=5, funct3=0) */
+    inst[1] = ((lo & 0xFFF) << 20) | (rv_t0 << 15) | (rv_zero << 7) | RV_OP_JALR;
+}
+
 static inline void rv_patch_branch(u32 *inst, const void *target)
 {
     u32 base = *inst & 0x01fff07f;
@@ -412,12 +430,15 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define generate_branch_patch_conditional(dest, label)                        \
     rv_patch_branch((u32 *)(dest), (label))                                   \
 
+/* Reserve space for a 2-instruction far-jump sequence (AUIPC+JALR).      
+ * The actual target is filled later by generate_branch_patch_unconditional. */
 #define emit_branch_filler(writeback_location)                                \
     (writeback_location) = translation_ptr;                                   \
-    rv_j(0);                                                                  \
+    rv_nop();                                                                 \
+    rv_nop();                                                                 \
 
 #define generate_branch_patch_unconditional(dest, target)                     \
-    rv_patch_jal((u32 *)(dest), (target))                                     \
+    rv_patch_far_jump((u32 *)(dest), (target))                                \
 
 #define generate_branch_no_cycle_update(writeback_location, new_pc)           \
     if (pc == idle_loop_target_pc)                                            \
