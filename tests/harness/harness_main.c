@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "common.h"
 #include "sound.h"
 
@@ -292,10 +293,18 @@ int main(int argc, char **argv)
         print_regs();
     }
 
+    /* --- Per-frame timing --- */
+    double *frame_times_us = (double *)calloc(frames, sizeof(double));
+
     printf("[harness] Starting emulation...\n"); fflush(stdout);
+
+    struct timespec ts_total_start, ts_total_end;
+    clock_gettime(CLOCK_MONOTONIC, &ts_total_start);
 
     /* --- Main loop --- */
     for (int f = 0; f < frames; f++) {
+        struct timespec ts_start, ts_end;
+        clock_gettime(CLOCK_MONOTONIC, &ts_start);
 #ifdef HAVE_DYNAREC
         if (dynarec_enable) {
             execute_arm_translate(execute_cycles);
@@ -366,7 +375,52 @@ int main(int argc, char **argv)
             fwrite(s_audio_buf, sizeof(int16_t), n * 2, s_audio_fp);
         }
 #endif
+
+        clock_gettime(CLOCK_MONOTONIC, &ts_end);
+        frame_times_us[f] = (ts_end.tv_sec - ts_start.tv_sec) * 1e6
+                          + (ts_end.tv_nsec - ts_start.tv_nsec) / 1e3;
     }
+
+    clock_gettime(CLOCK_MONOTONIC, &ts_total_end);
+    double total_sec = (ts_total_end.tv_sec - ts_total_start.tv_sec)
+                     + (ts_total_end.tv_nsec - ts_total_start.tv_nsec) / 1e9;
+
+    /* --- Frame time statistics --- */
+    {
+        /* Sort frame_times_us for percentile computation */
+        for (int i = 0; i < frames - 1; i++) {
+            for (int j = i + 1; j < frames; j++) {
+                if (frame_times_us[j] < frame_times_us[i]) {
+                    double tmp = frame_times_us[i];
+                    frame_times_us[i] = frame_times_us[j];
+                    frame_times_us[j] = tmp;
+                }
+            }
+        }
+
+        double sum = 0;
+        for (int i = 0; i < frames; i++) sum += frame_times_us[i];
+        double avg_us = sum / frames;
+        int p99_idx = (int)(frames * 0.99);
+        if (p99_idx >= frames) p99_idx = frames - 1;
+        double tp99_us = frame_times_us[p99_idx];
+        double median_us = frame_times_us[frames / 2];
+        double min_us = frame_times_us[0];
+        double max_us = frame_times_us[frames - 1];
+
+        printf("\n[harness] ═══════════════════════════════════════════\n");
+        printf("[harness]  TIMING REPORT  (%d frames)\n", frames);
+        printf("[harness] ═══════════════════════════════════════════\n");
+        printf("[harness]  Total wall time : %.3f s\n", total_sec);
+        printf("[harness]  Avg  frame time : %.1f us (%.2f ms)\n", avg_us, avg_us / 1000.0);
+        printf("[harness]  Median           : %.1f us (%.2f ms)\n", median_us, median_us / 1000.0);
+        printf("[harness]  Min              : %.1f us (%.2f ms)\n", min_us, min_us / 1000.0);
+        printf("[harness]  Max              : %.1f us (%.2f ms)\n", max_us, max_us / 1000.0);
+        printf("[harness]  TP99             : %.1f us (%.2f ms)\n", tp99_us, tp99_us / 1000.0);
+        printf("[harness]  Effective FPS    : %.2f\n", frames / total_sec);
+        printf("[harness] ═══════════════════════════════════════════\n\n");
+    }
+    free(frame_times_us);
 
     /* --- Cleanup --- */
 #ifdef DUAL_CORE_PPU

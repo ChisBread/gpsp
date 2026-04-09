@@ -354,261 +354,454 @@ defsymbl(rv_update_gba)
     lw   ra, REG_SAVE(gp)
     ret
 
-defsymbl(rv_indirect_branch_arm)
-    store_registers()
-    consolidate_flags(t0, t1)
-    mv   s11, gp
-    mv   s10, tp
-    lw   gp, REG_SAVE5(s11)
+/*
+ * Lightweight helper macros.
+ *
+ * These save/restore only caller-clobbered ARM registers (a3-a7, t3-t6)
+ * and the flag caches (s10/s11) before/after calling C code. Callee-saved
+ * registers (s0-s9) are preserved by the C ABI automatically.
+ */
+
+#define store_caller_regs()                     \
+    sw t3,  REG_SAVE2(gp);                       \
+    sw a3,  REG_R2(gp);                          \
+    sw a4,  REG_R3(gp);                          \
+    sw a5,  REG_R4(gp);                          \
+    sw a6,  REG_R5(gp);                          \
+    sw a7,  REG_R7(gp);                          \
+    sw t4,  REG_R8(gp);                          \
+    sw t5,  REG_R11(gp);                         \
+    sw t6,  REG_R13(gp)
+
+#define load_caller_regs()                      \
+    lw t3,  REG_SAVE2(gp);                       \
+    lw a3,  REG_R2(gp);                          \
+    lw a4,  REG_R3(gp);                          \
+    lw a5,  REG_R4(gp);                          \
+    lw a6,  REG_R5(gp);                          \
+    lw a7,  REG_R7(gp);                          \
+    lw t4,  REG_R8(gp);                          \
+    lw t5,  REG_R11(gp);                         \
+    lw t6,  REG_R13(gp)
+
+/* Save flag caches (s10=C, s11=V) before we reuse them for gp/tp,
+ * then swap to C ABI gp/tp for the call. */
+#define swap_to_c_abi()                         \
+    sw   s10, REG_C_FLAG(gp);                     \
+    sw   s11, REG_V_FLAG(gp);                     \
+    mv   s11, gp;                                 \
+    mv   s10, tp;                                 \
+    lw   gp, REG_SAVE5(s11);                      \
     lw   tp, REG_SAVE6(s11)
-    jit_enable_interrupts()
+
+/* Restore JIT gp/tp from s10/s11, then restore flag caches. */
+#define swap_from_c_abi()                       \
+    mv   gp, s11;                                 \
+    mv   tp, s10;                                 \
+    lw   s10, REG_C_FLAG(gp);                     \
+    lw   s11, REG_V_FLAG(gp)
+
+defsymbl(rv_indirect_branch_arm)
+    store_caller_regs()
+    swap_to_c_abi()
     call block_lookup_address_arm
-    jit_disable_interrupts()
-    mv   gp, s11
-    mv   tp, s10
-    extract_flags(t0)
-    load_registers()
+    swap_from_c_abi()
+    load_caller_regs()
     jalr zero, a0, 0
 
 defsymbl(rv_indirect_branch_thumb)
-    store_registers()
-    consolidate_flags(t0, t1)
-    mv   s11, gp
-    mv   s10, tp
-    lw   gp, REG_SAVE5(s11)
-    lw   tp, REG_SAVE6(s11)
-    jit_enable_interrupts()
+    store_caller_regs()
+    swap_to_c_abi()
     call block_lookup_address_thumb
-    jit_disable_interrupts()
-    mv   gp, s11
-    mv   tp, s10
-    extract_flags(t0)
-    load_registers()
+    swap_from_c_abi()
+    load_caller_regs()
     jalr zero, a0, 0
 
 defsymbl(rv_indirect_branch_dual)
-    /* Save a0 (branch target) to REG_SAVE4 before it gets used by lookup */
-    sw   a0, REG_SAVE4(gp)
-    store_registers()
-    consolidate_flags(t0, t1)
-    mv   s11, gp
-    mv   s10, tp
-    lw   gp, REG_SAVE5(s11)
-    lw   tp, REG_SAVE6(s11)
-    jit_enable_interrupts()
+    store_caller_regs()
+    swap_to_c_abi()
     call block_lookup_address_dual
-    jit_disable_interrupts()
-    mv   gp, s11
-    mv   tp, s10
-    extract_flags(t0)
-    load_registers()
+    swap_from_c_abi()
+    load_caller_regs()
     jalr zero, a0, 0
 
-defsymbl(rv_execute_load_u8)
+/* ── Memory load fast-path macros ──────────────────────────────────
+ *
+ * For common memory regions (EWRAM, IWRAM, ROM via memory_map_read),
+ * we can read directly from the memory buffer in assembly, bypassing
+ * the full C call and its ~35-instruction register save/restore overhead.
+ *
+ * Fast path uses ONLY t0, t1 as scratch — all ARM-mapped registers
+ * (a3-a7, t3-t6, s0-s7) and flag caches (s8-s11) are untouched.
+ *
+ * Regions handled:
+ *   0x02: EWRAM  — ewram[addr & 0x3FFFF]
+ *   0x03: IWRAM  — iwram[(addr & 0x7FFF) + 0x8000]  (shadow copy)
+ *   0x08-0x0C: ROM — memory_map_read[addr >> 15][addr & 0x7FFF]
+ *
+ * All other regions fall through to the slow C path.
+ */
+
+/* Fast-path I/O registers handler: io_registers[addr & 0x3FF] */
+.macro load_fast_ioreg ldop, suffix
+.Lioreg_\suffix:
+    la    t0, io_registers
+    andi  t1, a0, 0x3FF
+    add   t0, t0, t1
+    \ldop a0, 0(t0)
+    ret
+.endm
+
+/* Fast-path Palette RAM handler: palette_ram[addr & 0x3FF] */
+.macro load_fast_palram ldop, suffix
+.Lpalram_\suffix:
+    la    t0, palette_ram
+    andi  t1, a0, 0x3FF
+    add   t0, t0, t1
+    \ldop a0, 0(t0)
+    ret
+.endm
+
+/* Fast-path VRAM handler: vram[addr & 0x1FFFF] with 0x18000 mirror */
+.macro load_fast_vram ldop, suffix
+.Lvram_\suffix:
+    la    t0, vram
+    slli  t1, a0, 15
+    srli  t1, t1, 15            /* t1 = addr & 0x1FFFF */
+    li    a0, 0x18000
+    bltu  t1, a0, 1f
+    lui   a0, 8                 /* a0 = 0x8000 */
+    sub   t1, t1, a0
+1:
+    add   t0, t0, t1
+    \ldop a0, 0(t0)
+    ret
+.endm
+
+/* Fast-path OAM RAM handler: oam_ram[addr & 0x3FF] */
+.macro load_fast_oamram ldop, suffix
+.Loamram_\suffix:
+    la    t0, oam_ram
+    andi  t1, a0, 0x3FF
+    add   t0, t0, t1
+    \ldop a0, 0(t0)
+    ret
+.endm
+
+/* Fast-path EWRAM handler: ewram[addr & 0x3FFFF] */
+.macro load_fast_ewram ldop, suffix
+.Lewram_\suffix:
+    la    t0, ewram
+    slli  t1, a0, 14
+    srli  t1, t1, 14            /* t1 = addr & 0x3FFFF */
+    add   t0, t0, t1
+    \ldop a0, 0(t0)
+    ret
+.endm
+
+/* Fast-path IWRAM handler: iwram[(addr & 0x7FFF) + 0x8000] */
+.macro load_fast_iwram ldop, suffix
+.Liwram_\suffix:
+    la    t0, iwram
+    lui   t1, 8                 /* t1 = 0x8000 */
+    add   t0, t0, t1            /* t0 = iwram + 0x8000 (shadow base) */
+    slli  t1, a0, 17
+    srli  t1, t1, 17            /* t1 = addr & 0x7FFF */
+    add   t0, t0, t1
+    \ldop a0, 0(t0)
+    ret
+.endm
+
+/* Fast-path ROM handler: memory_map_read[addr >> 15][addr & 0x7FFF] */
+.macro load_fast_rom ldop, suffix
+.Lrom_\suffix:
+    srli  t1, a0, 15            /* page index */
+    slli  t1, t1, 2             /* * sizeof(u8*) */
+    la    t0, memory_map_read
+    add   t0, t0, t1
+    lw    t0, 0(t0)             /* page pointer */
+    beqz  t0, .Lslow_\suffix    /* unmapped → slow path */
+    slli  t1, a0, 17
+    srli  t1, t1, 17            /* t1 = addr & 0x7FFF */
+    add   t0, t0, t1
+    \ldop a0, 0(t0)
+    ret
+.endm
+
+/* Region dispatch: branches to fast paths for known regions */
+.macro load_region_dispatch suffix
+    srli  t0, a0, 24
+    addi  t1, t0, -2
+    beqz  t1, .Lewram_\suffix
+    addi  t1, t0, -3
+    beqz  t1, .Liwram_\suffix
+    addi  t1, t0, -4
+    beqz  t1, .Lioreg_\suffix
+    addi  t1, t0, -5
+    beqz  t1, .Lpalram_\suffix
+    addi  t1, t0, -6
+    beqz  t1, .Lvram_\suffix
+    addi  t1, t0, -7
+    beqz  t1, .Loamram_\suffix
+    addi  t1, t0, -8
+    sltiu t1, t1, 5
+    bnez  t1, .Lrom_\suffix
+.endm
+
+/* Slow-path: full C call with register save/restore */
+.macro load_slow_path cfunc, suffix
+.Lslow_\suffix:
     sw   ra, REG_SAVE(gp)
     sw   a1, REG_PC(gp)
-    store_registers()
-    consolidate_flags(t0, t1)
-    mv   s11, gp
-    mv   s10, tp
-    lw   gp, REG_SAVE5(s11)
-    lw   tp, REG_SAVE6(s11)
-    jit_enable_interrupts()
-    call execute_load_u8
-    jit_disable_interrupts()
+    store_caller_regs()
+    swap_to_c_abi()
+    call \cfunc
     mv   t0, a0
-    mv   gp, s11
-    mv   tp, s10
-    extract_flags(t1)
-    load_registers()
+    swap_from_c_abi()
+    load_caller_regs()
     lw   ra, REG_SAVE(gp)
     mv   a0, t0
     ret
+.endm
+
+/* ── Load trampolines with fast paths ─────────────────────────── */
+
+defsymbl(rv_execute_load_u8)
+    load_region_dispatch u8
+    load_slow_path execute_load_u8, u8
+    load_fast_ewram lbu, u8
+    load_fast_iwram lbu, u8
+    load_fast_ioreg lbu, u8
+    load_fast_palram lbu, u8
+    load_fast_vram lbu, u8
+    load_fast_oamram lbu, u8
+    load_fast_rom   lbu, u8
 
 defsymbl(rv_execute_load_s8)
-    sw   ra, REG_SAVE(gp)
-    sw   a1, REG_PC(gp)
-    store_registers()
-    consolidate_flags(t0, t1)
-    mv   s11, gp
-    mv   s10, tp
-    lw   gp, REG_SAVE5(s11)
-    lw   tp, REG_SAVE6(s11)
-    jit_enable_interrupts()
-    call execute_load_s8
-    jit_disable_interrupts()
-    mv   t0, a0
-    mv   gp, s11
-    mv   tp, s10
-    extract_flags(t1)
-    load_registers()
-    lw   ra, REG_SAVE(gp)
-    mv   a0, t0
-    ret
+    load_region_dispatch s8
+    load_slow_path execute_load_s8, s8
+    load_fast_ewram lb, s8
+    load_fast_iwram lb, s8
+    load_fast_ioreg lb, s8
+    load_fast_palram lb, s8
+    load_fast_vram lb, s8
+    load_fast_oamram lb, s8
+    load_fast_rom   lb, s8
 
 defsymbl(rv_execute_load_u16)
-    sw   ra, REG_SAVE(gp)
-    sw   a1, REG_PC(gp)
-    store_registers()
-    consolidate_flags(t0, t1)
-    mv   s11, gp
-    mv   s10, tp
-    lw   gp, REG_SAVE5(s11)
-    lw   tp, REG_SAVE6(s11)
-    jit_enable_interrupts()
-    call execute_load_u16
-    jit_disable_interrupts()
-    mv   t0, a0
-    mv   gp, s11
-    mv   tp, s10
-    extract_flags(t1)
-    load_registers()
-    lw   ra, REG_SAVE(gp)
-    mv   a0, t0
-    ret
+    andi  t1, a0, 1             /* unaligned? → slow path (needs rotation) */
+    bnez  t1, .Lslow_u16
+    load_region_dispatch u16
+    load_slow_path execute_load_u16, u16
+    load_fast_ewram lhu, u16
+    load_fast_iwram lhu, u16
+    load_fast_ioreg lhu, u16
+    load_fast_palram lhu, u16
+    load_fast_vram lhu, u16
+    load_fast_oamram lhu, u16
+    load_fast_rom   lhu, u16
 
 defsymbl(rv_execute_load_s16)
-    sw   ra, REG_SAVE(gp)
-    sw   a1, REG_PC(gp)
-    store_registers()
-    consolidate_flags(t0, t1)
-    mv   s11, gp
-    mv   s10, tp
-    lw   gp, REG_SAVE5(s11)
-    lw   tp, REG_SAVE6(s11)
-    jit_enable_interrupts()
-    call execute_load_s16
-    jit_disable_interrupts()
-    mv   t0, a0
-    mv   gp, s11
-    mv   tp, s10
-    extract_flags(t1)
-    load_registers()
-    lw   ra, REG_SAVE(gp)
-    mv   a0, t0
-    ret
+    andi  t1, a0, 1             /* unaligned? → slow path (byte load + sign-ext) */
+    bnez  t1, .Lslow_s16
+    load_region_dispatch s16
+    load_slow_path execute_load_s16, s16
+    load_fast_ewram lh, s16
+    load_fast_iwram lh, s16
+    load_fast_ioreg lh, s16
+    load_fast_palram lh, s16
+    load_fast_vram lh, s16
+    load_fast_oamram lh, s16
+    load_fast_rom   lh, s16
 
 defsymbl(rv_execute_load_u32)
-    sw   ra, REG_SAVE(gp)
-    sw   a1, REG_PC(gp)
-    store_registers()
-    consolidate_flags(t0, t1)
-    mv   s11, gp
-    mv   s10, tp
-    lw   gp, REG_SAVE5(s11)
-    lw   tp, REG_SAVE6(s11)
-    jit_enable_interrupts()
-    call execute_load_u32
-    jit_disable_interrupts()
-    mv   t0, a0
-    mv   gp, s11
-    mv   tp, s10
-    extract_flags(t1)
-    load_registers()
-    lw   ra, REG_SAVE(gp)
-    mv   a0, t0
-    ret
+    andi  t1, a0, 3             /* unaligned? → slow path (needs rotation) */
+    bnez  t1, .Lslow_u32
+    load_region_dispatch u32
+    load_slow_path execute_load_u32, u32
+    load_fast_ewram lw, u32
+    load_fast_iwram lw, u32
+    load_fast_ioreg lw, u32
+    load_fast_palram lw, u32
+    load_fast_vram lw, u32
+    load_fast_oamram lw, u32
+    load_fast_rom   lw, u32
 
 defsymbl(rv_execute_aligned_load32)
-    sw   ra, REG_SAVE(gp)
-    sw   a1, REG_PC(gp)
-    store_registers()
-    consolidate_flags(t0, t1)
-    mv   s11, gp
-    mv   s10, tp
-    lw   gp, REG_SAVE5(s11)
-    lw   tp, REG_SAVE6(s11)
-    jit_enable_interrupts()
-    call execute_aligned_load32
-    jit_disable_interrupts()
-    mv   t0, a0
-    mv   gp, s11
-    mv   tp, s10
-    extract_flags(t1)
-    load_registers()
-    lw   ra, REG_SAVE(gp)
-    mv   a0, t0
+    load_region_dispatch al32
+    load_slow_path execute_aligned_load32, al32
+    load_fast_ewram lw, al32
+    load_fast_iwram lw, al32
+    load_fast_ioreg lw, al32
+    load_fast_palram lw, al32
+    load_fast_vram lw, al32
+    load_fast_oamram lw, al32
+    load_fast_rom   lw, al32
+
+/* ── Memory store fast-path macros ─────────────────────────────────
+ *
+ * For EWRAM and IWRAM stores, we can write directly in assembly with
+ * inline SMC (self-modifying code) detection. Only t0, t1 used as scratch.
+ *
+ * SMC detection:
+ *   EWRAM: sticky bits at ewram[offset + 0x40000] (second 256KB)
+ *   IWRAM: sticky bits at iwram[offset] (first 32KB)
+ *   If sticky bit is non-zero → fall to slow C path for full alert handling.
+ *
+ * aligned_store32 (STM): NO SMC check (matches C code behavior).
+ */
+
+/* Store EWRAM with SMC check */
+.macro store_fast_ewram stop, smc_ldop, suffix
+.Lst_ewram_\suffix:
+    la    t0, ewram
+    slli  t1, a0, 14
+    srli  t1, t1, 14            /* t1 = addr & 0x3FFFF */
+    add   t0, t0, t1            /* t0 = &ewram[offset] */
+    lui   t1, 0x40              /* t1 = 0x40000 */
+    add   t1, t0, t1            /* t1 = &ewram[offset + 0x40000] */
+    \smc_ldop t1, 0(t1)         /* load sticky bits */
+    bnez  t1, .Lslow_\suffix
+    \stop a1, 0(t0)
     ret
+.endm
+
+/* Store IWRAM with SMC check */
+.macro store_fast_iwram stop, smc_ldop, suffix
+.Lst_iwram_\suffix:
+    la    t0, iwram
+    slli  t1, a0, 17
+    srli  t1, t1, 17            /* t1 = addr & 0x7FFF */
+    add   t0, t0, t1            /* t0 = &iwram[offset] (sticky region) */
+    \smc_ldop t1, 0(t0)         /* load sticky bits */
+    bnez  t1, .Lslow_\suffix
+    lui   t1, 8                 /* t1 = 0x8000 */
+    add   t0, t0, t1            /* t0 = &iwram[offset + 0x8000] (shadow) */
+    \stop a1, 0(t0)
+    ret
+.endm
+
+/* Store EWRAM WITHOUT SMC check (for aligned_store32) */
+.macro store_fast_ewram_nosmc stop, suffix
+.Lst_ewram_\suffix:
+    la    t0, ewram
+    slli  t1, a0, 14
+    srli  t1, t1, 14
+    add   t0, t0, t1
+    \stop a1, 0(t0)
+    ret
+.endm
+
+/* Store IWRAM WITHOUT SMC check (for aligned_store32) */
+.macro store_fast_iwram_nosmc stop, suffix
+.Lst_iwram_\suffix:
+    la    t0, iwram
+    lui   t1, 8
+    add   t0, t0, t1
+    slli  t1, a0, 17
+    srli  t1, t1, 17
+    add   t0, t0, t1
+    \stop a1, 0(t0)
+    ret
+.endm
+
+/* Store region dispatch: EWRAM and IWRAM only */
+.macro store_region_dispatch suffix
+    srli  t0, a0, 24
+    addi  t1, t0, -2
+    beqz  t1, .Lst_ewram_\suffix
+    addi  t1, t0, -3
+    beqz  t1, .Lst_iwram_\suffix
+.endm
+
+/* Store slow-path: full C call with alert check */
+.macro store_slow_path cfunc, suffix
+.Lslow_\suffix:
+    sw   ra, REG_SAVE(gp)
+    sw   a2, REG_PC(gp)
+    store_caller_regs()
+    swap_to_c_abi()
+    call \cfunc
+    bnez a0, .Lstore_alert_slow
+    swap_from_c_abi()
+    load_caller_regs()
+    lw   ra, REG_SAVE(gp)
+    ret
+.endm
+
+/* ── Store trampolines with fast paths ────────────────────────── */
 
 defsymbl(rv_execute_store_u8)
-    sw   ra, REG_SAVE(gp)
-    store_registers()
-    sw   a2, REG_PC(gp)
-    consolidate_flags(t0, t1)
-    mv   s11, gp
-    mv   s10, tp
-    lw   gp, REG_SAVE5(s11)
-    lw   tp, REG_SAVE6(s11)
-    jit_enable_interrupts()
-    call execute_store_u8
-    bnez a0, .Lstore_alert
-    jit_disable_interrupts()
-    mv   gp, s11
-    mv   tp, s10
-    extract_flags(t1)
-    load_registers()
-    lw   ra, REG_SAVE(gp)
-    ret
+    store_region_dispatch st_u8
+    store_slow_path execute_store_u8, st_u8
+    store_fast_ewram  sb, lbu, st_u8
+    store_fast_iwram  sb, lbu, st_u8
 
 defsymbl(rv_execute_store_u16)
-    sw   ra, REG_SAVE(gp)
-    store_registers()
-    sw   a2, REG_PC(gp)
-    consolidate_flags(t0, t1)
-    mv   s11, gp
-    mv   s10, tp
-    lw   gp, REG_SAVE5(s11)
-    lw   tp, REG_SAVE6(s11)
-    jit_enable_interrupts()
-    call execute_store_u16
-    bnez a0, .Lstore_alert
-    jit_disable_interrupts()
-    mv   gp, s11
-    mv   tp, s10
-    extract_flags(t1)
-    load_registers()
-    lw   ra, REG_SAVE(gp)
-    ret
+    andi  t1, a0, 1             /* unaligned? → slow path */
+    bnez  t1, .Lslow_st_u16
+    store_region_dispatch st_u16
+    store_slow_path execute_store_u16, st_u16
+    store_fast_ewram  sh, lhu, st_u16
+    store_fast_iwram  sh, lhu, st_u16
 
 defsymbl(rv_execute_store_u32)
-    sw   ra, REG_SAVE(gp)
-    store_registers()
-    sw   a2, REG_PC(gp)
-    consolidate_flags(t0, t1)
-    mv   s11, gp
-    mv   s10, tp
-    lw   gp, REG_SAVE5(s11)
-    lw   tp, REG_SAVE6(s11)
-    jit_enable_interrupts()
-    call execute_store_u32
-    bnez a0, .Lstore_alert
-    jit_disable_interrupts()
-    mv   gp, s11
-    mv   tp, s10
-    extract_flags(t1)
-    load_registers()
-    lw   ra, REG_SAVE(gp)
-    ret
+    andi  t1, a0, 3             /* unaligned? → slow path */
+    bnez  t1, .Lslow_st_u32
+    store_region_dispatch st_u32
+    store_slow_path execute_store_u32, st_u32
+    store_fast_ewram  sw, lw, st_u32
+    store_fast_iwram  sw, lw, st_u32
 
 defsymbl(rv_execute_aligned_store32)
-    sw   ra, REG_SAVE(gp)
-    store_registers()
-    sw   a2, REG_PC(gp)
-    consolidate_flags(t0, t1)
-    mv   s11, gp
-    mv   s10, tp
-    lw   gp, REG_SAVE5(s11)
-    lw   tp, REG_SAVE6(s11)
-    jit_enable_interrupts()
-    call execute_aligned_store32
-    bnez a0, .Lstore_alert
-    jit_disable_interrupts()
-    mv   gp, s11
-    mv   tp, s10
-    extract_flags(t1)
-    load_registers()
-    lw   ra, REG_SAVE(gp)
-    ret
+    store_region_dispatch st_al32
+    store_slow_path execute_aligned_store32, st_al32
+    store_fast_ewram_nosmc  sw, st_al32
+    store_fast_iwram_nosmc  sw, st_al32
+
+/*
+ * Store alert slow path: complete the full register+flag save that the
+ * lightweight fast path skipped, then fall through to .Lstore_alert.
+ *
+ * On entry (C ABI context):
+ *   a0  = cpu_alert_type (non-zero)
+ *   s11 = saved JIT gp (register base)  [from swap_to_c_abi]
+ *   s10 = saved JIT tp (cycle count)    [from swap_to_c_abi]
+ *   s0-s7 still hold their JIT values (callee-saved through C call)
+ *   s8 = N_flag, s9 = Z_flag (callee-saved, still valid)
+ *   C_flag/V_flag saved to REG_C_FLAG/REG_V_FLAG by swap_to_c_abi
+ *   Caller-clobbered regs already saved to reg[] by store_caller_regs
+ *   REG_PC already saved at trampoline entry
+ */
+.Lstore_alert_slow:
+    /* Save callee-saved ARM regs to reg[] (s11 = reg_base) */
+    sw   s0, REG_R0(s11)
+    sw   s1, REG_R1(s11)
+    sw   s2, REG_R6(s11)
+    sw   s3, REG_R9(s11)
+    sw   s4, REG_R10(s11)
+    sw   s5, REG_R12(s11)
+    sw   s6, REG_R14(s11)
+    /* REG_PC already saved; s7 (next-PC) not needed */
+
+    /* Consolidate flags to CPSR:
+     * s8=N, s9=Z are live in regs; C/V in REG_C_FLAG/REG_V_FLAG. */
+    lw   t0, REG_CPSR(s11)
+    li   t1, 0x0fffffff
+    and  t0, t0, t1
+    slli t1, s8, 31
+    or   t0, t0, t1
+    slli t1, s9, 30
+    or   t0, t0, t1
+    lw   t1, REG_C_FLAG(s11)
+    slli t1, t1, 29
+    or   t0, t0, t1
+    lw   t1, REG_V_FLAG(s11)
+    slli t1, t1, 28
+    or   t0, t0, t1
+    sw   t0, REG_CPSR(s11)
+
+    /* Fall through to existing store alert handler */
 
 /*
  * Store alert handler (shared by all rv_execute_store_* stubs).
