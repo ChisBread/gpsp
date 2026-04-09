@@ -25,15 +25,31 @@ static const char *TAG = "gpsp_audio";
 
 static struct {
     i2s_chan_handle_t tx_chan;
-    i2s_chan_handle_t rx_chan;
     i2c_master_bus_handle_t i2c_bus;
     esp_codec_dev_handle_t codec;
     uint32_t sample_rate;
     uint32_t source_sample_rate;
+    uint32_t resample_step_q16;
+    uint32_t resample_phase_q16;
+    int16_t tail_sample[2];
+    bool tail_valid;
     bool initialized;
 } s_audio;
 
 static int16_t s_resample_buf[AUDIO_MAX_OUTPUT_FRAMES * 2];
+
+static inline int16_t audio_get_extended_sample(const int16_t *input, size_t in_frames,
+                                                size_t index, size_t channel)
+{
+    if (s_audio.tail_valid) {
+        if (index == 0) {
+            return s_audio.tail_sample[channel];
+        }
+        return input[((index - 1) * 2) + channel];
+    }
+
+    return input[(index * 2) + channel];
+}
 
 static size_t audio_resample_stereo(const int16_t *input, size_t in_frames,
                                     int16_t *output, size_t out_capacity_frames)
@@ -51,41 +67,38 @@ static size_t audio_resample_stereo(const int16_t *input, size_t in_frames,
         return frames_to_copy;
     }
 
-    uint64_t out_frames_u64 = ((uint64_t)in_frames * s_audio.sample_rate +
-                               s_audio.source_sample_rate - 1) /
-                              s_audio.source_sample_rate;
-    size_t out_frames = (size_t)out_frames_u64;
-    if (out_frames > out_capacity_frames) {
-        out_frames = out_capacity_frames;
+    size_t extended_frames = in_frames + (s_audio.tail_valid ? 1u : 0u);
+    if (extended_frames == 1) {
+        output[0] = audio_get_extended_sample(input, in_frames, 0, 0);
+        output[1] = audio_get_extended_sample(input, in_frames, 0, 1);
+        s_audio.tail_sample[0] = input[(in_frames - 1) * 2];
+        s_audio.tail_sample[1] = input[(in_frames - 1) * 2 + 1];
+        s_audio.tail_valid = true;
+        return 1;
     }
 
-    if (in_frames == 1) {
-        for (size_t index = 0; index < out_frames; index++) {
-            output[index * 2] = input[0];
-            output[index * 2 + 1] = input[1];
-        }
-        return out_frames;
+    size_t out_frames = 0;
+    uint32_t phase_q16 = s_audio.resample_phase_q16;
+    uint32_t max_phase_q16 = (uint32_t)((extended_frames - 1) << 16);
+
+    while (out_frames < out_capacity_frames && phase_q16 < max_phase_q16) {
+        size_t src_index = (size_t)(phase_q16 >> 16);
+        uint32_t frac = phase_q16 & 0xFFFFu;
+        int32_t left0 = audio_get_extended_sample(input, in_frames, src_index, 0);
+        int32_t right0 = audio_get_extended_sample(input, in_frames, src_index, 1);
+        int32_t left1 = audio_get_extended_sample(input, in_frames, src_index + 1, 0);
+        int32_t right1 = audio_get_extended_sample(input, in_frames, src_index + 1, 1);
+
+        output[out_frames * 2] = (int16_t)(left0 + (((left1 - left0) * (int32_t)frac) >> 16));
+        output[out_frames * 2 + 1] = (int16_t)(right0 + (((right1 - right0) * (int32_t)frac) >> 16));
+        out_frames++;
+        phase_q16 += s_audio.resample_step_q16;
     }
 
-    for (size_t out_index = 0; out_index < out_frames; out_index++) {
-        uint64_t src_pos_q16 = (((uint64_t)out_index * s_audio.source_sample_rate) << 16) /
-                               s_audio.sample_rate;
-        size_t src_index = (size_t)(src_pos_q16 >> 16);
-        uint32_t frac = (uint32_t)(src_pos_q16 & 0xFFFFu);
-
-        if (src_index >= (in_frames - 1)) {
-            src_index = in_frames - 1;
-            frac = 0;
-        }
-
-        int32_t left0 = input[src_index * 2];
-        int32_t right0 = input[src_index * 2 + 1];
-        int32_t left1 = input[(src_index + (src_index + 1 < in_frames ? 1 : 0)) * 2];
-        int32_t right1 = input[(src_index + (src_index + 1 < in_frames ? 1 : 0)) * 2 + 1];
-
-        output[out_index * 2] = (int16_t)(left0 + (((left1 - left0) * (int32_t)frac) >> 16));
-        output[out_index * 2 + 1] = (int16_t)(right0 + (((right1 - right0) * (int32_t)frac) >> 16));
-    }
+    s_audio.tail_sample[0] = input[(in_frames - 1) * 2];
+    s_audio.tail_sample[1] = input[(in_frames - 1) * 2 + 1];
+    s_audio.tail_valid = true;
+    s_audio.resample_phase_q16 = phase_q16 - max_phase_q16;
 
     return out_frames;
 }
@@ -111,7 +124,7 @@ static esp_err_t audio_i2s_init(uint32_t sample_rate)
     chan_cfg.dma_desc_num = AUDIO_DMA_DESC_NUM;
     chan_cfg.dma_frame_num = AUDIO_DMA_FRAME_NUM;
 
-    ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, &s_audio.tx_chan, &s_audio.rx_chan), TAG,
+    ESP_RETURN_ON_ERROR(i2s_new_channel(&chan_cfg, &s_audio.tx_chan, NULL), TAG,
                         "i2s_new_channel failed");
 
     i2s_std_config_t std_cfg = {
@@ -123,7 +136,7 @@ static esp_err_t audio_i2s_init(uint32_t sample_rate)
             .bclk = AUDIO_I2S_BCLK_GPIO,
             .ws = AUDIO_I2S_WS_GPIO,
             .dout = AUDIO_I2S_DOUT_GPIO,
-            .din = AUDIO_I2S_DIN_GPIO,
+            .din = I2S_GPIO_UNUSED,
             .invert_flags = {
                 .mclk_inv = false,
                 .bclk_inv = false,
@@ -135,10 +148,7 @@ static esp_err_t audio_i2s_init(uint32_t sample_rate)
 
     ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_audio.tx_chan, &std_cfg), TAG,
                         "TX std mode init failed");
-    ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_audio.rx_chan, &std_cfg), TAG,
-                        "RX std mode init failed");
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_audio.tx_chan), TAG, "TX enable failed");
-    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_audio.rx_chan), TAG, "RX enable failed");
 
     return ESP_OK;
 }
@@ -155,7 +165,7 @@ static esp_err_t audio_codec_init(uint32_t sample_rate)
 
     audio_codec_i2s_cfg_t i2s_cfg = {
         .port = 0,
-        .rx_handle = s_audio.rx_chan,
+        .rx_handle = NULL,
         .tx_handle = s_audio.tx_chan,
     };
     const audio_codec_data_if_t *data_if = audio_codec_new_i2s_data(&i2s_cfg);
@@ -167,11 +177,14 @@ static esp_err_t audio_codec_init(uint32_t sample_rate)
     es8311_codec_cfg_t es8311_cfg = {
         .ctrl_if = ctrl_if,
         .gpio_if = gpio_if,
-        .codec_mode = ESP_CODEC_DEV_WORK_MODE_BOTH,
+        .codec_mode = ESP_CODEC_DEV_TYPE_OUT,
         .master_mode = false,
         .use_mclk = true,
         .pa_pin = AUDIO_PA_GPIO,
         .pa_reverted = false,
+        .digital_mic = false,
+        .invert_mclk = false,
+        .invert_sclk = false,
         .hw_gain = {
             .pa_voltage = 5.0,
             .codec_dac_voltage = 3.3,
@@ -182,7 +195,7 @@ static esp_err_t audio_codec_init(uint32_t sample_rate)
     ESP_RETURN_ON_FALSE(codec_if != NULL, ESP_FAIL, TAG, "create ES8311 codec failed");
 
     esp_codec_dev_cfg_t dev_cfg = {
-        .dev_type = ESP_CODEC_DEV_TYPE_IN_OUT,
+        .dev_type = ESP_CODEC_DEV_TYPE_OUT,
         .codec_if = codec_if,
         .data_if = data_if,
     };
@@ -212,6 +225,12 @@ esp_err_t audio_driver_init(const audio_driver_config_t *config)
 
     s_audio.sample_rate = config->sample_rate;
     s_audio.source_sample_rate = config->source_sample_rate;
+    s_audio.resample_step_q16 = (uint32_t)(((uint64_t)config->source_sample_rate << 16) /
+                                           config->sample_rate);
+    s_audio.resample_phase_q16 = 0;
+    s_audio.tail_sample[0] = 0;
+    s_audio.tail_sample[1] = 0;
+    s_audio.tail_valid = false;
 
     esp_err_t err = audio_i2c_init();
     if (err != ESP_OK) {
@@ -285,13 +304,6 @@ void audio_driver_deinit(void)
         i2s_del_channel(s_audio.tx_chan);
         s_audio.tx_chan = NULL;
     }
-
-    if (s_audio.rx_chan) {
-        i2s_channel_disable(s_audio.rx_chan);
-        i2s_del_channel(s_audio.rx_chan);
-        s_audio.rx_chan = NULL;
-    }
-
     if (s_audio.i2c_bus) {
         i2c_del_master_bus(s_audio.i2c_bus);
         s_audio.i2c_bus = NULL;
@@ -299,5 +311,10 @@ void audio_driver_deinit(void)
 
     s_audio.sample_rate = 0;
     s_audio.source_sample_rate = 0;
+    s_audio.resample_step_q16 = 0;
+    s_audio.resample_phase_q16 = 0;
+    s_audio.tail_sample[0] = 0;
+    s_audio.tail_sample[1] = 0;
+    s_audio.tail_valid = false;
     s_audio.initialized = false;
 }
