@@ -27,6 +27,7 @@
 #include "storage.h"
 #include "video.h"
 #include "web_server.h"
+#include "runtime_config.h"
 
 #ifdef DUAL_CORE_PPU
 #include "ppu_pipeline.h"
@@ -113,7 +114,7 @@ static const char *TAG = "gpsp_session";
 static gba_session_state_t s_session;
 static int64_t s_frame_start_us;
 static uint32_t s_fps_counter;
-static uint32_t s_fps_last;
+static uint32_t s_fps_last_x10;   /* FPS × 10, e.g. 597 = 59.7 */
 static int64_t s_fps_timer_us;
 static gba_session_perf_stats_t s_perf_stats;
 
@@ -743,6 +744,9 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
 
     t_reset0 = esp_timer_get_time();
     reset_gba();
+#ifdef HAVE_DYNAREC
+    flush_dynarec_caches();
+#endif
     t_reset1 = esp_timer_get_time();
     reset_us = t_reset1 - t_reset0;
 
@@ -1051,18 +1055,22 @@ void gba_emulation_task(void *param)
 
             s_fps_counter++;
             {
-                int64_t now = esp_timer_get_time();
-                if (now - s_fps_timer_us >= 1000000) {
-                    ESP_LOGI(TAG, "FPS: %u | stats window %u frames",
-                             (unsigned)s_fps_counter,
-                             (unsigned)GBA_SESSION_STATS_WINDOW);
-                    gba_session_perf_log_single_core();
+                /* Use t4 (post-acquire, VSYNC-aligned) for accurate FPS */
+                if (t4 - s_fps_timer_us >= 1000000) {
+                    int64_t dt = t4 - s_fps_timer_us;
+                    s_fps_last_x10 = (uint32_t)((uint64_t)s_fps_counter * 10000000 / dt);
+                    if (!gpsp_web_server_enabled) {
+                        ESP_LOGI(TAG, "FPS: %u.%u | stats window %u frames",
+                                 (unsigned)(s_fps_last_x10 / 10),
+                                 (unsigned)(s_fps_last_x10 % 10),
+                                 (unsigned)GBA_SESSION_STATS_WINDOW);
+                        gba_session_perf_log_single_core();
+                    }
 #ifdef CPU_PROFILE_STATS
                     cpu_prof_print();
 #endif
-                    s_fps_last = s_fps_counter;
                     s_fps_counter = 0;
-                    s_fps_timer_us = now;
+                    s_fps_timer_us = t4;
                 }
             }
 
@@ -1097,19 +1105,23 @@ void gba_emulation_task(void *param)
                                             r_video,
                                             r_audio);
 
-            int64_t now = esp_timer_get_time();
-            if (now - s_fps_timer_us >= 1000000) {
-                ESP_LOGI(TAG, "FPS: %u | stats window %u frames",
-                         (unsigned)s_fps_counter,
-                         (unsigned)GBA_SESSION_STATS_WINDOW);
-                gba_session_perf_log_dual_core(a_drop, a_qpeak);
+            /* Use t1 (post-execute_arm, VSYNC-aligned) for accurate FPS */
+            if (t1 - s_fps_timer_us >= 1000000) {
+                int64_t dt = t1 - s_fps_timer_us;
+                s_fps_last_x10 = (uint32_t)((uint64_t)s_fps_counter * 10000000 / dt);
+                if (!gpsp_web_server_enabled) {
+                    ESP_LOGI(TAG, "FPS: %u.%u | stats window %u frames",
+                             (unsigned)(s_fps_last_x10 / 10),
+                             (unsigned)(s_fps_last_x10 % 10),
+                             (unsigned)GBA_SESSION_STATS_WINDOW);
+                    gba_session_perf_log_dual_core(a_drop, a_qpeak);
+                }
 #ifdef CPU_PROFILE_STATS
                 log_scanline_breakdown();
                 cpu_prof_print();
 #endif
-                s_fps_last = s_fps_counter;
                 s_fps_counter = 0;
-                s_fps_timer_us = now;
+                s_fps_timer_us = t1;
             }
         }
 
@@ -1151,8 +1163,8 @@ int gba_session_stats_json(char *buf, size_t buf_size)
 
     *p++ = '{';
 
-    p += snprintf(p, end - p, "\"fps\":%u,\"heap_kb\":%u,",
-                  (unsigned)s_fps_last,
+    p += snprintf(p, end - p, "\"fps_x10\":%u,\"heap_kb\":%u,",
+                  (unsigned)s_fps_last_x10,
                   (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024));
     if (p >= end) goto trunc;
 

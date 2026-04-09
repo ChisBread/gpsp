@@ -154,7 +154,7 @@ menu "gpSP ESP32-P4 Platform (JC4880P443C_I_W)"
         config GPSP_C6_CONNECT_TIMEOUT_MS
             int "Hosted STA connect timeout (ms)"
             default 15000
-            range 1000 60000
+            range 1000 600000
             depends on GPSP_C6_CONNECT_TEST
 
         config GPSP_C6_CONNECT_MAX_RETRIES

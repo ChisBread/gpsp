@@ -27,6 +27,7 @@
 #include "web_server.h"
 #include "runtime_config.h"
 #include "gba_session.h"
+#include "storage.h"
 #include "esp32p4/input_driver.h"
 #include "c6_remote.h"
 
@@ -46,7 +47,8 @@ static const char *TAG = "web_server";
 
 /* ---- state ---- */
 static httpd_handle_t s_server;
-static volatile uint16_t s_web_keys;          /* atomic on 32-bit arch */
+static volatile uint16_t s_web_keys_held;     /* last WS state */
+static volatile uint16_t s_web_keys_pressed;  /* OR-accumulated presses since last emu read */
 static volatile int64_t  s_last_recv_us;      /* timestamp of last WS recv */
 static volatile int64_t  s_last_emu_read_us;  /* timestamp of last emu read */
 
@@ -97,19 +99,20 @@ static esp_err_t ws_handler(httpd_req_t *req)
 
     if (buf[0] == 0x01 && ws_pkt.len >= 7) {
         /* Button update */
-        uint16_t keys = (uint16_t)(buf[1] | (buf[2] << 8));
+        uint16_t keys = (uint16_t)(buf[1] | (buf[2] << 8)) & 0x3FF;
         uint32_t client_ts = buf[3] | (buf[4] << 8) | (buf[5] << 16) | (buf[6] << 24);
 
-        s_web_keys = keys & 0x3FF;
+        /* Detect new presses vs previous held state and accumulate */
+        uint16_t new_presses = keys & ~s_web_keys_held;
+        s_web_keys_pressed |= new_presses;
+        s_web_keys_held = keys;
         s_last_recv_us = now_us;
 
-        /* Compute emu latency: time since last emu read (how stale was previous input) */
-        int64_t emu_lat_us = 0;
-        int64_t last_read = s_last_emu_read_us;
-        if (last_read > 0 && s_last_recv_us > last_read) {
-            /* This represents "how long until emu picks up this change" - roughly next frame */
-            emu_lat_us = 0; /* Will be filled on next read */
-        }
+        /* Immediately update GBA P1 register so mid-frame reads see
+         * the new keys without waiting for next frame boundary.
+         * Merge with physical GPIO buttons to avoid losing them. */
+        uint16_t combined = keys | input_driver_read();
+        write_ioreg(REG_P1, (~combined) & 0x3FF);
 
         /* Send ACK with echoed timestamp */
         uint8_t ack[9];
@@ -227,19 +230,115 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     return httpd_resp_send(req, "{\"ok\":true}", 11);
 }
 
+/* ---- GET /api/roms → list .gba files on SD ---- */
+static esp_err_t roms_get_handler(httpd_req_t *req)
+{
+    char **entries = NULL;
+    size_t count = 0;
+
+    esp_err_t err = storage_list_roms(NULL, &entries, &count);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SD read failed");
+        return ESP_FAIL;
+    }
+
+    /* Build JSON array */
+    char buf[2048];
+    char *p = buf;
+    char *end = buf + sizeof(buf) - 1;
+    *p++ = '[';
+    for (size_t i = 0; i < count && p < end - 4; i++) {
+        if (i > 0) *p++ = ',';
+        int n = snprintf(p, end - p, "\"%s\"", entries[i]);
+        if (n > 0 && p + n < end) p += n;
+    }
+    *p++ = ']';
+    *p = '\0';
+
+    storage_free_rom_list(entries, count);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, buf, (ssize_t)(p - buf));
+}
+
+/* ---- POST /api/roms/load → switch to a different ROM ---- */
+static esp_err_t roms_load_handler(httpd_req_t *req)
+{
+    char body[600];
+    int received = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    /* Extract "file":"xxx.gba" */
+    char *p = strstr(body, "\"file\"");
+    if (!p) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing file field");
+        return ESP_FAIL;
+    }
+    p = strchr(p + 6, '"');
+    if (!p) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+        return ESP_FAIL;
+    }
+    p++; /* skip opening quote */
+    char *q = strchr(p, '"');
+    if (!q || q - p < 1 || (size_t)(q - p) >= sizeof(body) - 64) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad filename");
+        return ESP_FAIL;
+    }
+    *q = '\0';
+
+    /* Validate: must end in .gba, no path separators (prevent traversal) */
+    size_t flen = strlen(p);
+    if (flen < 5 || strcasecmp(&p[flen - 4], ".gba") != 0 ||
+        strchr(p, '/') || strchr(p, '\\') || strstr(p, "..")) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid filename");
+        return ESP_FAIL;
+    }
+
+    /* Build full path */
+    char rom_path[512];
+    snprintf(rom_path, sizeof(rom_path), "%s/%s", STORAGE_MOUNT_POINT, p);
+
+    ESP_LOGI(TAG, "ROM switch requested: %s", rom_path);
+
+    gba_session_reload_request_t reload = {
+        .rom_path = rom_path,
+        .bios_path = NULL,
+        .reload_rom = true,
+        .reload_bios = false,
+        .clear_backup = true,
+    };
+    esp_err_t err = gba_session_request_reload(&reload);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    if (err == ESP_OK) {
+        return httpd_resp_send(req, "{\"ok\":true}", 11);
+    } else {
+        return httpd_resp_send(req, "{\"ok\":false,\"error\":\"reload failed\"}", 36);
+    }
+}
+
 /* ---- public API ---- */
 
 uint16_t web_server_input_read(void)
 {
     s_last_emu_read_us = esp_timer_get_time();
-    return s_web_keys;
+    uint16_t keys = s_web_keys_held | s_web_keys_pressed;
+    s_web_keys_pressed = 0;
+    return keys;
 }
 
 esp_err_t web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 10;
     config.stack_size = 8192;
 
     esp_err_t ret = httpd_start(&s_server, &config);
@@ -296,6 +395,22 @@ esp_err_t web_server_start(void)
         .handler = settings_post_handler,
     };
     httpd_register_uri_handler(s_server, &settings_post_uri);
+
+    /* ROM list */
+    const httpd_uri_t roms_get_uri = {
+        .uri = "/api/roms",
+        .method = HTTP_GET,
+        .handler = roms_get_handler,
+    };
+    httpd_register_uri_handler(s_server, &roms_get_uri);
+
+    /* ROM load */
+    const httpd_uri_t roms_load_uri = {
+        .uri = "/api/roms/load",
+        .method = HTTP_POST,
+        .handler = roms_load_handler,
+    };
+    httpd_register_uri_handler(s_server, &roms_load_uri);
 
     ESP_LOGI(TAG, "Web server started on port %d", config.server_port);
     return ESP_OK;

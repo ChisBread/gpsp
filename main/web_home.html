@@ -42,6 +42,17 @@ canvas{width:100%;height:100%}
 select{background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:3px 8px;font-size:.82em}
 .msg{text-align:center;font-size:.75em;min-height:18px;margin-top:6px}
 .msg.ok{color:#6f6}.msg.err{color:#f66}
+/* ROM picker */
+.rom-list{max-height:200px;overflow-y:auto;margin-top:6px}
+.rom-list .rom{display:flex;align-items:center;justify-content:space-between;padding:7px 8px;border-bottom:1px solid #1a2030;cursor:pointer;transition:background .12s;font-size:.82em}
+.rom-list .rom:hover{background:#1a2a4a}
+.rom-list .rom:active{background:#2a3a5a}
+.rom-list .rom .name{color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.rom-list .rom .go{color:#8af;font-size:.75em;flex-shrink:0;margin-left:8px}
+.rom-empty{color:#666;font-size:.78em;text-align:center;padding:16px 0}
+.rom-loading{color:#888;font-size:.78em;text-align:center;padding:16px 0}
+btn{background:#2a3a5a;color:#8af;border:1px solid #446;border-radius:4px;padding:4px 12px;font-size:.78em;cursor:pointer}
+btn:hover{background:#3a4a6a}
 </style>
 </head>
 <body>
@@ -81,6 +92,12 @@ select{background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;
     </select>
   </div>
   <div class="msg" id="msg"></div>
+</div>
+
+<div class="card">
+  <h2>游戏</h2>
+  <div id="rom_list" class="rom-list"><div class="rom-loading">加载中...</div></div>
+  <div class="msg" id="rom_msg"></div>
 </div>
 
 <script>
@@ -208,7 +225,7 @@ async function poll(){
     if (!r.ok) return;
     const d = await r.json();
 
-    $('fps').textContent = d.fps ?? '--';
+    $('fps').textContent = d.fps_x10 != null ? (d.fps_x10 / 10).toFixed(1) : '--';
     $('heap').textContent = d.heap_kb ?? '--';
 
     /* Determine active series on first data */
@@ -268,6 +285,44 @@ async function saveSettings(){
 $('cfg_dynarec').addEventListener('change', saveSettings);
 $('cfg_sprite').addEventListener('change', saveSettings);
 $('cfg_boot').addEventListener('change', saveSettings);
+
+/* ── ROM picker ────────────────────────────────────── */
+async function loadRomList(){
+  const el = $('rom_list');
+  try {
+    const r = await fetch('/api/roms');
+    if (!r.ok) { el.innerHTML='<div class="rom-empty">读取失败</div>'; return; }
+    const roms = await r.json();
+    if (!roms.length) { el.innerHTML='<div class="rom-empty">SD卡未找到 .gba 文件</div>'; return; }
+    el.innerHTML = '';
+    roms.sort((a,b) => a.localeCompare(b));
+    for (const name of roms) {
+      const d = document.createElement('div');
+      d.className = 'rom';
+      d.innerHTML = `<span class="name">${name.replace(/\.gba$/i,'')}</span><span class="go">▶</span>`;
+      d.addEventListener('click', () => loadRom(name));
+      el.appendChild(d);
+    }
+  } catch(e){ el.innerHTML='<div class="rom-empty">网络错误</div>'; }
+}
+
+async function loadRom(filename){
+  const m = $('rom_msg');
+  m.textContent = '加载中: ' + filename.replace(/\.gba$/i,'');
+  m.className = 'msg';
+  try {
+    const r = await fetch('/api/roms/load', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({file: filename})
+    });
+    const j = await r.json();
+    if (j.ok) { m.textContent='已切换'; m.className='msg ok'; }
+    else { m.textContent=j.error||'切换失败'; m.className='msg err'; }
+  } catch(e){ m.textContent='网络错误'; m.className='msg err'; }
+  setTimeout(()=>{ m.textContent=''; }, 3000);
+}
+
+loadRomList();
 })();
 </script>
 </body>
