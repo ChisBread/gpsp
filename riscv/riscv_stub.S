@@ -552,7 +552,7 @@ defsymbl(rv_indirect_branch_dual)
 .macro load_slow_path cfunc, suffix
 .Lslow_\suffix:
     sw   ra, REG_SAVE(gp)
-    sw   a1, REG_PC(gp)
+    sw   s7, REG_PC(gp)         /* use stored_pc (s7) — saves 2 JIT instr per load */
     store_caller_regs()
     swap_to_c_abi()
     call \cfunc

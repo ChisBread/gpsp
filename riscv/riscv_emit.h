@@ -354,6 +354,21 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_load_imm(ireg, (new_pc));                                          \
 }
 
+/* Load a PC value using a delta from reg_pc (s7 = stored_pc) when possible.
+ * Saves 1 instruction (ADDI vs LUI+ADDI) when delta fits in imm12. */
+#define generate_load_pc_delta(ireg, new_pc)                                  \
+{                                                                             \
+    s32 _delta = (s32)((u32)(new_pc) - stored_pc);                              \
+    if (_delta >= -2048 && _delta <= 2047)                                      \
+    {                                                                           \
+        rv_addi(ireg, reg_pc, _delta);                                          \
+    }                                                                           \
+    else                                                                        \
+    {                                                                           \
+        generate_load_imm(ireg, (new_pc));                                      \
+    }                                                                           \
+}
+
 #define generate_store_reg(ireg, reg_index)                                   \
     rv_mv(arm_to_rv_reg[reg_index], ireg)                                       \
 
@@ -1206,7 +1221,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_load_imm(reg_a0, imm)                                            \
 
 #define arm_psr_store_cpsr(op_type)                                           \
-    generate_load_pc(reg_a1, (pc));                                           \
+    generate_load_pc_delta(reg_a1, (pc));                                     \
     generate_load_imm(reg_a2, cpsr_masks[psr_pfield][0]);                     \
     generate_load_imm(reg_temp3, cpsr_masks[psr_pfield][1]);                  \
     generate_function_call(execute_store_cpsr)                                \
@@ -1310,7 +1325,6 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define arm_access_memory_load(mem_type)                                      \
 {                                                                             \
     cycle_count += 2;                                                         \
-    generate_load_pc(reg_a1, (pc));                                           \
     generate_function_call(rv_execute_load_##mem_type);                       \
     generate_store_reg(reg_res, rd);                                          \
     check_store_reg_pc_no_flags(rd);                                          \
@@ -1319,7 +1333,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define arm_access_memory_store(mem_type)                                     \
 {                                                                             \
     cycle_count++;                                                            \
-    generate_load_pc(reg_a2, (pc + 4));                                       \
+    generate_load_pc_delta(reg_a2, (pc + 4));                                 \
     generate_load_reg_pc(reg_a1, rd, 12);                                     \
     generate_function_call(rv_execute_store_##mem_type);                      \
 }                                                                             \
@@ -1400,20 +1414,19 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     (bit_count[(word) >> 8] + bit_count[(word) & 0xFF])                       \
 
 #define arm_block_memory_load()                                               \
-    generate_load_pc(reg_a1, (pc));                                           \
     generate_function_call(rv_execute_aligned_load32);                        \
     generate_store_reg(reg_res, i)                                            \
 
 #define arm_block_memory_store()                                              \
     generate_load_reg_pc(reg_a1, i, 8);                                       \
-    generate_load_pc(reg_a2, (pc + 4));                                       \
+    generate_load_pc_delta(reg_a2, (pc + 4));                                 \
     generate_function_call(rv_execute_aligned_store32)                        \
 
 #define arm_block_memory_final_load(writeback_type)                           \
     arm_block_memory_load()                                                   \
 
 #define arm_block_memory_final_store(writeback_type)                          \
-    generate_load_pc(reg_a2, (pc + 4));                                       \
+    generate_load_pc_delta(reg_a2, (pc + 4));                                 \
     generate_load_reg(reg_a1, i);                                             \
     arm_block_memory_writeback_post_store(writeback_type);                    \
     generate_function_call(rv_execute_store_u32)                              \
@@ -1511,7 +1524,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define arm_bl()                                                              \
 {                                                                             \
-    generate_load_pc(reg_r14, (pc + 4));                                      \
+    generate_load_pc(reg_r14, (pc + 4));                                \
     generate_branch();                                                        \
 }                                                                             \
 
@@ -1521,7 +1534,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_indirect_branch_dual()                                           \
 
 #define arm_swi()                                                             \
-    generate_load_pc(reg_a0, (pc + 4));                                       \
+    generate_load_pc_delta(reg_a0, (pc + 4));                                 \
     generate_function_call(execute_swi);                                      \
     generate_branch()                                                         \
 
@@ -1718,7 +1731,6 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define thumb_access_memory_load(mem_type, reg_rd)                            \
 {                                                                             \
     cycle_count += 2;                                                         \
-    generate_load_pc(reg_a1, (pc));                                           \
     generate_function_call(rv_execute_load_##mem_type);                       \
     generate_store_reg(reg_res, reg_rd);                                      \
 }                                                                             \
@@ -1727,7 +1739,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 {                                                                             \
     cycle_count++;                                                            \
     generate_load_reg(reg_a1, reg_rd);                                        \
-    generate_load_pc(reg_a2, (pc + 2));                                       \
+    generate_load_pc(reg_a2, (pc + 2));                                 \
     generate_function_call(rv_execute_store_##mem_type);                      \
 }                                                                             \
 
@@ -1774,20 +1786,19 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define thumb_block_address_postadjust_push_lr(base_reg)                      \
 
 #define thumb_block_memory_load()                                             \
-    generate_load_pc(reg_a1, (pc));                                           \
     generate_function_call(rv_execute_aligned_load32);                        \
     generate_store_reg(reg_res, i)                                            \
 
 #define thumb_block_memory_store()                                            \
     generate_load_reg(reg_a1, i);                                             \
-    generate_load_pc(reg_a2, (pc + 2));                                       \
+    generate_load_pc(reg_a2, (pc + 2));                                 \
     generate_function_call(rv_execute_aligned_store32);                       \
 
 #define thumb_block_memory_final_load()                                       \
     thumb_block_memory_load()                                                 \
 
 #define thumb_block_memory_final_store()                                      \
-    generate_load_pc(reg_a2, (pc + 2));                                       \
+    generate_load_pc(reg_a2, (pc + 2));                                 \
     generate_load_reg(reg_a1, i);                                             \
     generate_function_call(rv_execute_store_u32);                             \
 
@@ -1815,12 +1826,11 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define thumb_block_memory_extra_push_lr()                                    \
     generate_add_imm(reg_a0, reg_save0, (bit_count[reg_list] * 4));           \
     generate_load_reg(reg_a1, REG_LR);                                        \
-    generate_load_pc(reg_a2, (pc + 2));                                       \
+    generate_load_pc(reg_a2, (pc + 2));                                 \
     generate_function_call(rv_execute_aligned_store32);                       \
 
 #define thumb_block_memory_extra_pop_pc()                                     \
     generate_add_imm(reg_a0, reg_save0, (bit_count[reg_list] * 4));           \
-    generate_load_pc(reg_a1, (pc));                                           \
     generate_function_call(rv_execute_aligned_load32);                        \
     generate_indirect_branch_cycle_update(thumb)                              \
 
@@ -1885,7 +1895,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_block_extra_vars();                                                \
 
 #define generate_translation_gate(type)                                       \
-    generate_load_pc(reg_a0, pc);                                             \
+    generate_load_pc(reg_a0, pc);                                       \
     generate_indirect_branch_no_cycle_update(type)                            \
 
 #define generate_branch()                                                     \

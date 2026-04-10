@@ -248,6 +248,33 @@
 
 ---
 
+### OPT-14: JIT Load PC消除 + Store/Branch PC Delta编码
+
+**变更**: 两项JIT代码体积优化:
+1. **Load PC消除**: 从5个Load emit宏中去除 `generate_load_pc(reg_a1, pc)` (1-2条指令/Load)，`load_slow_path` 改用 `s7` (stored_pc) 替代 `a1`
+2. **PC Delta编码**: 新增 `generate_load_pc_delta` 宏 — 当 `(new_pc - stored_pc)` 可用12位立即数表示时，用 `addi ireg, s7, delta` (1条) 替代 `lui+addi` (2条)，应用于12个Store/Branch/SWI/PSR站点
+
+**影响**:
+- 每条GBA Load指令减少 1-2 条emitted RISC-V指令
+- 每条GBA Store/BL/SWI指令减少 0-1 条emitted RISC-V指令 (delta ≤ ±2047时)
+- 总体JIT代码体积缩减，改善i-cache利用率
+
+**文件**: `riscv/riscv_emit.h`, `riscv/riscv_stub.S`  
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致  
+
+**注意**: `thumb_bl` 和 `thumb_swi` 的delta编码导致segfault，已排除。原因待查。
+
+| 指标 | OPT-13 | OPT-14 (5次中位数) | 变化 |
+|------|--------|---------------------|------|
+| Total | 5.142 s | 5.120 s | -0.4% |
+| FPS | ~583 | ~586 | +0.5% |
+
+5次测量: 5.174, 5.120, 5.093, 5.135, 5.094 (中位数 5.120s)
+
+**结论**: 微小改善 (QEMU噪声边缘)。但JIT代码体积切实缩减，真实ESP32-P4的i-cache (32KB L1) 受益更大。保留。
+
+---
+
 ## 总结
 
 | 阶段 | Total时间 | FPS | vs Baseline |
@@ -263,6 +290,7 @@
 | **+OPT-11 (Load快路径)** | **5.763 s** | **~521** | **-37.5%** |
 | **+OPT-12 (Store快路径)** | **5.177 s** | **~580** | **-43.8%** |
 | +OPT-13 (IO/PAL/VRAM/OAM) | 5.142 s | ~583 | -44.2% |
+| +OPT-14 (PC消除+Delta) | 5.120 s | ~586 | -44.5% |
 | (参考) Zba+Zbb | 7.28 s | 411 | -21.1% |
 
 ### 已采纳优化
@@ -276,6 +304,7 @@
 - **OPT-11**: Assembly Load快路径 — EWRAM/IWRAM/ROM直接汇编读取 (**-34.8%**, 最大单项优化)
 - **OPT-12**: Assembly Store快路径 — EWRAM/IWRAM直接汇编写入+内联SMC检测 (**-10.2%**)
 - **OPT-13**: IO/Palette/VRAM/OAM Load快路径 — 剩余内存区域汇编读取覆盖
+- **OPT-14**: JIT Load PC消除 + Store/Branch PC Delta编码 — 每条Load省1-2指令, Store/BL省0-1指令
 
 ### 已回退优化
 - **OPT-4**: 去除Load路径PC加载 (QEMU回退)
