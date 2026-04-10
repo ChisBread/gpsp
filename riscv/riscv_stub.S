@@ -529,13 +529,18 @@ defsymbl(rv_indirect_branch_dual)
     ret
 .endm
 
-/* Region dispatch: branches to fast paths for known regions */
+/* Region dispatch: branches to fast paths for known regions.
+ * Order: EWRAM/IWRAM first (most common RAM targets), then ROM
+ * (most common data source), then remaining regions. */
 .macro load_region_dispatch suffix
     srli  t0, a0, 24
     addi  t1, t0, -2
     beqz  t1, .Lewram_\suffix
     addi  t1, t0, -3
     beqz  t1, .Liwram_\suffix
+    addi  t1, t0, -8
+    sltiu t1, t1, 5
+    bnez  t1, .Lrom_\suffix
     addi  t1, t0, -4
     beqz  t1, .Lioreg_\suffix
     addi  t1, t0, -5
@@ -544,9 +549,6 @@ defsymbl(rv_indirect_branch_dual)
     beqz  t1, .Lvram_\suffix
     addi  t1, t0, -7
     beqz  t1, .Loamram_\suffix
-    addi  t1, t0, -8
-    sltiu t1, t1, 5
-    bnez  t1, .Lrom_\suffix
 .endm
 
 /* Slow-path: full C call with register save/restore */
