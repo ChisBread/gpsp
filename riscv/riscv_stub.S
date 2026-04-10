@@ -1074,12 +1074,10 @@ defsymbl(rv_trace_instruction)
         .space 0x400
     defobj(palette_ram_converted)
         .space 0x400
-
         .section .ext_ram.bss,"aw",@nobits
         .align 6
     defobj(ewram)
         .space 0x80000
-
         .align 12
     defobj(rom_translation_cache)
         .space ROM_TRANSLATION_CACHE_SIZE

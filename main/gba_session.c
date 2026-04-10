@@ -830,6 +830,11 @@ esp_err_t gba_session_init(const gba_session_boot_config_t *config)
         gba_screen_pixels = av_pipeline_video_buffer();
     }
 
+    {
+        u32 rom_buf_count = init_gamepak_buffer();
+        ESP_LOGI(TAG, "ROM buffers: %u MB in PSRAM", (unsigned)rom_buf_count);
+    }
+
     memset(&command, 0, sizeof(command));
     command.type = GBA_SESSION_CMD_RELOAD;
     command.reload_rom = true;

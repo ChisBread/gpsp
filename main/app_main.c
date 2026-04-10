@@ -182,9 +182,6 @@ void app_main(void)
 
     snprintf(bios_path, sizeof(bios_path), "%s/gba_bios.bin", STORAGE_MOUNT_POINT);
 
-    u32 rom_buf_count = init_gamepak_buffer();
-    ESP_LOGI(TAG, "ROM buffers: %u MB in PSRAM", (unsigned)rom_buf_count);
-
     gba_session_boot_config_t session_config = {
         .rom_path = CONFIG_GPSP_ROM_PATH,
         .bios_path = bios_path,
