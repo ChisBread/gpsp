@@ -354,8 +354,6 @@ esp_err_t video_driver_init(const video_driver_config_t *config)
             s_video.direct_dpi_fb = true;
             for (int i = 0; i < 3; i++) {
                 memset(s_video.dpi_fbs[i], 0, s_video.out_buf_size);
-                esp_cache_msync(s_video.dpi_fbs[i], s_video.out_buf_size,
-                                ESP_CACHE_MSYNC_FLAG_DIR_C2M);
             }
             ESP_LOGI(TAG, "Direct DPI FB x3 — triple-buffered PPA -> LCD");
         } else {
@@ -376,8 +374,6 @@ esp_err_t video_driver_init(const video_driver_config_t *config)
             s_video.direct_dpi_fb = true;
             for (int i = 0; i < 2; i++) {
                 memset(s_video.dpi_fbs[i], 0, s_video.out_buf_size);
-                esp_cache_msync(s_video.dpi_fbs[i], s_video.out_buf_size,
-                                ESP_CACHE_MSYNC_FLAG_DIR_C2M);
             }
             ESP_LOGI(TAG, "Direct DPI FB x2 — tear-free PPA -> LCD");
         }
@@ -392,8 +388,6 @@ esp_err_t video_driver_init(const video_driver_config_t *config)
             s_video.out_buf = (uint16_t *)fb0;
             s_video.direct_dpi_fb = true;
             memset(s_video.out_buf, 0, s_video.out_buf_size);
-            esp_cache_msync(s_video.out_buf, s_video.out_buf_size,
-                            ESP_CACHE_MSYNC_FLAG_DIR_C2M);
             ESP_LOGI(TAG, "Direct DPI FB x1 — zero-copy PPA -> LCD");
         } else {
             s_video.out_buf = (uint16_t *)heap_caps_aligned_alloc(
@@ -516,11 +510,6 @@ esp_err_t video_driver_submit_frame(const uint16_t *gba_framebuffer)
 
     /* Synchronous completion path (SW fallback or blocking PPA) */
     if (s_video.direct_dpi_fb) {
-        if (!(s_video.use_ppa && s_video.ppa_srm_client)) {
-            esp_cache_msync(s_video.out_buf, s_video.out_buf_size,
-                            ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-        }
-
         if (s_video.dpi_fb_count >= 2) {
             esp_lcd_panel_draw_bitmap(s_video.panel,
                                       0, 0,
