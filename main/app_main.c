@@ -49,8 +49,7 @@ u32 translation_gate_targets = 0;
 
 #define GPSP_AUDIO_SOURCE_RATE   GBA_SOUND_FREQUENCY
 #define GPSP_AUDIO_OUTPUT_RATE   CONFIG_GPSP_AUDIO_SAMPLE_RATE
-#define AV_TASK_STACK_SIZE       8192
-#define AV_OUTPUT_CORE           ((CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0)
+#define SERVICE_CORE             ((CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0)
 
 /* ================================================================
  * Platform initialization
@@ -171,9 +170,6 @@ void app_main(void)
 
     {
         av_pipeline_config_t av_config = {
-            .task_stack_size = AV_TASK_STACK_SIZE,
-            .output_core = AV_OUTPUT_CORE,
-            .task_priority = configMAX_PRIORITIES - 2,
             .audio_enabled = audio_ready,
         };
 
@@ -203,7 +199,7 @@ void app_main(void)
              sprite_limit ? 1 : 0,
              audio_ready ? 1 : 0);
     ESP_LOGI(TAG, "GBA renderer: output_core=%d c6_remote=%d",
-             AV_OUTPUT_CORE,
+             SERVICE_CORE,
              CONFIG_GPSP_ENABLE_C6_REMOTE ? 1 : 0);
 
     err = gba_session_init(&session_config);
@@ -212,7 +208,7 @@ void app_main(void)
         return;
     }
 
-    err = c6_remote_start_task(AV_OUTPUT_CORE, configMAX_PRIORITIES - 3);
+    err = c6_remote_start_task(SERVICE_CORE, configMAX_PRIORITIES - 3);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create C6 remote task: %s", esp_err_to_name(err));
         return;
@@ -220,7 +216,7 @@ void app_main(void)
 
     /* Start embedded HTTP/WebSocket server after network is ready (async, render core) */
     if (gpsp_web_server_enabled) {
-        web_server_start_async(AV_OUTPUT_CORE);
+        web_server_start_async(SERVICE_CORE);
     } else {
         ESP_LOGI(TAG, "Web server disabled by config");
     }

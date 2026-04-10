@@ -171,8 +171,10 @@ const s8 square_pattern_duty[4][8] =
 
 s8 wave_samples[64];
 
-u32 noise_table15[1024];
-u32 noise_table7[4];
+// u32 noise_table15[1024];
+// u32 noise_table7[4];
+// Use pre-generated tables from sound_noise_tables.h to avoid costly initialization on startup
+#include "sound_noise_tables.h"
 
 const u32 gbc_sound_master_volume_table[4] = { 1, 2, 4, 0 };
 
@@ -579,9 +581,6 @@ void init_sound()
 {
   gbc_sound_tick_step =
    float_to_fp16_16(256.0f / sound_frequency);
-
-  init_noise_table(noise_table15, 32767, 14);
-  init_noise_table(noise_table7, 127, 6);
 
   reset_sound();
 }

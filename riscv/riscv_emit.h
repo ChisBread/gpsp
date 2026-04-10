@@ -243,7 +243,7 @@ u32 execute_store_cpsr_body(u32 _cpsr, u32 address, u32 store_mask)
 #define rv_orr      rv_or
 #define rv_eor      rv_xor
 
-u32 arm_to_rv_reg[] =
+const u32 arm_to_rv_reg[] =
 {
     reg_r0,
     reg_r1,

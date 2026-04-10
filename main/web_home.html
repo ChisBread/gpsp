@@ -53,6 +53,13 @@ select{background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;
 .rom-loading{color:#888;font-size:.78em;text-align:center;padding:16px 0}
 btn{background:#2a3a5a;color:#8af;border:1px solid #446;border-radius:4px;padding:4px 12px;font-size:.78em;cursor:pointer}
 btn:hover{background:#3a4a6a}
+/* Prof bars */
+.prof-wrap{margin-top:6px}
+.prof-row{display:flex;align-items:center;font-size:.75em;margin-bottom:3px}
+.prof-row .plbl{width:50px;color:#888;text-align:right;padding-right:6px;flex-shrink:0}
+.prof-row .pbar-bg{flex:1;height:14px;background:#0a0f1a;border-radius:2px;overflow:hidden;position:relative}
+.prof-row .pbar{height:100%;border-radius:2px;min-width:1px}
+.prof-row .ppct{width:40px;text-align:right;color:#aaa;padding-left:4px;flex-shrink:0}
 </style>
 </head>
 <body>
@@ -72,6 +79,12 @@ btn:hover{background:#3a4a6a}
   </div>
   <div class="legend" id="legend"></div>
   <table class="st" id="tbl"></table>
+</div>
+
+<div class="card" id="prof_card" style="display:none">
+  <h2>CPU 剖析 (cycles/frame)</h2>
+  <div class="prof-wrap" id="prof_bars"></div>
+  <table class="st" id="prof_tbl"></table>
 </div>
 
 <div class="card">
@@ -108,14 +121,8 @@ const MAX_PTS = 60;
 
 /* Series config: key in JSON → label, color */
 const SERIES = [
-  {key:'core',  label:'Core(CPU)', color:'#50c878'},
-  {key:'scan',  label:'扫描线',    color:'#4a90d9'},
-  {key:'video', label:'视频',      color:'#d9a84a'},
-  {key:'audio', label:'音频',      color:'#8b5cf6'},
-  {key:'wait',  label:'等待',      color:'#444c5e'},
-  /* fallback for single-core */
   {key:'cpu',   label:'CPU',       color:'#50c878'},
-  {key:'copy',  label:'拷贝',      color:'#d9a84a'},
+  {key:'render',label:'渲染',      color:'#d9a84a'},
   {key:'submit',label:'提交',      color:'#8b5cf6'},
   {key:'acquire',label:'获取',     color:'#4a90d9'},
 ];
@@ -218,6 +225,67 @@ function updateTable(data){
   $('tbl').innerHTML = html;
 }
 
+/* ── CPU profiling breakdown ──────────────────────── */
+const PROF_ITEMS = [
+  {key:'exec',  label:'执行',  color:'#50c878'},
+  {key:'scan',  label:'扫描线', color:'#4a90d9'},
+  {key:'sound', label:'音频',  color:'#8b5cf6'},
+  {key:'dma',   label:'DMA',   color:'#d9a84a'},
+  {key:'timer', label:'定时器', color:'#e06060'},
+];
+const SCAN_ITEMS = [
+  {key:'bg',    label:'BG',     color:'#4a90d9'},
+  {key:'obj',   label:'OBJ',    color:'#60c0a0'},
+  {key:'fx',    label:'效果',   color:'#d9a84a'},
+  {key:'ord',   label:'排序',   color:'#c080e0'},
+  {key:'aff',   label:'仿射',   color:'#e06060'},
+  {key:'blank', label:'空白',   color:'#666'},
+];
+
+function updateProf(data){
+  const p = data.prof;
+  const card = $('prof_card');
+  if (!p || !p.total) { card.style.display='none'; return; }
+  card.style.display='';
+
+  const barsEl = $('prof_bars');
+  let html = '';
+  /* Top-level breakdown */
+  for (const it of PROF_ITEMS) {
+    const v = p[it.key] || 0;
+    const pct = (v / p.total * 100).toFixed(1);
+    html += `<div class="prof-row"><span class="plbl">${it.label}</span>`
+          + `<div class="pbar-bg"><div class="pbar" style="width:${pct}%;background:${it.color}"></div></div>`
+          + `<span class="ppct">${pct}%</span></div>`;
+  }
+  /* Scanline sub-breakdown */
+  if (p.scan > 0) {
+    for (const it of SCAN_ITEMS) {
+      const v = p[it.key] || 0;
+      const pct = (v / p.total * 100).toFixed(1);
+      html += `<div class="prof-row" style="padding-left:50px"><span class="plbl">${it.label}</span>`
+            + `<div class="pbar-bg"><div class="pbar" style="width:${pct}%;background:${it.color}"></div></div>`
+            + `<span class="ppct">${pct}%</span></div>`;
+    }
+  }
+  barsEl.innerHTML = html;
+
+  /* Dynarec info */
+  let thtml = '';
+  if (p.dynarec > 0) {
+    const dpct = (p.dynarec / p.total * 100).toFixed(1);
+    const lpct = (p.drc_lkup / p.total * 100).toFixed(1);
+    const xpct = (p.drc_xlat / p.total * 100).toFixed(1);
+    thtml = `<tr><td>Dynarec</td><td class="v">${dpct}%</td><td class="p99">${p.dynarec}</td></tr>`
+          + `<tr><td>  查找</td><td class="v">${lpct}%</td><td class="p99">${p.drc_lkup}</td></tr>`
+          + `<tr><td>  编译</td><td class="v">${xpct}%</td><td class="p99">${p.drc_xlat}</td></tr>`;
+  }
+  if (thtml) {
+    thtml = '<tr><td></td><td class="v">%</td><td class="p99">cyc/frame</td></tr>' + thtml;
+  }
+  $('prof_tbl').innerHTML = thtml;
+}
+
 /* ── Polling ──────────────────────────────────────── */
 async function poll(){
   try {
@@ -243,6 +311,7 @@ async function poll(){
     if (history.length > MAX_PTS) history.shift();
 
     updateTable(d);
+    updateProf(d);
     drawChart();
   } catch(e){}
 }

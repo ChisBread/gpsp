@@ -91,10 +91,33 @@ typedef struct {
 
 typedef struct {
     frame_stat_window_t cpu_us;
-    frame_stat_window_t copy_us;
+    frame_stat_window_t render_us;
     frame_stat_window_t submit_us;
     frame_stat_window_t acquire_us;
 } gba_session_perf_stats_t;
+
+#ifdef CPU_PROFILE_STATS
+typedef struct {
+    u32 frames;
+    u32 total;
+    u32 exec;
+    u32 scanline;
+    u32 scanline_bg;
+    u32 scanline_obj;
+    u32 scanline_fx;
+    u32 scanline_order;
+    u32 scanline_affine;
+    u32 scanline_blank;
+    u32 sound;
+    u32 dma;
+    u32 timer;
+    u32 dynarec;
+    u32 dynarec_lookup;
+    u32 dynarec_translate;
+} cpu_prof_snapshot_t;
+
+static cpu_prof_snapshot_t s_prof_snap;
+#endif
 
 static const char *TAG = "gpsp_session";
 static gba_session_state_t s_session;
@@ -179,12 +202,12 @@ static void gba_session_perf_reset(void)
 }
 
 static void gba_session_perf_push_single_core(int64_t cpu_us,
-                                              int64_t copy_us,
+                                              int64_t render_us,
                                               int64_t submit_us,
                                               int64_t acquire_us)
 {
     frame_stat_window_push(&s_perf_stats.cpu_us, cpu_us);
-    frame_stat_window_push(&s_perf_stats.copy_us, copy_us);
+    frame_stat_window_push(&s_perf_stats.render_us, render_us);
     frame_stat_window_push(&s_perf_stats.submit_us, submit_us);
     frame_stat_window_push(&s_perf_stats.acquire_us, acquire_us);
 }
@@ -192,24 +215,24 @@ static void gba_session_perf_push_single_core(int64_t cpu_us,
 static void gba_session_perf_log_single_core(void)
 {
     char cpu_buf[48];
-    char copy_buf[48];
+    char render_buf[48];
     char submit_buf[48];
     char acquire_buf[48];
     frame_stat_summary_t cpu = frame_stat_window_summarize(&s_perf_stats.cpu_us);
-    frame_stat_summary_t copy = frame_stat_window_summarize(&s_perf_stats.copy_us);
+    frame_stat_summary_t render = frame_stat_window_summarize(&s_perf_stats.render_us);
     frame_stat_summary_t submit = frame_stat_window_summarize(&s_perf_stats.submit_us);
     frame_stat_summary_t acquire = frame_stat_window_summarize(&s_perf_stats.acquire_us);
 
     format_frame_stat_summary(cpu_buf, sizeof(cpu_buf), &cpu);
-    format_frame_stat_summary(copy_buf, sizeof(copy_buf), &copy);
+    format_frame_stat_summary(render_buf, sizeof(render_buf), &render);
     format_frame_stat_summary(submit_buf, sizeof(submit_buf), &submit);
     format_frame_stat_summary(acquire_buf, sizeof(acquire_buf), &acquire);
 
     ESP_LOGI(TAG,
-             "Frame CPU (%u samples): run [%s] | copy [%s]",
+             "Frame CPU (%u samples): run [%s] | render [%s]",
              (unsigned)cpu.sample_count,
              cpu_buf,
-             copy_buf);
+             render_buf);
     ESP_LOGI(TAG,
              "Frame IO  (%u samples): submit [%s] | acquire [%s] | heap %u KB",
              (unsigned)submit.sample_count,
@@ -219,40 +242,36 @@ static void gba_session_perf_log_single_core(void)
 }
 
 #ifdef CPU_PROFILE_STATS
-static void log_scanline_breakdown(void)
+static void gba_session_snapshot_cpu_prof(void)
 {
+    u32 f, update;
+
     if (cpu_prof.frames == 0) {
         return;
     }
 
-    const u32 frames = cpu_prof.frames;
-    const u32 order = cpu_prof.scanline_order_cycles / frames;
-    const u32 bg = cpu_prof.scanline_bg_cycles / frames;
-    const u32 obj = cpu_prof.scanline_obj_cycles / frames;
-    const u32 fx = cpu_prof.scanline_effect_cycles / frames;
-    const u32 blank = cpu_prof.scanline_blank_cycles / frames;
-    const u32 affine = cpu_prof.scanline_affine_cycles / frames;
-    const u32 render_total = order + bg + obj + fx + blank + affine;
-    const u32 bg_text_fast = cpu_prof.scanline_bg_text_fast_cycles / frames;
-    const u32 bg_text_mosaic = cpu_prof.scanline_bg_text_mosaic_cycles / frames;
-    const u32 bg_affine = cpu_prof.scanline_bg_affine_cycles / frames;
-    const u32 bg_bitmap = cpu_prof.scanline_bg_bitmap_cycles / frames;
+    f = cpu_prof.frames;
+    update = cpu_prof.update_cycles / f;
 
-    ESP_LOGI(TAG,
-             "RSCAN cyc/frame: total %u | ord %u bg %u obj %u fx %u blank %u aff %u",
-             (unsigned)render_total,
-             (unsigned)order,
-             (unsigned)bg,
-             (unsigned)obj,
-             (unsigned)fx,
-             (unsigned)blank,
-             (unsigned)affine);
-    ESP_LOGI(TAG,
-             "BG cyc/frame: text_fast %u text_mosaic %u affine %u bitmap %u",
-             (unsigned)bg_text_fast,
-             (unsigned)bg_text_mosaic,
-             (unsigned)bg_affine,
-             (unsigned)bg_bitmap);
+    s_prof_snap.frames = f;
+    s_prof_snap.total = cpu_prof.total_cycles / f;
+    s_prof_snap.exec = (s_prof_snap.total > update)
+                     ? (s_prof_snap.total - update) : 0;
+    s_prof_snap.scanline = cpu_prof.scanline_cycles / f;
+    s_prof_snap.scanline_bg = cpu_prof.scanline_bg_cycles / f;
+    s_prof_snap.scanline_obj = cpu_prof.scanline_obj_cycles / f;
+    s_prof_snap.scanline_fx = cpu_prof.scanline_effect_cycles / f;
+    s_prof_snap.scanline_order = cpu_prof.scanline_order_cycles / f;
+    s_prof_snap.scanline_affine = cpu_prof.scanline_affine_cycles / f;
+    s_prof_snap.scanline_blank = cpu_prof.scanline_blank_cycles / f;
+    s_prof_snap.sound = cpu_prof.sound_cycles / f;
+    s_prof_snap.dma = cpu_prof.dma_cycles / f;
+    s_prof_snap.timer = cpu_prof.timer_cycles / f;
+    s_prof_snap.dynarec = cpu_prof.dynarec_total_cycles / f;
+    s_prof_snap.dynarec_lookup = cpu_prof.dynarec_lookup_cycles / f;
+    s_prof_snap.dynarec_translate = cpu_prof.dynarec_translate_cycles / f;
+
+    cpu_prof_reset();
 }
 #endif
 
@@ -482,7 +501,7 @@ static esp_err_t flush_backup_image(bool force)
 
 static void load_builtin_bios_image(void)
 {
-    memcpy(bios_rom, open_gba_bios_rom, sizeof(bios_rom));
+    memcpy(bios_rom, open_gba_bios_rom, sizeof(bios_rom));  /* flash→RAM */
 }
 
 static esp_err_t apply_bios_image(const char *bios_path, bool *builtin_bios_active)
@@ -696,7 +715,7 @@ esp_err_t gba_session_init(const gba_session_boot_config_t *config)
     init_sound();
 
     if (!gba_screen_pixels) {
-        gba_screen_pixels = av_pipeline_default_video_buffer();
+        gba_screen_pixels = av_pipeline_video_buffer();
     }
 
     memset(&command, 0, sizeof(command));
@@ -820,9 +839,6 @@ esp_err_t gba_session_process_pending(void)
 
 void gba_emulation_task(void *param)
 {
-    uint32_t slot_index;
-    u16 *video_buffer;
-
     (void)param;
 
     ESP_LOGI(TAG, "Starting emulation now");
@@ -837,24 +853,23 @@ void gba_emulation_task(void *param)
     s_fps_timer_us = esp_timer_get_time();
     gba_session_perf_reset();
 
-    gba_screen_pixels = av_pipeline_default_video_buffer();
-
-    if (av_pipeline_acquire_slot(&slot_index, &video_buffer, portMAX_DELAY) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to acquire initial AV slot");
-        vTaskDelete(NULL);
-        return;
-    }
+    gba_screen_pixels = av_pipeline_video_buffer();
 
     while (1) {
         s_frame_start_us = esp_timer_get_time();
-        int64_t t0, t1;
+        int64_t t0, t1, t_acq0, t_acq1;
+
+        /* Wait for previous frame's async PPA + VSYNC swap.
+         * First iteration: no pending PPA, returns immediately. */
+        t_acq0 = esp_timer_get_time();
+        av_pipeline_begin_frame();
+        t_acq1 = esp_timer_get_time();
 
         if (gba_session_process_pending() != ESP_OK) {
             ESP_LOGW(TAG, "Failed to process pending GBA session request");
         }
 
         if (s_session.stop_requested) {
-            av_pipeline_release_slot(slot_index, portMAX_DELAY);
             break;
         }
 
@@ -888,6 +903,9 @@ void gba_emulation_task(void *param)
         }
         skip_next_frame = 0;
 
+#ifdef CPU_PROFILE_STATS
+        u32 scanline_cyc_before = cpu_prof.scanline_cycles;
+#endif
         t0 = esp_timer_get_time();
 
 #ifdef HAVE_DYNAREC
@@ -909,44 +927,39 @@ void gba_emulation_task(void *param)
         t1 = esp_timer_get_time();
 
         {
-            int64_t t2, t3, t4;
+            int64_t t_sub;
 
-            if (!skip_next_frame) {
-                memcpy(video_buffer, gba_screen_pixels,
-                       GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * sizeof(u16));
-            }
-
-            t2 = esp_timer_get_time();
-
-            if (av_pipeline_submit_slot(slot_index, skip_next_frame != 0, portMAX_DELAY) != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to submit AV slot");
+            if (av_pipeline_submit_frame(skip_next_frame != 0) != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to submit AV frame");
                 vTaskDelete(NULL);
                 return;
             }
 
-            t3 = esp_timer_get_time();
+            t_sub = esp_timer_get_time();
 
             if (s_session.stop_requested) {
+                av_pipeline_begin_frame(); /* drain pending PPA */
                 break;
             }
 
-            if (av_pipeline_acquire_slot(&slot_index, &video_buffer, portMAX_DELAY) != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to acquire AV slot");
-                vTaskDelete(NULL);
-                return;
+            {
+#ifdef CPU_PROFILE_STATS
+                int64_t render_frame_us = (int64_t)(cpu_prof.scanline_cycles - scanline_cyc_before)
+                                        / CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+#else
+                int64_t render_frame_us = 0;
+#endif
+                gba_session_perf_push_single_core(t1 - t0,
+                                                  render_frame_us,
+                                                  t_sub - t1,
+                                                  t_acq1 - t_acq0);
             }
-
-            t4 = esp_timer_get_time();
-            gba_session_perf_push_single_core(t1 - t0,
-                                              t2 - t1,
-                                              t3 - t2,
-                                              t4 - t3);
 
             s_fps_counter++;
             {
-                /* Use t4 (post-acquire, VSYNC-aligned) for accurate FPS */
-                if (t4 - s_fps_timer_us >= 1000000) {
-                    int64_t dt = t4 - s_fps_timer_us;
+                /* Use t_acq1 (post-begin_frame, VSYNC-aligned) for accurate FPS */
+                if (t_acq1 - s_fps_timer_us >= 1000000) {
+                    int64_t dt = t_acq1 - s_fps_timer_us;
                     s_fps_last_x10 = (uint32_t)((uint64_t)s_fps_counter * 10000000 / dt);
                     if (!gpsp_web_server_enabled) {
                         ESP_LOGI(TAG, "FPS: %u.%u | stats window %u frames",
@@ -956,10 +969,10 @@ void gba_emulation_task(void *param)
                         gba_session_perf_log_single_core();
                     }
 #ifdef CPU_PROFILE_STATS
-                    cpu_prof_print();
+                    gba_session_snapshot_cpu_prof();
 #endif
                     s_fps_counter = 0;
-                    s_fps_timer_us = t4;
+                    s_fps_timer_us = t_acq1;
                 }
             }
 
@@ -1011,9 +1024,36 @@ int gba_session_stats_json(char *buf, size_t buf_size)
     if (p >= end) goto trunc;
 
     p += json_stat(p, end, "cpu",     &s_perf_stats.cpu_us);
-    p += json_stat(p, end, "copy",    &s_perf_stats.copy_us);
+    p += json_stat(p, end, "render",  &s_perf_stats.render_us);
     p += json_stat(p, end, "submit",  &s_perf_stats.submit_us);
     p += json_stat(p, end, "acquire", &s_perf_stats.acquire_us);
+
+#ifdef CPU_PROFILE_STATS
+    if (s_prof_snap.frames > 0 && s_prof_snap.total > 0) {
+        int n = snprintf(p, end - p,
+            "\"prof\":{\"total\":%u,\"exec\":%u,\"scan\":%u,"
+            "\"bg\":%u,\"obj\":%u,\"fx\":%u,\"ord\":%u,"
+            "\"aff\":%u,\"blank\":%u,"
+            "\"sound\":%u,\"dma\":%u,\"timer\":%u,"
+            "\"dynarec\":%u,\"drc_lkup\":%u,\"drc_xlat\":%u},",
+            (unsigned)s_prof_snap.total,
+            (unsigned)s_prof_snap.exec,
+            (unsigned)s_prof_snap.scanline,
+            (unsigned)s_prof_snap.scanline_bg,
+            (unsigned)s_prof_snap.scanline_obj,
+            (unsigned)s_prof_snap.scanline_fx,
+            (unsigned)s_prof_snap.scanline_order,
+            (unsigned)s_prof_snap.scanline_affine,
+            (unsigned)s_prof_snap.scanline_blank,
+            (unsigned)s_prof_snap.sound,
+            (unsigned)s_prof_snap.dma,
+            (unsigned)s_prof_snap.timer,
+            (unsigned)s_prof_snap.dynarec,
+            (unsigned)s_prof_snap.dynarec_lookup,
+            (unsigned)s_prof_snap.dynarec_translate);
+        if (n > 0 && p + n < end) p += n;
+    }
+#endif
 
     if (p >= end) goto trunc;
     if (p > buf + 1 && *(p - 1) == ',') p--;

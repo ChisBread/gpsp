@@ -1,5 +1,10 @@
 /*
  * gpsp app support — AV pipeline
+ *
+ * Depth-1 pipeline: the LCD panel owns its own triple-buffered DPI
+ * framebuffers, so we only need a single GBA render buffer.  PPA is
+ * fired asynchronously after each frame and awaited at the start of
+ * the *next* frame, overlapping PPA DMA with emulation work.
  */
 
 #include <string.h>
@@ -9,11 +14,6 @@
 
 static bool audio_enabled;
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/idf_additions.h"
-#include "freertos/queue.h"
-#include "freertos/task.h"
-
 #include "esp_log.h"
 
 #include "audio_driver.h"
@@ -22,18 +22,12 @@ static bool audio_enabled;
 #include "video_driver.h"
 
 #define GBA_FRAME_RATE               59.7275f
-#define AV_PIPELINE_DEPTH            2
 #define AUDIO_FRAME_SAMPLES_MAX      ((GBA_SOUND_FREQUENCY / 50) + 1)
 
 static const char *TAG = "gpsp_av";
 
-static GPSP_EXTRAM_BSS u16 gba_render_buffer[GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
-static GPSP_EXTRAM_BSS u16 gba_framebuffers[AV_PIPELINE_DEPTH][GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
-static GPSP_EXTRAM_BSS int16_t audio_buffers[AV_PIPELINE_DEPTH][AUDIO_FRAME_SAMPLES_MAX * 2];
-static GPSP_EXTRAM_BSS uint32_t audio_buffer_frames[AV_PIPELINE_DEPTH];
-static GPSP_EXTRAM_BSS bool skip_video_submit[AV_PIPELINE_DEPTH];
-static QueueHandle_t av_free_queue;
-static QueueHandle_t av_ready_queue;
+static GPSP_EXTRAM_BSS u16 gba_framebuffer[GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
+static GPSP_EXTRAM_BSS int16_t audio_buffer[AUDIO_FRAME_SAMPLES_MAX * 2];
 static float audio_frame_samples;
 static float audio_frame_fraction;
 
@@ -66,150 +60,55 @@ static uint32_t collect_audio_frame(int16_t *audio_buf, size_t audio_buf_frames)
     return frames_to_read;
 }
 
-static void av_output_task(void *param)
-{
-    (void)param;
-
-    ESP_LOGI(TAG, "AV output task started on core %d", xPortGetCoreID());
-
-    while (1) {
-        uint32_t slot_index;
-
-        if (xQueueReceive(av_ready_queue, &slot_index, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-
-        if (!skip_video_submit[slot_index]) {
-            esp_err_t err = video_driver_submit_frame(gba_framebuffers[slot_index]);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Video submit failed: %s", esp_err_to_name(err));
-            }
-            /* Complete any async PPA and swap the DPI framebuffer.
-             * Without this call, ppa_async mode leaves frames
-             * invisible (draw_bitmap + FB rotation never happen). */
-            video_driver_await_frame();
-        }
-
-        if (audio_enabled && audio_buffer_frames[slot_index] > 0) {
-            esp_err_t err = audio_driver_write(audio_buffers[slot_index],
-                                               audio_buffer_frames[slot_index]);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Audio write failed: %s", esp_err_to_name(err));
-                audio_enabled = false;
-            }
-        }
-
-        xQueueSend(av_free_queue, &slot_index, portMAX_DELAY);
-    }
-}
-
 esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
 {
-    uint32_t slot_index;
-    BaseType_t task_ret;
-
     if (!config) {
         return ESP_ERR_INVALID_ARG;
-    }
-
-    if (av_free_queue || av_ready_queue) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    av_free_queue = xQueueCreate(AV_PIPELINE_DEPTH, sizeof(slot_index));
-    av_ready_queue = xQueueCreate(AV_PIPELINE_DEPTH, sizeof(slot_index));
-    if (!av_free_queue || !av_ready_queue) {
-        return ESP_ERR_NO_MEM;
     }
 
     audio_enabled = config->audio_enabled;
     audio_frame_samples = (float)GBA_SOUND_FREQUENCY / GBA_FRAME_RATE;
     audio_frame_fraction = 0.0f;
 
-    for (slot_index = 0; slot_index < AV_PIPELINE_DEPTH; slot_index++) {
-        audio_buffer_frames[slot_index] = 0;
-        skip_video_submit[slot_index] = false;
-        xQueueSend(av_free_queue, &slot_index, 0);
-    }
-
-    task_ret = xTaskCreatePinnedToCoreWithCaps(
-        av_output_task,
-        "gba_av",
-        config->task_stack_size,
-        NULL,
-        config->task_priority,
-        NULL,
-        config->output_core,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
-    );
-    if (task_ret != pdPASS) {
-        return ESP_FAIL;
-    }
-
+    ESP_LOGI(TAG, "AV pipeline initialised (depth 1, no output task)");
     return ESP_OK;
 }
 
-u16 *av_pipeline_default_video_buffer(void)
+u16 *av_pipeline_video_buffer(void)
 {
-    return gba_render_buffer;
+    return gba_framebuffer;
 }
 
-esp_err_t av_pipeline_acquire_slot(uint32_t *slot_index, u16 **video_buffer,
-                                   TickType_t timeout)
+void av_pipeline_begin_frame(void)
 {
-    uint32_t local_slot_index;
-
-    if (!slot_index || !video_buffer) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    if (!av_free_queue) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (xQueueReceive(av_free_queue, &local_slot_index, timeout) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    *slot_index = local_slot_index;
-    *video_buffer = gba_framebuffers[local_slot_index];
-    return ESP_OK;
+    /* Complete any async PPA from the previous frame and swap the
+     * DPI framebuffer.  On the very first call (no pending PPA)
+     * this returns immediately. */
+    video_driver_await_frame();
 }
 
-esp_err_t av_pipeline_release_slot(uint32_t slot_index, TickType_t timeout)
+esp_err_t av_pipeline_submit_frame(bool skip_video)
 {
-    if (slot_index >= AV_PIPELINE_DEPTH) {
-        return ESP_ERR_INVALID_ARG;
+    if (!skip_video) {
+        esp_err_t err = video_driver_submit_frame(gba_framebuffer);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Video submit failed: %s", esp_err_to_name(err));
+            return err;
+        }
+        /* PPA is now running asynchronously; the next call to
+         * av_pipeline_begin_frame() will wait for completion. */
     }
 
-    if (!av_free_queue) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (xQueueSend(av_free_queue, &slot_index, timeout) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    return ESP_OK;
-}
-
-esp_err_t av_pipeline_submit_slot(uint32_t slot_index, bool skip_video,
-                                  TickType_t timeout)
-{
-    if (slot_index >= AV_PIPELINE_DEPTH) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    if (!av_ready_queue) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    skip_video_submit[slot_index] = skip_video;
-    audio_buffer_frames[slot_index] = collect_audio_frame(audio_buffers[slot_index],
-                                                          AUDIO_FRAME_SAMPLES_MAX);
-
-    if (xQueueSend(av_ready_queue, &slot_index, timeout) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
+    if (audio_enabled) {
+        uint32_t frames = collect_audio_frame(audio_buffer,
+                                              AUDIO_FRAME_SAMPLES_MAX);
+        if (frames > 0) {
+            esp_err_t err = audio_driver_write(audio_buffer, frames);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Audio write failed: %s", esp_err_to_name(err));
+                audio_enabled = false;
+            }
+        }
     }
 
     return ESP_OK;
