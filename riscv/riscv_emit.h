@@ -486,9 +486,11 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     else                                                                      \
     {                                                                         \
         /* If cycles >= 0, skip the update_gba() call and jump to target. */  \
-        rv_bge(reg_cycles, reg_zero, 20);                                     \
+        u8 *_bge_ptr = translation_ptr;                                       \
+        rv_bge(reg_cycles, reg_zero, 0);       /* placeholder offset */       \
         generate_load_pc_2inst(reg_a0, new_pc);                               \
         generate_function_call(rv_update_gba);                                \
+        rv_patch_branch((u32 *)_bge_ptr, translation_ptr);                    \
         emit_branch_filler(writeback_location);                               \
     }
 
