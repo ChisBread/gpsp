@@ -809,11 +809,21 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define generate_op_eor_imm(_rd, _rn)                                         \
     generate_alu_imm(xori, xor, _rd, _rn, imm)                                \
 
+#ifdef HAVE_ZBB
+#define generate_op_bic_imm(_rd, _rn)                                         \
+{                                                                             \
+    generate_load_imm(reg_temp3, (imm));                                      \
+    rv_andn(_rd, _rn, reg_temp3);                                             \
+}                                                                             \
+
+#else
 #define generate_op_bic_imm(_rd, _rn)                                         \
 {                                                                             \
     generate_load_imm(reg_temp3, ~(imm));                                     \
     rv_and(_rd, _rn, reg_temp3);                                              \
 }                                                                             \
+
+#endif
 
 #define generate_op_and_reg(_rd, _rn, _rm)                                    \
     rv_and(_rd, _rn, _rm)                                                     \
@@ -824,11 +834,18 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define generate_op_eor_reg(_rd, _rn, _rm)                                    \
     rv_xor(_rd, _rn, _rm)                                                     \
 
+#ifdef HAVE_ZBB
+#define generate_op_bic_reg(_rd, _rn, _rm)                                    \
+    rv_andn(_rd, _rn, _rm)                                                    \
+
+#else
 #define generate_op_bic_reg(_rd, _rn, _rm)                                    \
 {                                                                             \
     rv_xori(reg_temp3, _rm, -1);                                              \
     rv_and(_rd, _rn, reg_temp3);                                              \
 }                                                                             \
+
+#endif
 
 #define generate_op_muls_reg(_rd, _rn, _rm)                                   \
     rv_mul(_rd, _rn, _rm);                                                    \
