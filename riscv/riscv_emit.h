@@ -341,7 +341,8 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 }
 
 #define generate_load_reg(ireg, reg_index)                                    \
-    rv_mv(ireg, arm_to_rv_reg[reg_index])                                       \
+    do { if ((u32)(ireg) != arm_to_rv_reg[reg_index])                           \
+        rv_mv(ireg, arm_to_rv_reg[reg_index]); } while(0)
 
 #define generate_load_imm(ireg, imm)                                          \
     rv_load_imm32(ireg, imm)                                                    \
@@ -363,7 +364,8 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 }
 
 #define generate_store_reg(ireg, reg_index)                                   \
-    rv_mv(arm_to_rv_reg[reg_index], ireg)                                       \
+    do { if ((u32)(ireg) != arm_to_rv_reg[reg_index])                           \
+        rv_mv(arm_to_rv_reg[reg_index], ireg); } while(0)
 
 #define generate_logical_imm(optype, ireg_dest, ireg_src, imm)                \
     generate_load_imm(reg_temp, imm);                                           \
@@ -381,7 +383,8 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     }                                                                           \
 
 #define generate_mov(ireg_dest, ireg_src)                                     \
-    rv_mv(arm_to_rv_reg[ireg_dest], arm_to_rv_reg[ireg_src])                    \
+    do { if ((ireg_dest) != (ireg_src))                                         \
+        rv_mv(arm_to_rv_reg[ireg_dest], arm_to_rv_reg[ireg_src]); } while(0)
 
 #define generate_add_imm(ireg_dest, ireg_src, imm)                            \
     generate_alu_imm(addi, add, ireg_dest, ireg_src, imm)                      \
