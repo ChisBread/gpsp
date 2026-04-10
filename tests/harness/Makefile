@@ -56,7 +56,12 @@ else ifeq ($(ARCH),riscv)
   JIT_S    = $(ROOT)/riscv/riscv_stub.S
   ARCH_INC = -I$(ROOT)/riscv
   ARCH_DEF = -DRISCV_ARCH
-  MARCH    = -march=rv32gc -mabi=ilp32d
+  ifeq ($(ZBB),1)
+    MARCH    = -march=rv32gc_zbb -mabi=ilp32d
+    ARCH_DEF += -DHAVE_ZBB
+  else
+    MARCH    = -march=rv32gc -mabi=ilp32d
+  endif
   STATIC   = -static
   LDLIBS   = -lm -lgcc -lc -lgcc
 else

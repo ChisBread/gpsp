@@ -248,6 +248,56 @@
 
 /* ---- Rotate helpers (synthesized for RV32IMAC without Zbb) ---- */
 /* NOTE: slli/sll MUST come before srli/srl so that rd==rs is safe. */
+
+#ifdef HAVE_ZBB
+/* Zbb native rotate: single instruction */
+/* ROR: funct7=0x30, funct3=0x5, opcode=0x33 */
+#define rv_ror_native(rd, rs1, rs2) rv_r_type(0x30, rs2, rs1, 0x5, rd, RV_OP_REG)
+/* RORI: funct7=0x30, funct3=0x5, opcode=0x13 (I-type with shamt) */
+#define rv_rori_native(rd, rs, shamt) \
+    rv_i_type((0x600 | ((shamt) & 0x1F)), rs, 0x5, rd, RV_OP_IMM)
+/* ROL: funct7=0x30, funct3=0x1, opcode=0x33 */
+#define rv_rol_native(rd, rs1, rs2) rv_r_type(0x30, rs2, rs1, 0x1, rd, RV_OP_REG)
+
+/* SEXT.B: funct7=0x30, rs2=0x04, funct3=0x1, opcode=0x13 */
+#define rv_sext_b(rd, rs) rv_i_type(0x604, rs, 0x1, rd, RV_OP_IMM)
+/* SEXT.H: funct7=0x30, rs2=0x05, funct3=0x1, opcode=0x13 */
+#define rv_sext_h(rd, rs) rv_i_type(0x605, rs, 0x1, rd, RV_OP_IMM)
+/* ZEXT.H: funct7=0x04, rs2=0x00, funct3=0x4, opcode=0x33 (pack) */
+#define rv_zext_h(rd, rs) rv_r_type(0x04, rv_zero, rs, 0x4, rd, RV_OP_REG)
+/* MIN/MAX */
+#define rv_min(rd, rs1, rs2)  rv_r_type(0x05, rs2, rs1, 0x4, rd, RV_OP_REG)
+#define rv_max(rd, rs1, rs2)  rv_r_type(0x05, rs2, rs1, 0x6, rd, RV_OP_REG)
+#define rv_minu(rd, rs1, rs2) rv_r_type(0x05, rs2, rs1, 0x5, rd, RV_OP_REG)
+#define rv_maxu(rd, rs1, rs2) rv_r_type(0x05, rs2, rs1, 0x7, rd, RV_OP_REG)
+/* ANDN/ORN/XNOR */
+#define rv_andn(rd, rs1, rs2) rv_r_type(0x20, rs2, rs1, 0x7, rd, RV_OP_REG)
+#define rv_orn(rd, rs1, rs2)  rv_r_type(0x20, rs2, rs1, 0x6, rd, RV_OP_REG)
+#define rv_xnor(rd, rs1, rs2) rv_r_type(0x20, rs2, rs1, 0x4, rd, RV_OP_REG)
+/* CLZ/CTZ/CPOP */
+#define rv_clz(rd, rs)  rv_i_type(0x600, rs, 0x1, rd, RV_OP_IMM)
+#define rv_ctz(rd, rs)  rv_i_type(0x601, rs, 0x1, rd, RV_OP_IMM)
+#define rv_cpop(rd, rs) rv_i_type(0x602, rs, 0x1, rd, RV_OP_IMM)
+/* REV8 (byte-reverse) */
+#define rv_rev8(rd, rs) rv_i_type(0x698, rs, 0x5, rd, RV_OP_IMM)
+/* ORC.B (or-combine bytes) */
+#define rv_orc_b(rd, rs) rv_i_type(0x287, rs, 0x5, rd, RV_OP_IMM)
+
+#define rv_rori(rd, rs, shamt, tmp) do {                   \
+    u32 _shamt = (u32)(shamt) & 31;                        \
+    if (_shamt == 0) {                                     \
+        rv_mv(rd, rs);                                     \
+    } else {                                               \
+        rv_rori_native(rd, rs, _shamt);                    \
+    }                                                      \
+} while(0)
+
+#define rv_ror(rd, rs, shreg, tmp, tmp2) do {              \
+    rv_ror_native(rd, rs, shreg);                          \
+} while(0)
+
+#else /* !HAVE_ZBB */
+
 #define rv_rori(rd, rs, shamt, tmp) do {                   \
     u32 _shamt = (u32)(shamt) & 31;                        \
     if (_shamt == 0) {                                     \
@@ -267,6 +317,8 @@
     rv_srl(rd, rs, tmp);                                   \
     rv_or(rd, rd, tmp2);                                   \
 } while(0)
+
+#endif /* HAVE_ZBB */
 
 /* ---- Load 32-bit immediate (variable length: 1 or 2 instructions) ----
  * Zero -> mv (1 inst), small +/-2047 -> addi (1), upper-only -> lui (1),
