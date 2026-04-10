@@ -99,6 +99,12 @@ endif()
 # Aggressive optimization for hot emulation code
 target_compile_options(${COMPONENT_LIB} PRIVATE -O3)
 
+# Enable Zbb (bit-manipulation) extension for ESP32-P4
+if(CONFIG_IDF_TARGET_ESP32P4)
+    target_compile_options(${COMPONENT_LIB} PRIVATE -march=rv32imafc_zicsr_zifencei_zbb)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC HAVE_ZBB)
+endif()
+
 # Suppress warnings in upstream code (treated as errors by IDF default)
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error
