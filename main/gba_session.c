@@ -976,17 +976,18 @@ void gba_emulation_task(void *param)
         s_frame_start_us = esp_timer_get_time();
         int64_t t0, t1, t_acq0, t_acq1;
 
-        /* Wait for previous frame's async PPA + VSYNC swap.
-         * First iteration: no pending PPA, returns immediately. */
-        t_acq0 = esp_timer_get_time();
-        av_pipeline_begin_frame();
-        t_acq1 = esp_timer_get_time();
+        if (s_session.control_queue &&
+            uxQueueMessagesWaiting(s_session.control_queue) > 0) {
+            av_pipeline_wait_for_previous_frame();
+            gba_screen_pixels = av_pipeline_video_buffer();
+        }
 
         if (gba_session_process_pending() != ESP_OK) {
             ESP_LOGW(TAG, "Failed to process pending GBA session request");
         }
 
         if (s_session.stop_requested) {
+            av_pipeline_wait_for_previous_frame(); /* drain pending PPA */
             break;
         }
 
@@ -1052,6 +1053,14 @@ void gba_emulation_task(void *param)
 
         {
             int64_t t_sub;
+            int64_t submit_frame_us;
+
+            /* Emulation has finished writing this GBA buffer. Before
+             * submitting it, wait for the previous async PPA + VSYNC
+             * handoff so the video driver can accept the next frame. */
+            t_acq0 = esp_timer_get_time();
+            av_pipeline_wait_for_previous_frame();
+            t_acq1 = esp_timer_get_time();
 
             if (av_pipeline_submit_frame(skip_next_frame != 0) != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to submit AV frame");
@@ -1059,12 +1068,10 @@ void gba_emulation_task(void *param)
                 return;
             }
 
-            t_sub = esp_timer_get_time();
+            gba_screen_pixels = av_pipeline_video_buffer();
 
-            if (s_session.stop_requested) {
-                av_pipeline_begin_frame(); /* drain pending PPA */
-                break;
-            }
+            t_sub = esp_timer_get_time();
+            submit_frame_us = t_sub - t_acq1;
 
             {
 #ifdef CPU_PROFILE_STATS
@@ -1075,13 +1082,13 @@ void gba_emulation_task(void *param)
 #endif
                 gba_session_perf_push_single_core(t1 - t0,
                                                   render_frame_us,
-                                                  t_sub - t1,
+                                                  submit_frame_us,
                                                   t_acq1 - t_acq0);
             }
 
             s_fps_counter++;
             {
-                /* Use t_acq1 (post-begin_frame, VSYNC-aligned) for accurate FPS */
+                /* Use t_acq1 (post-wait, VSYNC-aligned) for accurate FPS. */
                 if (t_acq1 - s_fps_timer_us >= 1000000) {
                     int64_t dt = t_acq1 - s_fps_timer_us;
                     s_fps_last_x10 = (uint32_t)((uint64_t)s_fps_counter * 10000000 / dt);

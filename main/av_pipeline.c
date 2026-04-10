@@ -1,10 +1,11 @@
 /*
  * gpsp app support — AV pipeline
  *
- * Depth-1 pipeline: the LCD panel owns its own triple-buffered DPI
- * framebuffers, so we only need a single GBA render buffer.  PPA is
+ * Depth-2 pipeline: the LCD panel owns its own triple-buffered DPI
+ * framebuffers, and the emulator keeps two GBA render buffers. PPA is
  * fired asynchronously after each frame and awaited at the start of
- * the *next* frame, overlapping PPA DMA with emulation work.
+ * the next frame, so emulation can render into the alternate GBA buffer
+ * while PPA DMA is still consuming the previous one.
  *
  * Audio is offloaded to a dedicated FreeRTOS task on the service core
  * so that sound_read_samples + resample + i2s_write (~1 ms) do not
@@ -28,16 +29,19 @@ static bool audio_enabled;
 #include "video_driver.h"
 
 #define GBA_FRAME_RATE               59.7275f
+#define GBA_RENDER_FB_COUNT          2
 #define AUDIO_FRAME_SAMPLES_MAX      ((GBA_SOUND_FREQUENCY / 50) + 1)
 #define AUDIO_TASK_STACK_SIZE        6144
 #define AUDIO_TASK_PRIORITY          (configMAX_PRIORITIES - 2)
 
 static const char *TAG = "gpsp_av";
 
-static GPSP_EXTRAM_BSS u16 gba_framebuffer[GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
+static GPSP_EXTRAM_BSS u16 gba_framebuffers[GBA_RENDER_FB_COUNT][GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
 static GPSP_EXTRAM_BSS int16_t audio_buffer[AUDIO_FRAME_SAMPLES_MAX * 2];
 static float audio_frame_samples;
 static float audio_frame_fraction;
+static uint32_t current_render_fb;
+static bool video_frame_pending;
 
 static TaskHandle_t audio_task_handle;
 
@@ -102,6 +106,8 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
     audio_enabled = config->audio_enabled;
     audio_frame_samples = (float)GBA_SOUND_FREQUENCY / GBA_FRAME_RATE;
     audio_frame_fraction = 0.0f;
+    current_render_fb = 0;
+    video_frame_pending = false;
 
     if (audio_enabled) {
         BaseType_t core = (CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0;
@@ -126,27 +132,35 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
 
 u16 *av_pipeline_video_buffer(void)
 {
-    return gba_framebuffer;
+    return gba_framebuffers[current_render_fb];
 }
 
-void av_pipeline_begin_frame(void)
+void av_pipeline_wait_for_previous_frame(void)
 {
-    /* Complete any async PPA from the previous frame and swap the
-     * DPI framebuffer.  On the very first call (no pending PPA)
-     * this returns immediately. */
+    if (!video_frame_pending) {
+        return;
+    }
+
+    /* Complete the previous frame's PPA + VSYNC pacing before the next
+     * submit reuses the video driver's async path. */
     video_driver_await_frame();
+    video_frame_pending = false;
 }
 
 esp_err_t av_pipeline_submit_frame(bool skip_video)
 {
     if (!skip_video) {
-        esp_err_t err = video_driver_submit_frame(gba_framebuffer);
+        esp_err_t err = video_driver_submit_frame(gba_framebuffers[current_render_fb]);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "Video submit failed: %s", esp_err_to_name(err));
             return err;
         }
-        /* PPA is now running asynchronously; the next call to
-         * av_pipeline_begin_frame() will wait for completion. */
+        current_render_fb = (current_render_fb + 1) % GBA_RENDER_FB_COUNT;
+
+        /* The next av_pipeline_wait_for_previous_frame() waits for
+         * completion while the emulator is already rendering into the
+         * alternate GBA buffer. */
+        video_frame_pending = true;
     }
 
     if (audio_enabled && audio_task_handle) {
