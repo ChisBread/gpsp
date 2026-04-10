@@ -1144,7 +1144,18 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_op_eors_reg(reg_temp2, _rn, _rm)                                 \
 
 #define generate_op_cmp_imm(_rd, _rn)                                         \
-    generate_op_subs_imm(reg_temp2, _rn)                                      \
+    if (imm == 0)                                                             \
+    {                                                                         \
+        generate_op_logic_flags(_rn)                                          \
+        if (check_generate_c_flag)                                            \
+            rv_addi(reg_c_cache, rv_zero, 1);                                 \
+        if (check_generate_v_flag)                                            \
+            rv_mv(reg_v_cache, rv_zero);                                      \
+    }                                                                         \
+    else                                                                      \
+    {                                                                         \
+        generate_op_subs_imm(reg_temp2, _rn)                                  \
+    }
 
 #define generate_op_cmn_imm(_rd, _rn)                                         \
     generate_op_adds_imm(reg_temp2, _rn)                                      \
@@ -1429,17 +1440,20 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define arm_block_memory_store()                                              \
     generate_load_reg_pc(reg_a1, i, 8);                                       \
-    generate_load_pc(reg_a2, (pc + 4));                                 \
     generate_function_call(rv_execute_aligned_store32)                        \
 
 #define arm_block_memory_final_load(writeback_type)                           \
     arm_block_memory_load()                                                   \
 
 #define arm_block_memory_final_store(writeback_type)                          \
-    generate_load_pc(reg_a2, (pc + 4));                                 \
     generate_load_reg(reg_a1, i);                                             \
     arm_block_memory_writeback_post_store(writeback_type);                    \
     generate_function_call(rv_execute_store_u32)                              \
+
+#define arm_block_memory_preload_pc_store()                                   \
+    generate_load_pc(reg_a2, (pc + 4))                                        \
+
+#define arm_block_memory_preload_pc_load()                                    \
 
 #define arm_block_memory_adjust_pc_store()                                    \
 
@@ -1490,8 +1504,8 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     arm_block_memory_offset_##offset_type();                                  \
     arm_block_memory_writeback_pre_##access_type(writeback_type);             \
                                                                               \
-    generate_load_imm(reg_temp, ~3u);                                         \
-    rv_and(reg_save0, reg_save0, reg_temp);                                   \
+    rv_andi(reg_save0, reg_save0, -4);                                   \
+    arm_block_memory_preload_pc_##access_type();                              \
                                                                               \
     for (i = 0; i < 16; i++)                                                  \
     {                                                                         \
@@ -1801,14 +1815,12 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define thumb_block_memory_store()                                            \
     generate_load_reg(reg_a1, i);                                             \
-    generate_load_pc(reg_a2, (pc + 2));                                 \
     generate_function_call(rv_execute_aligned_store32);                       \
 
 #define thumb_block_memory_final_load()                                       \
     thumb_block_memory_load()                                                 \
 
 #define thumb_block_memory_final_store()                                      \
-    generate_load_pc(reg_a2, (pc + 2));                                 \
     generate_load_reg(reg_a1, i);                                             \
     generate_function_call(rv_execute_store_u32);                             \
 
@@ -1827,6 +1839,11 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define thumb_block_memory_final_pop_pc(access_type)                          \
     thumb_block_memory_##access_type()                                        \
 
+#define thumb_block_memory_preload_pc_store()                                 \
+    generate_load_pc(reg_a2, (pc + 2))                                        \
+
+#define thumb_block_memory_preload_pc_load()                                  \
+
 #define thumb_block_memory_extra_no()                                         \
 
 #define thumb_block_memory_extra_up()                                         \
@@ -1836,7 +1853,6 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define thumb_block_memory_extra_push_lr()                                    \
     generate_add_imm(reg_a0, reg_save0, (bit_count[reg_list] * 4));           \
     generate_load_reg(reg_a1, REG_LR);                                        \
-    generate_load_pc(reg_a2, (pc + 2));                                 \
     generate_function_call(rv_execute_aligned_store32);                       \
 
 #define thumb_block_memory_extra_pop_pc()                                     \
@@ -1853,8 +1869,8 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
                                                                               \
     thumb_block_address_preadjust_##pre_op(base_reg);                         \
                                                                               \
-    generate_load_imm(reg_temp, ~3u);                                         \
-    rv_and(reg_save0, reg_save0, reg_temp);                                   \
+    rv_andi(reg_save0, reg_save0, -4);                                   \
+    thumb_block_memory_preload_pc_##access_type();                            \
                                                                               \
     thumb_block_address_postadjust_##post_op(base_reg);                       \
                                                                               \
