@@ -132,16 +132,16 @@ typedef struct {
     u32 dynarec_lookup_misses;
 } cpu_prof_snapshot_t;
 
-static cpu_prof_snapshot_t s_prof_snap;
+static GPSP_EXTRAM_BSS cpu_prof_snapshot_t s_prof_snap;
 #endif
 
 static const char *TAG = "gpsp_session";
-static gba_session_state_t s_session;
+static GPSP_EXTRAM_BSS gba_session_state_t s_session;
 static int64_t s_frame_start_us;
 static uint32_t s_fps_counter;
 static uint32_t s_fps_last_x10;   /* FPS × 10, e.g. 597 = 59.7 */
 static int64_t s_fps_timer_us;
-static gba_session_perf_stats_t s_perf_stats;
+static GPSP_EXTRAM_BSS gba_session_perf_stats_t s_perf_stats;
 
 static int compare_int64_ascending(const void *lhs, const void *rhs)
 {

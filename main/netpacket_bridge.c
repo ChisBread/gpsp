@@ -67,7 +67,7 @@ static int64_t netpacket_last_hello_us;
 static bool netpacket_ready_logged;
 static bool netpacket_local_unassigned_logged;
 static struct sockaddr_in netpacket_broadcast_addr;
-static netpacket_peer_state_t netpacket_peers[MAX_RFU_NETPLAYERS];
+static GPSP_EXTRAM_BSS netpacket_peer_state_t netpacket_peers[MAX_RFU_NETPLAYERS];
 static uint64_t netpacket_local_node_uid;
 static bool netpacket_local_assigned;
 

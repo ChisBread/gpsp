@@ -59,7 +59,7 @@ int ismemzero(const void *ptr, size_t bytes) {
   return 1;
 }
 
-static union {
+static GPSP_EXTRAM_BSS union {
   struct {
     struct {
       u16 data[MAX_QPACK][8];

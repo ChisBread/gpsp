@@ -998,8 +998,8 @@ static const u8 obj_dim_table[3][4][2] = {
 };
 
 static GPSP_EXTRAM_BSS u8 obj_priority_list[5][160][128];
-static u8 obj_priority_count[5][160];
-static u8 obj_alpha_count[160];
+static GPSP_EXTRAM_BSS u8 obj_priority_count[5][160];
+static GPSP_EXTRAM_BSS u8 obj_alpha_count[160];
 
 typedef struct {
   s32 obj_x, obj_y;

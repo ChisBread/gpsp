@@ -223,19 +223,17 @@ void app_main(void)
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
              (unsigned)CONFIG_GPSP_EMU_TASK_STACK_SIZE);
 
-    /* Start emulation on the configured core.
-     * The emu task needs a large stack for dynarec recursion, so place
-     * that stack in PSRAM instead of consuming the largest internal block. */
-    BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(
+    /* Start emulation on the configured core */
+    BaseType_t ret = xTaskCreatePinnedToCore(
         gba_emulation_task,
         "gba_emu",
         CONFIG_GPSP_EMU_TASK_STACK_SIZE,
         NULL,
         configMAX_PRIORITIES - 1,   /* Highest priority */
         NULL,
-        CONFIG_GPSP_EMULATION_CORE,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+        CONFIG_GPSP_EMULATION_CORE
     );
+
 
     if (ret != pdPASS) {
         ESP_LOGE(TAG,

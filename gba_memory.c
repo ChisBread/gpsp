@@ -358,24 +358,24 @@ dma_transfer_type dma[4];
 // mapping system. We will try to allocate 32 of them to allow loading
 // ROMs up to 32MB, but we might fail on memory constrained systems.
 
-u8 *gamepak_buffers[32];    /* Pointers to malloc'ed blocks */
-u32 gamepak_buffer_count;   /* Value between 1 and 32 */
-u32 gamepak_size;           /* Size of the ROM in bytes */
+GPSP_EXTRAM_BSS u8 *gamepak_buffers[32];    /* Pointers to malloc'ed blocks */
+GPSP_EXTRAM_BSS u32 gamepak_buffer_count;   /* Value between 1 and 32 */
+GPSP_EXTRAM_BSS u32 gamepak_size;           /* Size of the ROM in bytes */
 // We allocate in 1MB chunks.
 const unsigned gamepak_buffer_blocksize = 1024*1024;
 
 // LRU queue with the loaded blocks and what they map to
-struct {
+GPSP_EXTRAM_BSS struct {
   u16 next_lru;             /* Index in the struct to the next LRU entry */
   s16 phy_rom;              /* ROM page number (-1 means not mapped) */
 } gamepak_blk_queue[1024];
 
-u16 gamepak_lru_head;
-u16 gamepak_lru_tail;
+GPSP_EXTRAM_BSS u16 gamepak_lru_head;
+GPSP_EXTRAM_BSS u16 gamepak_lru_tail;
 
 // Stick page bit: prevents page eviction for a frame. This is used to prevent
 // unmapping code pages while being used (ie. in the interpreter).
-u32 gamepak_sticky_bit[1024/32];
+GPSP_EXTRAM_BSS u32 gamepak_sticky_bit[1024/32];
 
 #define gamepak_sb_test(idx) \
  (gamepak_sticky_bit[((unsigned)(idx)) >> 5] & (1 << (((unsigned)(idx)) & 31)))
