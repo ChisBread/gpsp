@@ -178,17 +178,9 @@ u32 function_cc update_gba(int remaining_cycles)
           if(reg[OAM_UPDATED])
             oam_update_count++;
 
-#ifdef DUAL_CORE_PPU
-          /* Push an IO snapshot for this scanline; the render task on
-           * Core 0 will run update_scanline() later. */
-          CPU_PROF_SCOPE_BEGIN(scanline_begin);
-          ppu_pipeline_submit_scanline();
-          CPU_PROF_SCOPE_ACC(scanline_cycles, scanline_begin);
-#else
           CPU_PROF_SCOPE_BEGIN(scanline_begin);
           update_scanline();
           CPU_PROF_SCOPE_ACC(scanline_cycles, scanline_begin);
-#endif
 
           // Trigger the HBlank DMAs if enabled
           for (i = 0; i < 4; i++)
@@ -219,13 +211,8 @@ u32 function_cc update_gba(int remaining_cycles)
           u32 i;
           dispstat |= 0x01;
 
-#ifdef DUAL_CORE_PPU
-          /* Affine reload is handled by the render core from IO
-           * snapshots — nothing to do here in dual-core mode. */
-#else
           // Reinit affine transformation counters for the next frame
           video_reload_counters();
-#endif
 
           // Trigger VBlank interrupt if enabled
           if (dispstat & 0x8)
@@ -263,19 +250,9 @@ u32 function_cc update_gba(int remaining_cycles)
           flush_ram_count = 0;
 
           // Force audio generation. Need to flush samples for this frame.
-#ifndef DUAL_CORE_PPU
           CPU_PROF_SCOPE_BEGIN(sound_begin);
           render_gbc_sound();
           CPU_PROF_SCOPE_ACC(sound_cycles, sound_begin);
-#endif
-
-#ifdef DUAL_CORE_PPU
-          /* All VBlank processing is now complete (VBlank DMA at
-           * vcount=160 AND CPU instructions during vcount 161-227).
-           * Snapshot OAM/palette/VRAM and queue the frame for the
-           * render core. */
-          ppu_pipeline_flush_frame(skip_next_frame);
-#endif
 
           // We completed a frame, tell the dynarec to exit to the main thread
           frame_complete = 0x80000000;

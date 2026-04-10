@@ -29,10 +29,6 @@
 #include "web_server.h"
 #include "runtime_config.h"
 
-#ifdef DUAL_CORE_PPU
-#include "ppu_pipeline.h"
-#endif
-
 #define GBA_SESSION_PATH_MAX 512
 #define GBA_SESSION_QUEUE_LEN 4
 #define GBA_SESSION_AUTOSAVE_PERIOD_US (5 * 1000 * 1000)
@@ -98,16 +94,6 @@ typedef struct {
     frame_stat_window_t copy_us;
     frame_stat_window_t submit_us;
     frame_stat_window_t acquire_us;
-#ifdef DUAL_CORE_PPU
-    frame_stat_window_t emu_us;
-    frame_stat_window_t wait_us;
-    frame_stat_window_t wait_render_us;
-    frame_stat_window_t wait_buf_us;
-    frame_stat_window_t wait_pace_us;
-    frame_stat_window_t render_scan_us;
-    frame_stat_window_t render_video_us;
-    frame_stat_window_t render_audio_us;
-#endif
 } gba_session_perf_stats_t;
 
 static const char *TAG = "gpsp_session";
@@ -192,7 +178,6 @@ static void gba_session_perf_reset(void)
     memset(&s_perf_stats, 0, sizeof(s_perf_stats));
 }
 
-#ifndef DUAL_CORE_PPU
 static void gba_session_perf_push_single_core(int64_t cpu_us,
                                               int64_t copy_us,
                                               int64_t submit_us,
@@ -232,83 +217,6 @@ static void gba_session_perf_log_single_core(void)
              acquire_buf,
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024));
 }
-#else
-static void gba_session_perf_push_dual_core(int64_t emu_us,
-                                            int64_t cpu_us,
-                                            int64_t wait_us,
-                                            int64_t wait_render_us,
-                                            int64_t wait_buf_us,
-                                            int64_t wait_pace_us,
-                                            int64_t render_scan_us,
-                                            int64_t render_video_us,
-                                            int64_t render_audio_us)
-{
-    frame_stat_window_push(&s_perf_stats.emu_us, emu_us);
-    frame_stat_window_push(&s_perf_stats.cpu_us, cpu_us);
-    frame_stat_window_push(&s_perf_stats.wait_us, wait_us);
-    frame_stat_window_push(&s_perf_stats.wait_render_us, wait_render_us);
-    frame_stat_window_push(&s_perf_stats.wait_buf_us, wait_buf_us);
-    frame_stat_window_push(&s_perf_stats.wait_pace_us, wait_pace_us);
-    frame_stat_window_push(&s_perf_stats.render_scan_us, render_scan_us);
-    frame_stat_window_push(&s_perf_stats.render_video_us, render_video_us);
-    frame_stat_window_push(&s_perf_stats.render_audio_us, render_audio_us);
-}
-
-static void gba_session_perf_log_dual_core(uint32_t audio_drop_count,
-                                           uint32_t audio_queue_peak)
-{
-    char emu_buf[48];
-    char cpu_buf[48];
-    char wait_buf[48];
-    char wait_render_buf[48];
-    char wait_pipe_buf[48];
-    char wait_pace_buf[48];
-    char render_scan_buf[48];
-    char render_video_buf[48];
-    char render_audio_buf[48];
-    frame_stat_summary_t emu = frame_stat_window_summarize(&s_perf_stats.emu_us);
-    frame_stat_summary_t cpu = frame_stat_window_summarize(&s_perf_stats.cpu_us);
-    frame_stat_summary_t wait = frame_stat_window_summarize(&s_perf_stats.wait_us);
-    frame_stat_summary_t wait_render = frame_stat_window_summarize(&s_perf_stats.wait_render_us);
-    frame_stat_summary_t wait_pipe = frame_stat_window_summarize(&s_perf_stats.wait_buf_us);
-    frame_stat_summary_t wait_pace = frame_stat_window_summarize(&s_perf_stats.wait_pace_us);
-    frame_stat_summary_t render_scan = frame_stat_window_summarize(&s_perf_stats.render_scan_us);
-    frame_stat_summary_t render_video = frame_stat_window_summarize(&s_perf_stats.render_video_us);
-    frame_stat_summary_t render_audio = frame_stat_window_summarize(&s_perf_stats.render_audio_us);
-
-    format_frame_stat_summary(emu_buf, sizeof(emu_buf), &emu);
-    format_frame_stat_summary(cpu_buf, sizeof(cpu_buf), &cpu);
-    format_frame_stat_summary(wait_buf, sizeof(wait_buf), &wait);
-    format_frame_stat_summary(wait_render_buf, sizeof(wait_render_buf), &wait_render);
-    format_frame_stat_summary(wait_pipe_buf, sizeof(wait_pipe_buf), &wait_pipe);
-    format_frame_stat_summary(wait_pace_buf, sizeof(wait_pace_buf), &wait_pace);
-    format_frame_stat_summary(render_scan_buf, sizeof(render_scan_buf), &render_scan);
-    format_frame_stat_summary(render_video_buf, sizeof(render_video_buf), &render_video);
-    format_frame_stat_summary(render_audio_buf, sizeof(render_audio_buf), &render_audio);
-
-    ESP_LOGI(TAG,
-             "Frame CPU    (%u samples): emu [%s] | core [%s] | wait [%s]",
-             (unsigned)emu.sample_count,
-             emu_buf,
-             cpu_buf,
-             wait_buf);
-    ESP_LOGI(TAG,
-             "Frame Wait   (%u samples): render [%s] | buffer [%s] | pace [%s]",
-             (unsigned)wait_render.sample_count,
-             wait_render_buf,
-             wait_pipe_buf,
-             wait_pace_buf);
-    ESP_LOGI(TAG,
-             "Frame Render (%u samples): scan [%s] | video [%s] | audio [%s] | adrop %u qpeak %u | heap %u KB",
-             (unsigned)render_scan.sample_count,
-             render_scan_buf,
-             render_video_buf,
-             render_audio_buf,
-             (unsigned)audio_drop_count,
-             (unsigned)audio_queue_peak,
-             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024));
-}
-#endif
 
 #ifdef CPU_PROFILE_STATS
 static void log_scanline_breakdown(void)
@@ -787,11 +695,9 @@ esp_err_t gba_session_init(const gba_session_boot_config_t *config)
     init_main();
     init_sound();
 
-#ifndef DUAL_CORE_PPU
     if (!gba_screen_pixels) {
         gba_screen_pixels = av_pipeline_default_video_buffer();
     }
-#endif
 
     memset(&command, 0, sizeof(command));
     command.type = GBA_SESSION_CMD_RELOAD;
@@ -914,10 +820,8 @@ esp_err_t gba_session_process_pending(void)
 
 void gba_emulation_task(void *param)
 {
-#ifndef DUAL_CORE_PPU
     uint32_t slot_index;
     u16 *video_buffer;
-#endif
 
     (void)param;
 
@@ -933,17 +837,6 @@ void gba_emulation_task(void *param)
     s_fps_timer_us = esp_timer_get_time();
     gba_session_perf_reset();
 
-#ifdef DUAL_CORE_PPU
-    /* The render task owns gba_screen_pixels in dual-core mode.
-     * The emu core should not render to a fallback buffer. */
-    gba_screen_pixels = NULL;
-
-    if (ppu_pipeline_reset_pace() != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to reset PPU pace timer");
-        vTaskDelete(NULL);
-        return;
-    }
-#else
     gba_screen_pixels = av_pipeline_default_video_buffer();
 
     if (av_pipeline_acquire_slot(&slot_index, &video_buffer, portMAX_DELAY) != ESP_OK) {
@@ -951,7 +844,6 @@ void gba_emulation_task(void *param)
         vTaskDelete(NULL);
         return;
     }
-#endif
 
     while (1) {
         s_frame_start_us = esp_timer_get_time();
@@ -962,9 +854,7 @@ void gba_emulation_task(void *param)
         }
 
         if (s_session.stop_requested) {
-#ifndef DUAL_CORE_PPU
             av_pipeline_release_slot(slot_index, portMAX_DELAY);
-#endif
             break;
         }
 
@@ -1018,7 +908,6 @@ void gba_emulation_task(void *param)
 
         t1 = esp_timer_get_time();
 
-#ifndef DUAL_CORE_PPU
         {
             int64_t t2, t3, t4;
 
@@ -1082,56 +971,9 @@ void gba_emulation_task(void *param)
                 }
             }
         }
-#else /* DUAL_CORE_PPU */
-        /* Frame is done — push stats every frame, log once per second. */
-        s_fps_counter++;
-        {
-            int64_t r_scan, r_video, r_audio;
-            int64_t w_render, w_buf, w_pace;
-            int64_t emu_wall;
-            uint32_t a_drop, a_qpeak;
-            ppu_pipeline_get_render_stats(&r_scan, &r_video, &r_audio);
-            ppu_pipeline_get_wait_stats(&w_render, &w_buf, &w_pace,
-                                        &a_drop, &a_qpeak);
-            emu_wall = t1 - s_frame_start_us;
-            int64_t cpu_only = (t1 - t0) - w_buf;
-            gba_session_perf_push_dual_core(emu_wall,
-                                            cpu_only,
-                                            emu_wall - cpu_only,
-                                            w_render,
-                                            w_buf,
-                                            w_pace,
-                                            r_scan,
-                                            r_video,
-                                            r_audio);
-
-            /* Use t1 (post-execute_arm, VSYNC-aligned) for accurate FPS */
-            if (t1 - s_fps_timer_us >= 1000000) {
-                int64_t dt = t1 - s_fps_timer_us;
-                s_fps_last_x10 = (uint32_t)((uint64_t)s_fps_counter * 10000000 / dt);
-                if (!gpsp_web_server_enabled) {
-                    ESP_LOGI(TAG, "FPS: %u.%u | stats window %u frames",
-                             (unsigned)(s_fps_last_x10 / 10),
-                             (unsigned)(s_fps_last_x10 % 10),
-                             (unsigned)GBA_SESSION_STATS_WINDOW);
-                    gba_session_perf_log_dual_core(a_drop, a_qpeak);
-                }
-#ifdef CPU_PROFILE_STATS
-                log_scanline_breakdown();
-                cpu_prof_print();
-#endif
-                s_fps_counter = 0;
-                s_fps_timer_us = t1;
-            }
-        }
-
-#endif /* DUAL_CORE_PPU */
     }
 
     flush_backup_image(true);
-#ifdef DUAL_CORE_PPU
-    ppu_pipeline_deinit();
-#endif
     memory_term();
     s_session.emulation_task = NULL;
     s_session.has_content = false;
@@ -1168,22 +1010,10 @@ int gba_session_stats_json(char *buf, size_t buf_size)
                   (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024));
     if (p >= end) goto trunc;
 
-#ifdef DUAL_CORE_PPU
-    p += json_stat(p, end, "emu",          &s_perf_stats.emu_us);
-    p += json_stat(p, end, "core",         &s_perf_stats.cpu_us);
-    p += json_stat(p, end, "wait",         &s_perf_stats.wait_us);
-    p += json_stat(p, end, "wait_render",  &s_perf_stats.wait_render_us);
-    p += json_stat(p, end, "wait_buf",     &s_perf_stats.wait_buf_us);
-    p += json_stat(p, end, "wait_pace",    &s_perf_stats.wait_pace_us);
-    p += json_stat(p, end, "scan",         &s_perf_stats.render_scan_us);
-    p += json_stat(p, end, "video",        &s_perf_stats.render_video_us);
-    p += json_stat(p, end, "audio",        &s_perf_stats.render_audio_us);
-#else
     p += json_stat(p, end, "cpu",     &s_perf_stats.cpu_us);
     p += json_stat(p, end, "copy",    &s_perf_stats.copy_us);
     p += json_stat(p, end, "submit",  &s_perf_stats.submit_us);
     p += json_stat(p, end, "acquire", &s_perf_stats.acquire_us);
-#endif
 
     if (p >= end) goto trunc;
     if (p > buf + 1 && *(p - 1) == ',') p--;

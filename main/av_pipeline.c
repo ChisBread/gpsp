@@ -9,8 +9,6 @@
 
 static bool audio_enabled;
 
-#ifndef DUAL_CORE_PPU
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
@@ -105,18 +103,8 @@ static void av_output_task(void *param)
     }
 }
 
-#endif
-
 esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
 {
-#ifdef DUAL_CORE_PPU
-    if (!config) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    audio_enabled = config->audio_enabled;
-    return ESP_OK;
-#else
     uint32_t slot_index;
     BaseType_t task_ret;
 
@@ -159,27 +147,16 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
     }
 
     return ESP_OK;
-#endif
 }
 
 u16 *av_pipeline_default_video_buffer(void)
 {
-#ifdef DUAL_CORE_PPU
-    return NULL;
-#else
     return gba_render_buffer;
-#endif
 }
 
 esp_err_t av_pipeline_acquire_slot(uint32_t *slot_index, u16 **video_buffer,
                                    TickType_t timeout)
 {
-#ifdef DUAL_CORE_PPU
-    (void)slot_index;
-    (void)video_buffer;
-    (void)timeout;
-    return ESP_ERR_INVALID_STATE;
-#else
     uint32_t local_slot_index;
 
     if (!slot_index || !video_buffer) {
@@ -197,16 +174,10 @@ esp_err_t av_pipeline_acquire_slot(uint32_t *slot_index, u16 **video_buffer,
     *slot_index = local_slot_index;
     *video_buffer = gba_framebuffers[local_slot_index];
     return ESP_OK;
-#endif
 }
 
 esp_err_t av_pipeline_release_slot(uint32_t slot_index, TickType_t timeout)
 {
-#ifdef DUAL_CORE_PPU
-    (void)slot_index;
-    (void)timeout;
-    return ESP_ERR_INVALID_STATE;
-#else
     if (slot_index >= AV_PIPELINE_DEPTH) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -220,18 +191,11 @@ esp_err_t av_pipeline_release_slot(uint32_t slot_index, TickType_t timeout)
     }
 
     return ESP_OK;
-#endif
 }
 
 esp_err_t av_pipeline_submit_slot(uint32_t slot_index, bool skip_video,
                                   TickType_t timeout)
 {
-#ifdef DUAL_CORE_PPU
-    (void)slot_index;
-    (void)skip_video;
-    (void)timeout;
-    return ESP_ERR_INVALID_STATE;
-#else
     if (slot_index >= AV_PIPELINE_DEPTH) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -249,7 +213,6 @@ esp_err_t av_pipeline_submit_slot(uint32_t slot_index, bool skip_video,
     }
 
     return ESP_OK;
-#endif
 }
 
 bool av_pipeline_audio_enabled(void)

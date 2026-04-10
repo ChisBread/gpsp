@@ -5,7 +5,6 @@ idf_component_register(
         "c6_remote.c"
         "gba_session.c"
         "netpacket_bridge.c"
-        "ppu_pipeline.c"
         "runtime_config.c"
         "web_server.c"
     INCLUDE_DIRS "."

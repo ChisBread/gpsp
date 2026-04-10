@@ -75,15 +75,6 @@ else
   JIT_S    =
 endif
 
-ifeq ($(DUAL),1)
-  FEAT_DEF += -DDUAL_CORE_PPU
-  EXTRA_C   = ppu_sim.c
-  EXTRA_LD  = -lpthread
-else
-  EXTRA_C   =
-  EXTRA_LD  =
-endif
-
 ifeq ($(TRACE),1)
   FEAT_DEF += -DTRACE_INSTRUCTIONS
 endif
@@ -128,7 +119,7 @@ LRC_C    = $(LRC)/streams/file_stream.c \
            $(LRC)/time/rtime.c \
            $(LRC)/compat/fopen_utf8.c
 
-HARNESS_C = harness_main.c harness_stubs.c $(EXTRA_C)
+HARNESS_C = harness_main.c harness_stubs.c
 
 # ── Build directory (per-config, allows parallel builds) ───────────
 
@@ -164,7 +155,7 @@ VPATH = $(ROOT) \
 all: $(TARGET)
 
 $(TARGET): $(OBJS) | $(BUILD)
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS) $(EXTRA_LD)
+	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BUILD):
 	@mkdir -p $(BUILD)

@@ -43,16 +43,6 @@ extern u16 *gba_screen_pixels;
 
 u32 num_skipped_frames = 0;
 
-#ifdef DUAL_CORE_PPU
-/* Threaded PPU simulation (ppu_sim.c) */
-extern void     ppu_sim_init(void);
-extern void     ppu_sim_wait_render(void);
-extern u16     *ppu_sim_render_fb(void);
-extern void     ppu_sim_shutdown(void);
-extern void     ppu_sim_get_last_crc(uint32_t *oam_crc, uint32_t *io0_crc);
-extern uint32_t ppu_sim_get_audio(int16_t **samples);
-#endif
-
 /* ── state ─────────────────────────────────────────────────────────── */
 
 static FILE       *s_dump_fp;
@@ -61,13 +51,11 @@ static FILE       *s_audio_fp;
 static uint32_t    s_dump_frame;
 static uint32_t    s_dump_total;
 
-/* Audio collection (single-core path only — dual-core uses ppu_sim) */
-#ifndef DUAL_CORE_PPU
+/* Audio collection */
 #define AUDIO_SPF_MAX   1200
 static int16_t     s_audio_buf[AUDIO_SPF_MAX * 2];
 static float       s_audio_spf;
 static float       s_audio_frac;
-#endif
 
 static uint32_t crc32_simple(const void *data, size_t len)
 {
@@ -164,21 +152,10 @@ int main(int argc, char **argv)
 
     /* --- Default filenames --- */
     const char *tag;
-#ifdef DUAL_CORE_PPU
-    tag = "dual";
-    if (!output_path) output_path = "frames_dual.bin";
-#else
     tag = "single";
     if (!output_path) output_path = "frames_single.bin";
-#endif
 
-    printf("[harness] Mode:   %s\n",
-#ifdef DUAL_CORE_PPU
-           "DUAL-CORE SIMULATION"
-#else
-           "SINGLE-CORE"
-#endif
-    );
+    printf("[harness] Mode:   SINGLE-CORE\n");
     printf("[harness] ROM:    %s\n", rom_path);
     if (bios_path)
         printf("[harness] BIOS:   %s\n", bios_path);
@@ -244,10 +221,6 @@ int main(int argc, char **argv)
     (void)use_jit;
 #endif
 
-#ifdef DUAL_CORE_PPU
-    ppu_sim_init();
-#endif
-
     /* --- Open output files --- */
     s_dump_fp    = fopen(output_path, "wb");
     s_dump_frame = 0;
@@ -266,18 +239,12 @@ int main(int argc, char **argv)
             perror("[harness] cannot open audio file");
             return 1;
         }
-#ifndef DUAL_CORE_PPU
         s_audio_spf = (float)GBA_SOUND_FREQUENCY / 59.7275f;
         s_audio_frac = 0.0f;
-#endif
         printf("[harness] Audio:  %s (%.1f samples/frame)\n",
                apath, (float)GBA_SOUND_FREQUENCY / 59.7275f);
         fflush(stdout);
     }
-
-#ifdef DUAL_CORE_PPU
-    s_crc_fp = fopen("crc_dual.bin", "wb");
-#endif
 
     /* Individual frame dump directory */
     if (dump_from >= 0) {
@@ -317,25 +284,8 @@ int main(int argc, char **argv)
 
         const u16 *pixels;
 
-#ifdef DUAL_CORE_PPU
-        ppu_sim_wait_render();
-        pixels = ppu_sim_render_fb();
-
-        fwrite(pixels, sizeof(u16), 240 * 160, s_dump_fp);
-
-        if (s_crc_fp) {
-            uint32_t oam_crc, io0_crc;
-            ppu_sim_get_last_crc(&oam_crc, &io0_crc);
-            uint32_t rec[4] = {
-                (uint32_t)f, oam_crc, io0_crc,
-                crc32_simple(pixels, 240 * 160 * sizeof(u16)),
-            };
-            fwrite(rec, sizeof(rec), 1, s_crc_fp);
-        }
-#else
         pixels = gba_screen_pixels;
         fwrite(pixels, sizeof(u16), 240 * 160, s_dump_fp);
-#endif
 
         s_dump_frame++;
 
@@ -354,14 +304,6 @@ int main(int argc, char **argv)
             dump_frame_file(f, pixels, tag);
 
         /* --- Audio --- */
-#ifdef DUAL_CORE_PPU
-        {
-            int16_t *samples;
-            uint32_t n = ppu_sim_get_audio(&samples);
-            if (n > 0)
-                fwrite(samples, sizeof(int16_t), n * 2, s_audio_fp);
-        }
-#else
         {
             render_gbc_sound();
             uint32_t n = (uint32_t)s_audio_spf;
@@ -374,7 +316,6 @@ int main(int argc, char **argv)
                 memset(s_audio_buf + got * 2, 0, (n - got) * 2 * sizeof(int16_t));
             fwrite(s_audio_buf, sizeof(int16_t), n * 2, s_audio_fp);
         }
-#endif
 
         clock_gettime(CLOCK_MONOTONIC, &ts_end);
         frame_times_us[f] = (ts_end.tv_sec - ts_start.tv_sec) * 1e6
@@ -423,10 +364,6 @@ int main(int argc, char **argv)
     free(frame_times_us);
 
     /* --- Cleanup --- */
-#ifdef DUAL_CORE_PPU
-    ppu_sim_shutdown();
-    if (s_crc_fp) fclose(s_crc_fp);
-#endif
     if (s_audio_fp) fclose(s_audio_fp);
     fclose(s_dump_fp);
     printf("[harness] Done. Wrote %u frames to %s\n",

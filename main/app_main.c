@@ -34,9 +34,6 @@
 #include "runtime_config.h"
 #include "storage.h"
 #include "web_server.h"
-#ifdef DUAL_CORE_PPU
-#include "ppu_pipeline.h"
-#endif
 
 static const char *TAG = "gpsp_main";
 
@@ -172,7 +169,6 @@ void app_main(void)
         return;
     }
 
-#ifndef DUAL_CORE_PPU
     {
         av_pipeline_config_t av_config = {
             .task_stack_size = AV_TASK_STACK_SIZE,
@@ -187,24 +183,6 @@ void app_main(void)
             return;
         }
     }
-#endif
-
-#ifdef DUAL_CORE_PPU
-    {
-        int render_core = (CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0;
-        ppu_pipeline_config_t cfg = {
-            .task_stack_size = 16384,
-            .render_core     = render_core,
-            .task_priority   = configMAX_PRIORITIES - 2,
-            .audio_enabled   = audio_ready,
-        };
-        err = ppu_pipeline_init(&cfg);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to init PPU pipeline");
-            return;
-        }
-    }
-#endif
 
     snprintf(bios_path, sizeof(bios_path), "%s/gba_bios.bin", STORAGE_MOUNT_POINT);
 
@@ -224,16 +202,9 @@ void app_main(void)
              dynarec_enable ? 1 : 0,
              sprite_limit ? 1 : 0,
              audio_ready ? 1 : 0);
-#ifdef DUAL_CORE_PPU
-    ESP_LOGI(TAG, "GBA renderer: dual_core=1 emu_core=%d render_core=%d c6_remote=%d",
-             CONFIG_GPSP_EMULATION_CORE,
+    ESP_LOGI(TAG, "GBA renderer: output_core=%d c6_remote=%d",
              AV_OUTPUT_CORE,
              CONFIG_GPSP_ENABLE_C6_REMOTE ? 1 : 0);
-#else
-    ESP_LOGI(TAG, "GBA renderer: dual_core=0 output_core=%d c6_remote=%d",
-             AV_OUTPUT_CORE,
-             CONFIG_GPSP_ENABLE_C6_REMOTE ? 1 : 0);
-#endif
 
     err = gba_session_init(&session_config);
     if (err != ESP_OK) {
