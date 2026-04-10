@@ -113,8 +113,35 @@ void netpacket_poll_receive(void) {}
 
 /* --- Instruction tracing stubs --- */
 #ifdef TRACE_INSTRUCTIONS
+static FILE *trace_file = NULL;
+static u64 trace_count = 0;
+#define TRACE_MAX 5000000  /* stop after 5M instructions to limit file size */
+
 void trace_open(const char *path) { (void)path; }
-void trace_close(void) {}
+void trace_close(void) {
+    if (trace_file) { fclose(trace_file); trace_file = NULL; }
+}
 void trace_instruction(u32 pc, u32 cpsr) { (void)pc; (void)cpsr; }
-void trace_jit_instruction(void) {}
+
+void trace_jit_instruction(void) {
+    if (trace_count >= TRACE_MAX) return;
+    if (!trace_file) {
+        trace_file = fopen("trace.bin", "wb");
+        if (!trace_file) return;
+    }
+    /* reg[0..14] = r0-r14, reg[15] = REG_PC, reg[16] = REG_CPSR */
+    /* Write: PC, r0-r14, CPSR  (17 x u32 = 68 bytes per record) */
+    u32 record[17];
+    record[0] = reg[REG_PC];
+    for (int i = 0; i < 15; i++)
+        record[1 + i] = reg[i];
+    record[16] = reg[REG_CPSR];
+    fwrite(record, sizeof(u32), 17, trace_file);
+    trace_count++;
+    if (trace_count >= TRACE_MAX) {
+        fflush(trace_file);
+        printf("[trace] reached %llu instructions, stopping trace\n",
+               (unsigned long long)trace_count);
+    }
+}
 #endif

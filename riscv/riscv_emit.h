@@ -1221,7 +1221,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_load_imm(reg_a0, imm)                                            \
 
 #define arm_psr_store_cpsr(op_type)                                           \
-    generate_load_pc_delta(reg_a1, (pc));                                     \
+    generate_load_pc(reg_a1, (pc));                                     \
     generate_load_imm(reg_a2, cpsr_masks[psr_pfield][0]);                     \
     generate_load_imm(reg_temp3, cpsr_masks[psr_pfield][1]);                  \
     generate_function_call(execute_store_cpsr)                                \
@@ -1333,7 +1333,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define arm_access_memory_store(mem_type)                                     \
 {                                                                             \
     cycle_count++;                                                            \
-    generate_load_pc_delta(reg_a2, (pc + 4));                                 \
+    generate_load_pc(reg_a2, (pc + 4));                                 \
     generate_load_reg_pc(reg_a1, rd, 12);                                     \
     generate_function_call(rv_execute_store_##mem_type);                      \
 }                                                                             \
@@ -1419,14 +1419,14 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define arm_block_memory_store()                                              \
     generate_load_reg_pc(reg_a1, i, 8);                                       \
-    generate_load_pc_delta(reg_a2, (pc + 4));                                 \
+    generate_load_pc(reg_a2, (pc + 4));                                 \
     generate_function_call(rv_execute_aligned_store32)                        \
 
 #define arm_block_memory_final_load(writeback_type)                           \
     arm_block_memory_load()                                                   \
 
 #define arm_block_memory_final_store(writeback_type)                          \
-    generate_load_pc_delta(reg_a2, (pc + 4));                                 \
+    generate_load_pc(reg_a2, (pc + 4));                                 \
     generate_load_reg(reg_a1, i);                                             \
     arm_block_memory_writeback_post_store(writeback_type);                    \
     generate_function_call(rv_execute_store_u32)                              \
@@ -1534,7 +1534,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_indirect_branch_dual()                                           \
 
 #define arm_swi()                                                             \
-    generate_load_pc_delta(reg_a0, (pc + 4));                                 \
+    generate_load_pc(reg_a0, (pc + 4));                                 \
     generate_function_call(execute_swi);                                      \
     generate_branch()                                                         \
 
