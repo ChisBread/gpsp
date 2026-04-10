@@ -1113,20 +1113,56 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define generate_op_adds_imm(_rd, _rn)                                        \
 {                                                                             \
-    u32 _rn_f = (_rd) == (_rn) ? (u32)reg_save0 : (u32)(_rn);                \
-    generate_load_imm(reg_temp3, imm);                                        \
-    if ((_rd) == (_rn)) rv_mv(reg_save0, _rn);                                \
-    rv_add(_rd, _rn, reg_temp3);                                              \
-    generate_op_add_flags(_rd, _rn_f, reg_temp3);                             \
+    if ((s32)(imm) >= 1 && (s32)(imm) <= 2047 && !check_generate_v_flag)     \
+    {                                                                         \
+        /* Small positive imm, no V needed: addi avoids loading imm */        \
+        u32 _rn_f = (_rd) == (_rn) ? (u32)reg_save0 : (u32)(_rn);            \
+        if ((_rd) == (_rn)) rv_mv(reg_save0, _rn);                            \
+        rv_addi(_rd, _rn, (s32)(imm));                                        \
+        if (check_generate_c_flag)                                            \
+            rv_sltu(reg_c_cache, _rd, _rn_f);                                 \
+        generate_op_logic_flags(_rd)                                          \
+    }                                                                         \
+    else                                                                      \
+    {                                                                         \
+        u32 _rn_f = (_rd) == (_rn) ? (u32)reg_save0 : (u32)(_rn);            \
+        generate_load_imm(reg_temp3, imm);                                    \
+        if ((_rd) == (_rn)) rv_mv(reg_save0, _rn);                            \
+        rv_add(_rd, _rn, reg_temp3);                                          \
+        generate_op_add_flags(_rd, _rn_f, reg_temp3);                         \
+    }                                                                         \
 }
 
 #define generate_op_subs_imm(_rd, _rn)                                        \
 {                                                                             \
-    u32 _rn_f = (_rd) == (_rn) ? (u32)reg_save0 : (u32)(_rn);                \
-    generate_load_imm(reg_temp3, imm);                                        \
-    if ((_rd) == (_rn)) rv_mv(reg_save0, _rn);                                \
-    rv_sub(_rd, _rn, reg_temp3);                                              \
-    generate_op_sub_flags(_rd, _rn_f, reg_temp3);                             \
+    if ((s32)(imm) >= 1 && (s32)(imm) <= 2047)                               \
+    {                                                                         \
+        /* Small positive imm: use addi/sltiu to avoid loading imm */         \
+        u32 _rn_f = (_rd) == (_rn) ? (u32)reg_save0 : (u32)(_rn);            \
+        if ((_rd) == (_rn)) rv_mv(reg_save0, _rn);                            \
+        rv_addi(_rd, _rn, -(s32)(imm));                                       \
+        if (check_generate_c_flag)                                            \
+        {                                                                     \
+            rv_sltiu(reg_c_cache, _rn_f, (s32)(imm));                         \
+            rv_xori(reg_c_cache, reg_c_cache, 1);                             \
+        }                                                                     \
+        generate_op_logic_flags(_rd)                                          \
+        if (check_generate_v_flag)                                            \
+        {                                                                     \
+            /* imm>0 ⇒ imm[31]=0, so V = rn[31] & ~rd[31] */                 \
+            rv_xor(reg_temp, _rn_f, _rd);                                     \
+            rv_and(reg_v_cache, _rn_f, reg_temp);                             \
+            rv_srli(reg_v_cache, reg_v_cache, 31);                            \
+        }                                                                     \
+    }                                                                         \
+    else                                                                      \
+    {                                                                         \
+        u32 _rn_f = (_rd) == (_rn) ? (u32)reg_save0 : (u32)(_rn);            \
+        generate_load_imm(reg_temp3, imm);                                    \
+        if ((_rd) == (_rn)) rv_mv(reg_save0, _rn);                            \
+        rv_sub(_rd, _rn, reg_temp3);                                          \
+        generate_op_sub_flags(_rd, _rn_f, reg_temp3);                         \
+    }                                                                         \
 }
 
 #define generate_op_rsbs_imm(_rd, _rn)                                        \
