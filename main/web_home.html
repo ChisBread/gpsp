@@ -56,7 +56,7 @@ btn:hover{background:#3a4a6a}
 /* Prof bars */
 .prof-wrap{margin-top:6px}
 .prof-row{display:flex;align-items:center;font-size:.75em;margin-bottom:3px}
-.prof-row .plbl{width:50px;color:#888;text-align:right;padding-right:6px;flex-shrink:0}
+.prof-row .plbl{width:60px;color:#888;text-align:right;padding-right:6px;flex-shrink:0;font-size:.78em}
 .prof-row .pbar-bg{flex:1;height:14px;background:#0a0f1a;border-radius:2px;overflow:hidden;position:relative}
 .prof-row .pbar{height:100%;border-radius:2px;min-width:1px}
 .prof-row .ppct{width:40px;text-align:right;color:#aaa;padding-left:4px;flex-shrink:0}
@@ -226,13 +226,16 @@ function updateTable(data){
 }
 
 /* ── CPU profiling breakdown ──────────────────────── */
-const PROF_ITEMS = [
-  {key:'exec',  label:'执行',  color:'#50c878'},
+/* update_gba breakdown, as % of update */
+const UPDATE_ITEMS = [
   {key:'scan',  label:'扫描线', color:'#4a90d9'},
   {key:'sound', label:'音频',  color:'#8b5cf6'},
   {key:'dma',   label:'DMA',   color:'#d9a84a'},
   {key:'timer', label:'定时器', color:'#e06060'},
+  {key:'serial',label:'串口',  color:'#60c0a0'},
+  {key:'irq',   label:'IRQ',   color:'#c080e0'},
 ];
+/* scanline sub-breakdown, as % of scanline */
 const SCAN_ITEMS = [
   {key:'bg',    label:'BG',     color:'#4a90d9'},
   {key:'obj',   label:'OBJ',    color:'#60c0a0'},
@@ -241,6 +244,26 @@ const SCAN_ITEMS = [
   {key:'aff',   label:'仿射',   color:'#e06060'},
   {key:'blank', label:'空白',   color:'#666'},
 ];
+/* BG sub-breakdown, as % of bg */
+const BG_ITEMS = [
+  {key:'bg_tf', label:'text快', color:'#4a90d9'},
+  {key:'bg_tm', label:'text马赛克',color:'#60c0a0'},
+  {key:'bg_af', label:'仿射BG', color:'#c080e0'},
+  {key:'bg_bm', label:'位图BG', color:'#e06060'},
+];
+/* exec sub-breakdown (dynarec overhead), as % of exec */
+const EXEC_ITEMS = [
+  {key:'drc_lkup',label:'查找', color:'#d9a84a'},
+  {key:'drc_xlat',label:'编译', color:'#e06060'},
+  {key:'drc_sync',label:'同步', color:'#c080e0'},
+];
+
+function profBar(label, pct, color, indent) {
+  const pad = indent ? `padding-left:${indent}px` : '';
+  return `<div class="prof-row" style="${pad}"><span class="plbl">${label}</span>`
+       + `<div class="pbar-bg"><div class="pbar" style="width:${Math.min(pct,100)}%;background:${color}"></div></div>`
+       + `<span class="ppct">${pct}%</span></div>`;
+}
 
 function updateProf(data){
   const p = data.prof;
@@ -250,38 +273,46 @@ function updateProf(data){
 
   const barsEl = $('prof_bars');
   let html = '';
-  /* Top-level breakdown */
-  for (const it of PROF_ITEMS) {
-    const v = p[it.key] || 0;
-    const pct = (v / p.total * 100).toFixed(1);
-    html += `<div class="prof-row"><span class="plbl">${it.label}</span>`
-          + `<div class="pbar-bg"><div class="pbar" style="width:${pct}%;background:${it.color}"></div></div>`
-          + `<span class="ppct">${pct}%</span></div>`;
+  const t = p.total;
+  const pf = (v,d) => d > 0 ? (v / d * 100).toFixed(1) : '0.0';
+
+  /* 执行 + dynarec子项 */
+  html += profBar('执行', pf(p.exec||0, t), '#50c878', 0);
+  if ((p.drc_lkup||0) + (p.drc_xlat||0) + (p.drc_sync||0) > 0) {
+    for (const it of EXEC_ITEMS) {
+      html += profBar(it.label, pf(p[it.key]||0, p.exec), it.color, 30);
+    }
   }
-  /* Scanline sub-breakdown */
-  if (p.scan > 0) {
-    for (const it of SCAN_ITEMS) {
-      const v = p[it.key] || 0;
-      const pct = (v / p.total * 100).toFixed(1);
-      html += `<div class="prof-row" style="padding-left:50px"><span class="plbl">${it.label}</span>`
-            + `<div class="pbar-bg"><div class="pbar" style="width:${pct}%;background:${it.color}"></div></div>`
-            + `<span class="ppct">${pct}%</span></div>`;
+  /* update + 子项 */
+  html += profBar('update', pf(p.update||0, t), '#4a90d9', 0);
+  if (p.update > 0) {
+    for (const it of UPDATE_ITEMS) {
+      html += profBar(it.label, pf(p[it.key]||0, p.update), it.color, 30);
+      /* BG子项紧跟BG行 */
+      if (it.key === 'scan' && p.scan > 0) {
+        for (const si of SCAN_ITEMS) {
+          html += profBar(si.label, pf(p[si.key]||0, p.scan), si.color, 60);
+          /* BG类型紧跟BG行 */
+          if (si.key === 'bg' && p.bg > 0) {
+            for (const bi of BG_ITEMS) {
+              html += profBar(bi.label, pf(p[bi.key]||0, p.bg), bi.color, 90);
+            }
+          }
+        }
+      }
     }
   }
   barsEl.innerHTML = html;
 
-  /* Dynarec info */
+  /* Info table */
   let thtml = '';
-  if (p.dynarec > 0) {
-    const dpct = (p.dynarec / p.total * 100).toFixed(1);
-    const lpct = (p.drc_lkup / p.total * 100).toFixed(1);
-    const xpct = (p.drc_xlat / p.total * 100).toFixed(1);
-    thtml = `<tr><td>Dynarec</td><td class="v">${dpct}%</td><td class="p99">${p.dynarec}</td></tr>`
-          + `<tr><td>  查找</td><td class="v">${lpct}%</td><td class="p99">${p.drc_lkup}</td></tr>`
-          + `<tr><td>  编译</td><td class="v">${xpct}%</td><td class="p99">${p.drc_xlat}</td></tr>`;
+  if (p.insn > 0) {
+    thtml += `<tr><td>指令/帧</td><td class="v" colspan="2">${p.insn}</td></tr>`;
   }
-  if (thtml) {
-    thtml = '<tr><td></td><td class="v">%</td><td class="p99">cyc/frame</td></tr>' + thtml;
+  if (p.lkup_hit > 0 || p.lkup_miss > 0) {
+    const hr = p.lkup_hit + p.lkup_miss > 0
+      ? (p.lkup_hit / (p.lkup_hit + p.lkup_miss) * 100).toFixed(1) : '0';
+    thtml += `<tr><td>块查找</td><td class="v">命中 ${hr}%</td><td class="p99">${p.lkup_hit} / ${p.lkup_hit+p.lkup_miss}</td></tr>`;
   }
   $('prof_tbl').innerHTML = thtml;
 }

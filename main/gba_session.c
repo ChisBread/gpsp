@@ -75,6 +75,7 @@ typedef struct {
     QueueHandle_t control_queue;
     TaskHandle_t emulation_task;
     int64_t last_autosave_us;
+    int64_t backup_dirty_since_us;  /* 0 = no pending dirty */
 } gba_session_state_t;
 
 typedef struct {
@@ -100,9 +101,16 @@ typedef struct {
 typedef struct {
     u32 frames;
     u32 total;
+    /* exec = total - update */
     u32 exec;
+    /* update_gba sub-components */
+    u32 update;
     u32 scanline;
     u32 scanline_bg;
+    u32 scanline_bg_text_fast;
+    u32 scanline_bg_text_mosaic;
+    u32 scanline_bg_affine;
+    u32 scanline_bg_bitmap;
     u32 scanline_obj;
     u32 scanline_fx;
     u32 scanline_order;
@@ -111,9 +119,17 @@ typedef struct {
     u32 sound;
     u32 dma;
     u32 timer;
-    u32 dynarec;
+    u32 serial;
+    u32 irq;
+    /* dynarec overhead (sub-components of exec) */
     u32 dynarec_lookup;
     u32 dynarec_translate;
+    u32 dynarec_icache_sync;
+    /* counts */
+    u32 arm_count;
+    u32 thumb_count;
+    u32 dynarec_lookup_hits;
+    u32 dynarec_lookup_misses;
 } cpu_prof_snapshot_t;
 
 static cpu_prof_snapshot_t s_prof_snap;
@@ -255,10 +271,16 @@ static void gba_session_snapshot_cpu_prof(void)
 
     s_prof_snap.frames = f;
     s_prof_snap.total = cpu_prof.total_cycles / f;
+    s_prof_snap.update = update;
     s_prof_snap.exec = (s_prof_snap.total > update)
                      ? (s_prof_snap.total - update) : 0;
+    /* update_gba sub-components */
     s_prof_snap.scanline = cpu_prof.scanline_cycles / f;
     s_prof_snap.scanline_bg = cpu_prof.scanline_bg_cycles / f;
+    s_prof_snap.scanline_bg_text_fast = cpu_prof.scanline_bg_text_fast_cycles / f;
+    s_prof_snap.scanline_bg_text_mosaic = cpu_prof.scanline_bg_text_mosaic_cycles / f;
+    s_prof_snap.scanline_bg_affine = cpu_prof.scanline_bg_affine_cycles / f;
+    s_prof_snap.scanline_bg_bitmap = cpu_prof.scanline_bg_bitmap_cycles / f;
     s_prof_snap.scanline_obj = cpu_prof.scanline_obj_cycles / f;
     s_prof_snap.scanline_fx = cpu_prof.scanline_effect_cycles / f;
     s_prof_snap.scanline_order = cpu_prof.scanline_order_cycles / f;
@@ -267,9 +289,17 @@ static void gba_session_snapshot_cpu_prof(void)
     s_prof_snap.sound = cpu_prof.sound_cycles / f;
     s_prof_snap.dma = cpu_prof.dma_cycles / f;
     s_prof_snap.timer = cpu_prof.timer_cycles / f;
-    s_prof_snap.dynarec = cpu_prof.dynarec_total_cycles / f;
+    s_prof_snap.serial = cpu_prof.serial_cycles / f;
+    s_prof_snap.irq = cpu_prof.irq_cycles / f;
+    /* dynarec overhead (sub-components of exec time) */
     s_prof_snap.dynarec_lookup = cpu_prof.dynarec_lookup_cycles / f;
     s_prof_snap.dynarec_translate = cpu_prof.dynarec_translate_cycles / f;
+    s_prof_snap.dynarec_icache_sync = cpu_prof.dynarec_icache_sync_cycles / f;
+    /* counts */
+    s_prof_snap.arm_count = (cpu_prof.arm_count + cpu_prof.thumb_count) / f;
+    s_prof_snap.thumb_count = cpu_prof.thumb_count / f;
+    s_prof_snap.dynarec_lookup_hits = cpu_prof.dynarec_lookup_hits / f;
+    s_prof_snap.dynarec_lookup_misses = cpu_prof.dynarec_lookup_misses / f;
 
     cpu_prof_reset();
 }
@@ -278,9 +308,52 @@ static void gba_session_snapshot_cpu_prof(void)
 /* Pre-allocated PSRAM buffer for state/save I/O (serialized access via command queue) */
 static GPSP_EXTRAM_BSS uint8_t s_state_io_buf[GBA_SESSION_STATE_IO_BUF_SIZE] __attribute__((aligned(16)));
 
+/* ── Background save task ────────────────────────────────────────── */
+
+#define SAVE_TASK_STACK_SIZE  4096
+#define SAVE_TASK_CORE        ((CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0)
+
+static TaskHandle_t s_save_task_handle;
+static size_t s_save_pending_size;
+static SemaphoreHandle_t s_save_done;  /* given = idle, taken = write in progress */
+
+static void backup_save_task(void *param)
+{
+    (void)param;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        esp_err_t err = storage_write_save(s_session.rom_path,
+                                           s_state_io_buf,
+                                           s_save_pending_size);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Background save failed: %s", esp_err_to_name(err));
+        }
+        xSemaphoreGive(s_save_done);
+    }
+}
+
+/* Block until any in-flight background save completes. */
+static void save_task_await(void)
+{
+    if (!s_save_task_handle) return;
+    xSemaphoreTake(s_save_done, portMAX_DELAY);
+    xSemaphoreGive(s_save_done);
+}
+
+/* Copy backup → staging and kick the save task.
+ * Waits for any prior save to drain before touching the staging buffer. */
+static void save_task_kick(size_t size)
+{
+    xSemaphoreTake(s_save_done, portMAX_DELAY);
+    memcpy(s_state_io_buf, gamepak_backup, size);
+    s_save_pending_size = size;
+    xTaskNotifyGive(s_save_task_handle);
+}
+
 static esp_err_t execute_command(gba_session_command_t *command);
 static esp_err_t execute_reload(const gba_session_command_t *command);
 static esp_err_t flush_backup_image(bool force);
+static void flush_backup_async(void);
 
 static size_t current_backup_size(void)
 {
@@ -425,9 +498,9 @@ static esp_err_t save_state_file(unsigned slot)
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (flush_backup_image(true) != ESP_OK) {
-        return ESP_FAIL;
-    }
+    /* Ensure any in-flight async save finishes so s_state_io_buf is free.
+     * No need to flush .sav here — the state file embeds backup data. */
+    save_task_await();
 
     backup_size = current_backup_size();
     total_size = sizeof(*header) + GBA_STATE_MEM_SIZE + backup_size;
@@ -490,13 +563,34 @@ static esp_err_t flush_backup_image(bool force)
     }
 
     backup_size = current_backup_size();
-    if (storage_write_save(s_session.rom_path, gamepak_backup, backup_size) != ESP_OK) {
-        return ESP_FAIL;
+
+    if (s_save_task_handle) {
+        save_task_kick(backup_size);
+        save_task_await();
+    } else {
+        /* Fallback: save task not yet started */
+        if (storage_write_save(s_session.rom_path, gamepak_backup, backup_size) != ESP_OK) {
+            return ESP_FAIL;
+        }
     }
 
     clear_backup_dirty_flag();
     s_session.last_autosave_us = esp_timer_get_time();
     return ESP_OK;
+}
+
+/* Fire-and-forget save: copy to staging, kick the save task, return immediately.
+ * The SD card write runs on SERVICE_CORE while emulation continues. */
+static void flush_backup_async(void)
+{
+    if (!s_session.has_content || !path_is_set(s_session.rom_path)) {
+        return;
+    }
+    if (backup_type == BACKUP_UNKN) {
+        return;
+    }
+    save_task_kick(current_backup_size());
+    s_session.last_autosave_us = esp_timer_get_time();
 }
 
 static void load_builtin_bios_image(void)
@@ -581,9 +675,7 @@ static esp_err_t execute_command(gba_session_command_t *command)
             return finalize_command(command, load_state_file(command->state_slot));
 
         case GBA_SESSION_CMD_SHUTDOWN:
-            if (flush_backup_image(true) != ESP_OK) {
-                return finalize_command(command, ESP_FAIL);
-            }
+            /* Emu loop exit path will do the final sync flush. */
             s_session.stop_requested = true;
             return finalize_command(command, ESP_OK);
 
@@ -625,24 +717,23 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
 
     if (command->reload_rom && previous.has_content) {
         t_save0 = esp_timer_get_time();
-        if (flush_backup_image(true) != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to flush save before ROM reload");
-            return ESP_FAIL;
-        }
+        flush_backup_async();  /* kick SD write on service core */
         t_save1 = esp_timer_get_time();
         flush_us = t_save1 - t_save0;
     }
 
-    if (command->reload_rom) {
-        backup_snapshot = s_state_io_buf;
-        memcpy(backup_snapshot, gamepak_backup, sizeof(gamepak_backup));
-    }
-
     if (command->reload_bios) {
+        /* Overlap BIOS loading with the async save. */
         t_bios0 = esp_timer_get_time();
         apply_bios_image(next_bios_path, &next_builtin_bios);
         t_bios1 = esp_timer_get_time();
         bios_us = t_bios1 - t_bios0;
+    }
+
+    if (command->reload_rom) {
+        save_task_await();  /* ensure s_state_io_buf is free */
+        backup_snapshot = s_state_io_buf;
+        memcpy(backup_snapshot, gamepak_backup, sizeof(gamepak_backup));
     }
 
     if (command->reload_rom) {
@@ -708,6 +799,27 @@ esp_err_t gba_session_init(const gba_session_boot_config_t *config)
         s_session.control_queue = xQueueCreate(GBA_SESSION_QUEUE_LEN, sizeof(gba_session_command_t));
         if (!s_session.control_queue) {
             return ESP_ERR_NO_MEM;
+        }
+    }
+
+    /* Start background save task on the service core */
+    if (!s_save_task_handle) {
+        s_save_done = xSemaphoreCreateBinary();
+        if (!s_save_done) {
+            return ESP_ERR_NO_MEM;
+        }
+        xSemaphoreGive(s_save_done);  /* idle initially */
+
+        BaseType_t ret = xTaskCreatePinnedToCore(
+            backup_save_task, "gba_save",
+            SAVE_TASK_STACK_SIZE, NULL,
+            configMAX_PRIORITIES - 4,
+            &s_save_task_handle,
+            SAVE_TASK_CORE);
+        if (ret != pdPASS) {
+            ESP_LOGW(TAG, "Background save task failed; saves will block emu");
+            vSemaphoreDelete(s_save_done);
+            s_save_done = NULL;
         }
     }
 
@@ -873,11 +985,18 @@ void gba_emulation_task(void *param)
             break;
         }
 
-        if (gamepak_backup_dirty &&
-            (s_frame_start_us - s_session.last_autosave_us) >= GBA_SESSION_AUTOSAVE_PERIOD_US) {
-            if (flush_backup_image(false) != ESP_OK) {
-                ESP_LOGW(TAG, "Periodic save flush failed");
+        if (gamepak_backup_dirty) {
+            /* Record when the dirty burst started, then clear the flag
+             * so we can detect when writes stop. */
+            if (!s_session.backup_dirty_since_us) {
+                s_session.backup_dirty_since_us = s_frame_start_us;
             }
+            gamepak_backup_dirty = false;
+        } else if (s_session.backup_dirty_since_us &&
+                   (s_frame_start_us - s_session.last_autosave_us) >= GBA_SESSION_AUTOSAVE_PERIOD_US) {
+            /* Dirty burst ended and cooldown elapsed — async flush on service core. */
+            flush_backup_async();
+            s_session.backup_dirty_since_us = 0;
         }
 
         {
@@ -1031,15 +1150,23 @@ int gba_session_stats_json(char *buf, size_t buf_size)
 #ifdef CPU_PROFILE_STATS
     if (s_prof_snap.frames > 0 && s_prof_snap.total > 0) {
         int n = snprintf(p, end - p,
-            "\"prof\":{\"total\":%u,\"exec\":%u,\"scan\":%u,"
-            "\"bg\":%u,\"obj\":%u,\"fx\":%u,\"ord\":%u,"
-            "\"aff\":%u,\"blank\":%u,"
-            "\"sound\":%u,\"dma\":%u,\"timer\":%u,"
-            "\"dynarec\":%u,\"drc_lkup\":%u,\"drc_xlat\":%u},",
+            "\"prof\":{"
+            "\"total\":%u,\"exec\":%u,\"update\":%u,"
+            "\"scan\":%u,"
+            "\"bg\":%u,\"bg_tf\":%u,\"bg_tm\":%u,\"bg_af\":%u,\"bg_bm\":%u,"
+            "\"obj\":%u,\"fx\":%u,\"ord\":%u,\"aff\":%u,\"blank\":%u,"
+            "\"sound\":%u,\"dma\":%u,\"timer\":%u,\"serial\":%u,\"irq\":%u,"
+            "\"drc_lkup\":%u,\"drc_xlat\":%u,\"drc_sync\":%u,"
+            "\"insn\":%u,\"lkup_hit\":%u,\"lkup_miss\":%u},",
             (unsigned)s_prof_snap.total,
             (unsigned)s_prof_snap.exec,
+            (unsigned)s_prof_snap.update,
             (unsigned)s_prof_snap.scanline,
             (unsigned)s_prof_snap.scanline_bg,
+            (unsigned)s_prof_snap.scanline_bg_text_fast,
+            (unsigned)s_prof_snap.scanline_bg_text_mosaic,
+            (unsigned)s_prof_snap.scanline_bg_affine,
+            (unsigned)s_prof_snap.scanline_bg_bitmap,
             (unsigned)s_prof_snap.scanline_obj,
             (unsigned)s_prof_snap.scanline_fx,
             (unsigned)s_prof_snap.scanline_order,
@@ -1048,9 +1175,14 @@ int gba_session_stats_json(char *buf, size_t buf_size)
             (unsigned)s_prof_snap.sound,
             (unsigned)s_prof_snap.dma,
             (unsigned)s_prof_snap.timer,
-            (unsigned)s_prof_snap.dynarec,
+            (unsigned)s_prof_snap.serial,
+            (unsigned)s_prof_snap.irq,
             (unsigned)s_prof_snap.dynarec_lookup,
-            (unsigned)s_prof_snap.dynarec_translate);
+            (unsigned)s_prof_snap.dynarec_translate,
+            (unsigned)s_prof_snap.dynarec_icache_sync,
+            (unsigned)s_prof_snap.arm_count,
+            (unsigned)s_prof_snap.dynarec_lookup_hits,
+            (unsigned)s_prof_snap.dynarec_lookup_misses);
         if (n > 0 && p + n < end) p += n;
     }
 #endif
