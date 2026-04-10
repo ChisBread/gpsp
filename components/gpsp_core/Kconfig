@@ -34,6 +34,14 @@ menu "gpSP GBA Emulator"
             Results are printed to the log once per second.
             Adds a small overhead to every measured scope.
 
+    config GPSP_HAVE_ZBB
+        bool "Enable RISC-V Zbb extension"
+        default y
+        depends on IDF_TARGET_ESP32P4
+        help
+            Use RISC-V Zbb (basic bit-manipulation) instructions such as
+            rev8, clz, min/max, etc. ESP32-P4 supports Zbb natively.
+
     config GPSP_P4_SIMD_PIXEL_OPS
         bool "Enable ESP32-P4 PIE pixel ops"
         default n

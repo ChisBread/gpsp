@@ -298,6 +298,32 @@
 
 ---
 
+### OPT-16: BIC操作使用Zbb ANDN指令
+
+**变更**: `generate_op_bic_imm` 和 `generate_op_bic_reg` 在 `HAVE_ZBB` 下使用 `rv_andn` 替代 `xori+and` / `load ~imm + and`
+**影响**: BIC寄存器: 2→1指令, BIC立即数: 避免取反立即数
+**文件**: `riscv/riscv_emit.h`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | OPT-15 | OPT-16 | 变化 |
+|------|--------|--------|------|
+| Total | 4.455 s | ~4.455 s | ≈平 |
+| FPS | ~673 | ~673 | ≈平 |
+
+**结论**: QEMU噪声内。BIC在game.gba中出现频率低。但指令数切实减少，保留。
+
+---
+
+### OPT-17: Block Update Trampoline (REVERTED)
+
+**变更**: 模仿MIPS后端的block prologue trampoline设计 — 在block开头生成cycle update代码，分支出口用JAL跳转到trampoline而非内联完整的cycle-update+branch序列
+**目标**: 分支出口从7条指令减至5条 (JAL+bge offset)
+**结果**: MD5一致但 **性能回退** (4.564s vs 4.455s, +2.4%)
+**原因**: RISC-V没有MIPS的delay slot，trampoline的JAL间接跳转增加了额外开销。MIPS后端受益于delay slot可"免费"执行cycle update指令，RISC-V无法复制此优势
+**结论**: ❌ 已回退
+
+---
+
 ## 总结
 
 | 阶段 | Total时间 | FPS | vs Baseline |
@@ -315,6 +341,7 @@
 | +OPT-13 (IO/PAL/VRAM/OAM) | 5.142 s | ~583 | -44.2% |
 | +OPT-14 (PC消除+Delta) | 5.120 s | ~586 | -44.5% |
 | **+OPT-15 (Zbb扩展)** | **4.455 s** | **~673** | **-51.7%** |
+| +OPT-16 (BIC ANDN) | ~4.455 s | ~673 | -51.7% (噪声) |
 | (参考) Zba+Zbb | 7.28 s | 411 | -21.1% |
 
 ### 已采纳优化
@@ -330,7 +357,9 @@
 - **OPT-13**: IO/Palette/VRAM/OAM Load快路径 — 剩余内存区域汇编读取覆盖
 - **OPT-14**: JIT Load PC消除 + Store/Branch PC Delta编码 — 每条Load省1-2指令, Store/BL省0-1指令
 - **OPT-15**: Zbb扩展支持 — 编译器sext/zext优化 + JIT原生旋转指令 (**-16.4%**)
+- **OPT-16**: BIC操作使用Zbb ANDN指令 — BIC reg 2→1指令
 
 ### 已回退优化
 - **OPT-4**: 去除Load路径PC加载 (QEMU回退)
 - **OPT-6**: LTO (代码膨胀导致严重回退)
+- **OPT-17**: Block Update Trampoline (RISC-V无delay slot, +2.4%回退)

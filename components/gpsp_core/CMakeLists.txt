@@ -99,9 +99,9 @@ endif()
 # Aggressive optimization for hot emulation code
 target_compile_options(${COMPONENT_LIB} PRIVATE -O3)
 
-# Enable Zbb (bit-manipulation) extension for ESP32-P4
-if(CONFIG_IDF_TARGET_ESP32P4)
-    target_compile_options(${COMPONENT_LIB} PRIVATE -march=rv32imafc_zicsr_zifencei_zbb)
+# Enable Zbb (bit-manipulation) extension
+if(CONFIG_GPSP_HAVE_ZBB)
+    target_compile_options(${COMPONENT_LIB} PRIVATE -march=rv32imafc_zicsr_zifencei_zbb_xespv)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC HAVE_ZBB)
 endif()
 
