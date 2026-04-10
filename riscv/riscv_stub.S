@@ -402,29 +402,227 @@ defsymbl(rv_update_gba)
     lw   s10, REG_C_FLAG(gp);                     \
     lw   s11, REG_V_FLAG(gp)
 
+/* ── Indirect branch fast path ─────────────────────────────────────
+ *
+ * For RAM regions (EWRAM 0x02, IWRAM 0x03) we inline the block lookup
+ * tag check so that cache hits avoid the ~30-instruction register
+ * save/restore + C call overhead entirely.
+ *
+ * Scratch registers used: t0, t1, a1 (none are live ARM state here).
+ *
+ * RAM tag layout:
+ *   EWRAM tag mirror: ewram + (pc & 0x3FFFF) + 0x40000
+ *   IWRAM tag mirror: iwram + (pc & 0x7FFF)
+ *   Tag  = u16 at that address.  VALID_TAG: tag > 0x0101
+ *   ramtag_type table sits at ram_translation_cache + RAM_TC_SIZE,
+ *   indexed by (s16)tag >> 1.  Each entry is 8 bytes:
+ *     +0: offset_arm,  +4: offset_thumb
+ *   Translated block = ram_translation_cache + offset.
+ */
+
+#define LAST_TAG_NUM  0x0101
+
+/* ---- ARM indirect branch ---- */
 defsymbl(rv_indirect_branch_arm)
+    andi  a0, a0, -4              /* pc &= ~3 (ARM align) */
+    srli  t0, a0, 24              /* t0 = region */
+    addi  t1, zero, 2
+    beq   t0, t1, .Lfast_ewram_arm
+    addi  t1, zero, 3
+    beq   t0, t1, .Lfast_iwram_arm
+
+    /* ROM regions: 0x00, 0x08-0x0D */
+    beqz  t0, .Lfast_rom_arm
+    addi  t1, zero, 8
+    blt   t0, t1, .Lslow_arm      /* 0x01-0x07 (excl. 0x02,0x03 already handled) */
+    addi  t1, zero, 0x0E
+    blt   t0, t1, .Lfast_rom_arm   /* 0x08-0x0D */
+    j     .Lslow_arm
+
+.Lfast_rom_arm:
+    /* key = a0 (thumb=0 for ARM) */
+    li    t0, 0x9E3779B1          /* Knuth multiplicative hash constant */
+    mul   t0, a0, t0
+    srli  t0, t0, (32 - ROM_BRANCH_HASH_BITS)
+    slli  t0, t0, 2              /* * sizeof(u32) */
+    la    t1, rom_branch_hash
+    add   t0, t0, t1
+    lw    t0, 0(t0)              /* blk_offset */
+    beqz  t0, .Lslow_arm
+
+    la    t1, rom_translation_cache
+    add   a1, t1, t0             /* a1 = &bhdr */
+    lw    t0, 0(a1)              /* bhdr->pc_value */
+    bne   t0, a0, .Lslow_arm     /* pc mismatch → collision or wrong entry */
+
+    addi  a0, a1, 8              /* skip hashhdr_type (8 bytes) */
+    jalr  zero, a0, 0
+
+.Lfast_ewram_arm:
+    slli  t1, a0, 14
+    srli  t1, t1, 14              /* t1 = pc & 0x3FFFF */
+    la    t0, ewram
+    lui   a1, 0x40                /* 0x40000 */
+    add   t0, t0, a1
+    j     .Lfast_tagchk_arm
+
+.Lfast_iwram_arm:
+    slli  t1, a0, 17
+    srli  t1, t1, 17              /* t1 = pc & 0x7FFF */
+    la    t0, iwram
+
+.Lfast_tagchk_arm:
+    add   t0, t0, t1              /* t0 = tagp */
+    lhu   t1, 0(t0)              /* t1 = tag */
+    addi  t0, zero, LAST_TAG_NUM
+    bgeu  t0, t1, .Lslow_arm     /* tag <= 0x0101 → invalid */
+
+    /* Compute trentry: tbl = ram_tc + RAM_TC_SIZE; &tbl[(s16)tag >> 1] */
+    slli  t0, t1, 16
+    srai  t0, t0, 16             /* sign-extend tag to s16 */
+    srai  t0, t0, 1              /* (s16)tag >> 1 */
+    slli  t0, t0, 3              /* * sizeof(ramtag_type) = 8 */
+    la    a1, ram_translation_cache
+    li    t1, RAM_TRANSLATION_CACHE_SIZE
+    add   t1, a1, t1             /* t1 = table base */
+    add   t0, t1, t0             /* t0 = &trentry */
+    lw    t0, 0(t0)              /* t0 = trentry->offset_arm */
+    beqz  t0, .Lslow_arm         /* offset 0 → not translated yet */
+
+    add   a0, a1, t0             /* a0 = translated block address */
+    jalr  zero, a0, 0
+
+.Lslow_arm:
     store_caller_regs()
     swap_to_c_abi()
-    call block_lookup_address_arm
+    call  block_lookup_address_arm
     swap_from_c_abi()
     load_caller_regs()
-    jalr zero, a0, 0
+    jalr  zero, a0, 0
 
+/* ---- Thumb indirect branch ---- */
 defsymbl(rv_indirect_branch_thumb)
-    store_caller_regs()
-    swap_to_c_abi()
-    call block_lookup_address_thumb
-    swap_from_c_abi()
-    load_caller_regs()
-    jalr zero, a0, 0
+    andi  a0, a0, -2              /* pc &= ~1 (Thumb align) */
+    srli  t0, a0, 24
+    addi  t1, zero, 2
+    beq   t0, t1, .Lfast_ewram_thumb
+    addi  t1, zero, 3
+    beq   t0, t1, .Lfast_iwram_thumb
 
-defsymbl(rv_indirect_branch_dual)
+    /* ROM regions: 0x00, 0x08-0x0D */
+    beqz  t0, .Lfast_rom_thumb
+    addi  t1, zero, 8
+    blt   t0, t1, .Lslow_thumb
+    addi  t1, zero, 0x0E
+    blt   t0, t1, .Lfast_rom_thumb
+    j     .Lslow_thumb
+
+.Lfast_rom_thumb:
+    /* key = pc | 1 (thumb flag) */
+    ori   a1, a0, 1               /* a1 = key */
+    li    t0, 0x9E3779B1
+    mul   t0, a1, t0
+    srli  t0, t0, (32 - ROM_BRANCH_HASH_BITS)
+    slli  t0, t0, 2
+    la    t1, rom_branch_hash
+    add   t0, t0, t1
+    lw    t0, 0(t0)
+    beqz  t0, .Lslow_thumb
+
+    la    t1, rom_translation_cache
+    add   a1, t1, t0
+    lw    t0, 0(a1)              /* bhdr->pc_value */
+    ori   t1, a0, 1              /* rebuild key for comparison */
+    bne   t0, t1, .Lslow_thumb
+
+    addi  a0, a1, 8
+    jalr  zero, a0, 0
+
+.Lfast_ewram_thumb:
+    slli  t1, a0, 14
+    srli  t1, t1, 14
+    la    t0, ewram
+    lui   a1, 0x40
+    add   t0, t0, a1
+    j     .Lfast_tagchk_thumb
+
+.Lfast_iwram_thumb:
+    slli  t1, a0, 17
+    srli  t1, t1, 17
+    la    t0, iwram
+
+.Lfast_tagchk_thumb:
+    add   t0, t0, t1
+    lhu   t1, 0(t0)
+    addi  t0, zero, LAST_TAG_NUM
+    bgeu  t0, t1, .Lslow_thumb
+
+    slli  t0, t1, 16
+    srai  t0, t0, 16
+    srai  t0, t0, 1
+    slli  t0, t0, 3
+    la    a1, ram_translation_cache
+    li    t1, RAM_TRANSLATION_CACHE_SIZE
+    add   t1, a1, t1
+    add   t0, t1, t0
+    lw    t0, 4(t0)              /* trentry->offset_thumb (at +4) */
+    beqz  t0, .Lslow_thumb
+
+    add   a0, a1, t0
+    jalr  zero, a0, 0
+
+.Lslow_thumb:
     store_caller_regs()
     swap_to_c_abi()
-    call block_lookup_address_dual
+    call  block_lookup_address_thumb
     swap_from_c_abi()
     load_caller_regs()
-    jalr zero, a0, 0
+    jalr  zero, a0, 0
+
+/* ---- Dual (ARM/Thumb) indirect branch ---- */
+defsymbl(rv_indirect_branch_dual)
+    andi  t0, a0, 1              /* t0 = thumb bit */
+    andi  a0, a0, -2             /* clear LSB */
+    bnez  t0, .Ldual_thumb
+
+    /* ARM path: pc = (pc + 2) & ~3, clear CPSR Thumb bit */
+    addi  a0, a0, 2
+    andi  a0, a0, -4
+    lw    t0, REG_CPSR(gp)
+    andi  t0, t0, -33            /* clear bit 5 (0x20) */
+    sw    t0, REG_CPSR(gp)
+
+    /* Inline RAM/ROM lookup for ARM */
+    srli  t0, a0, 24
+    addi  t1, zero, 2
+    beq   t0, t1, .Lfast_ewram_arm
+    addi  t1, zero, 3
+    beq   t0, t1, .Lfast_iwram_arm
+    beqz  t0, .Lfast_rom_arm
+    addi  t1, zero, 8
+    blt   t0, t1, .Lslow_arm
+    addi  t1, zero, 0x0E
+    blt   t0, t1, .Lfast_rom_arm
+    j     .Lslow_arm
+
+.Ldual_thumb:
+    /* Thumb path: set CPSR Thumb bit */
+    lw    t0, REG_CPSR(gp)
+    ori   t0, t0, 0x20
+    sw    t0, REG_CPSR(gp)
+
+    /* Inline RAM/ROM lookup for Thumb */
+    srli  t0, a0, 24
+    addi  t1, zero, 2
+    beq   t0, t1, .Lfast_ewram_thumb
+    addi  t1, zero, 3
+    beq   t0, t1, .Lfast_iwram_thumb
+    beqz  t0, .Lfast_rom_thumb
+    addi  t1, zero, 8
+    blt   t0, t1, .Lslow_thumb
+    addi  t1, zero, 0x0E
+    blt   t0, t1, .Lfast_rom_thumb
+    j     .Lslow_thumb
 
 /* ── Memory load fast-path macros ──────────────────────────────────
  *
