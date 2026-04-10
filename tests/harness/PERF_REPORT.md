@@ -275,6 +275,29 @@
 
 ---
 
+### OPT-15: Zbb扩展支持 (编译器 + JIT旋转指令)
+
+**变更**: 增加 `HAVE_ZBB` 宏控制的 Zbb 位操作扩展支持:
+1. **编译器级**: `-march=rv32gc_zbb` 让GCC在C代码中自动使用 `sext.b`/`sext.h`/`zext.h`/`min`/`max` 等指令，替代多条 `slli+srai` 符号扩展序列
+2. **JIT级**: `rv_ror` (6→1指令) 和 `rv_rori` (3→1指令) 使用原生Zbb旋转指令
+3. **完整编码**: 在 `riscv_codegen.h` 中提供全套Zbb指令编码宏 (ror/rori/rol, sext.b/h, zext.h, min/max/minu/maxu, andn/orn/xnor, clz/ctz/cpop, rev8, orc.b)
+4. **构建开关**: `make ARCH=riscv ZBB=1` / QEMU: `qemu-riscv32 -cpu rv32,zbb=true`
+
+**原理**: ESP32-P4 的 RISC-V 核心支持 Zbb 扩展。此前的参考测试 (Zba+Zbb 7.28s vs baseline 9.22s = -21.1%) 已证明 Zbb 对编译器生成代码的巨大影响  
+**文件**: `riscv/riscv_codegen.h`, `tests/harness/Makefile`  
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致  
+
+| 指标 | OPT-14 | OPT-15 (5次中位数) | 变化 |
+|------|--------|---------------------|------|
+| Total | 5.326 s | 4.455 s | **-16.4%** |
+| FPS | ~564 | ~673 | **+19.3%** |
+
+5次测量: 4.538, 4.397, 4.455, 4.420, 4.516 (中位数 4.455s)
+
+**结论**: **非常显著的提升**。主要来自编译器对C代码的Zbb优化（sext/zext消除），JIT旋转指令也有贡献。保留。
+
+---
+
 ## 总结
 
 | 阶段 | Total时间 | FPS | vs Baseline |
@@ -291,6 +314,7 @@
 | **+OPT-12 (Store快路径)** | **5.177 s** | **~580** | **-43.8%** |
 | +OPT-13 (IO/PAL/VRAM/OAM) | 5.142 s | ~583 | -44.2% |
 | +OPT-14 (PC消除+Delta) | 5.120 s | ~586 | -44.5% |
+| **+OPT-15 (Zbb扩展)** | **4.455 s** | **~673** | **-51.7%** |
 | (参考) Zba+Zbb | 7.28 s | 411 | -21.1% |
 
 ### 已采纳优化
@@ -305,6 +329,7 @@
 - **OPT-12**: Assembly Store快路径 — EWRAM/IWRAM直接汇编写入+内联SMC检测 (**-10.2%**)
 - **OPT-13**: IO/Palette/VRAM/OAM Load快路径 — 剩余内存区域汇编读取覆盖
 - **OPT-14**: JIT Load PC消除 + Store/Branch PC Delta编码 — 每条Load省1-2指令, Store/BL省0-1指令
+- **OPT-15**: Zbb扩展支持 — 编译器sext/zext优化 + JIT原生旋转指令 (**-16.4%**)
 
 ### 已回退优化
 - **OPT-4**: 去除Load路径PC加载 (QEMU回退)
