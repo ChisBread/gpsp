@@ -345,7 +345,7 @@ const u32 def_seq_cycles[16][2] =
 };
 
 
-u8 bios_rom[1024 * 16];  // 16KB - keep in SRAM, SWI calls
+GPSP_EXTRAM_BSS u8 bios_rom[1024 * 16];  // 16KB - keep in SRAM, SWI calls
 
 // Up to 128kb, store SRAM, flash ROM, or EEPROM here.
 GPSP_EXTRAM_BSS u8 gamepak_backup[1024 * 128];  // 128KB - cold, save data

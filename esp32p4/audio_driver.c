@@ -23,7 +23,7 @@ static const char *TAG = "gpsp_audio";
 #define AUDIO_MAX_INPUT_FRAMES  ((AUDIO_PCM_SOURCE_RATE / 50) + 4)
 #define AUDIO_MAX_OUTPUT_FRAMES ((((uint64_t)AUDIO_MAX_INPUT_FRAMES * 96000u) / 32000u) + 4)
 
-static struct {
+static __attribute__((section(".ext_ram.bss"))) struct {
     i2s_chan_handle_t tx_chan;
     i2c_master_bus_handle_t i2c_bus;
     esp_codec_dev_handle_t codec;
@@ -36,7 +36,7 @@ static struct {
     bool initialized;
 } s_audio;
 
-static int16_t s_resample_buf[AUDIO_MAX_OUTPUT_FRAMES * 2];
+static __attribute__((section(".ext_ram.bss"))) int16_t s_resample_buf[AUDIO_MAX_OUTPUT_FRAMES * 2];
 
 static inline int16_t audio_get_extended_sample(const int16_t *input, size_t in_frames,
                                                 size_t index, size_t channel)
