@@ -453,7 +453,20 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     rv_nop();                                                                 \
 
 #define generate_branch_patch_unconditional(dest, target)                     \
-    rv_patch_far_jump((u32 *)(dest), (target))                                \
+{                                                                             \
+    s32 _bp_off = rv_jal_offset((target), (u32 *)(dest));                     \
+    if (_bp_off >= -(1 << 20) && _bp_off < (1 << 20))                        \
+    {                                                                         \
+        /* Short range: single JAL x0, offset (2nd slot stays NOP) */         \
+        u32 *_bp_inst = (u32 *)(dest);                                        \
+        _bp_inst[0] = (rv_zero << 7) | RV_OP_JAL;                            \
+        rv_patch_jal(_bp_inst, (target));                                     \
+    }                                                                         \
+    else                                                                      \
+    {                                                                         \
+        rv_patch_far_jump((u32 *)(dest), (target));                           \
+    }                                                                         \
+}
 
 #define generate_branch_no_cycle_update(writeback_location, new_pc)           \
     if (pc == idle_loop_target_pc)                                            \
@@ -1975,26 +1988,20 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     rv_bnez(reg_v_cache, 0)                                                   \
 
 #define generate_condition_hi()                                               \
-    rv_xori(reg_temp, reg_c_cache, 1);                                        \
-    rv_or(reg_temp, reg_temp, reg_z_cache);                                   \
     (backpatch_address) = translation_ptr;                                    \
-    rv_bnez(reg_temp, 0)                                                      \
+    rv_bgeu(reg_z_cache, reg_c_cache, 0)                                      \
 
 #define generate_condition_ls()                                               \
-    rv_xori(reg_temp, reg_c_cache, 1);                                        \
-    rv_or(reg_temp, reg_temp, reg_z_cache);                                   \
     (backpatch_address) = translation_ptr;                                    \
-    rv_beqz(reg_temp, 0)                                                      \
+    rv_bltu(reg_z_cache, reg_c_cache, 0)                                      \
 
 #define generate_condition_ge()                                               \
-    rv_sub(reg_temp, reg_n_cache, reg_v_cache);                               \
     (backpatch_address) = translation_ptr;                                    \
-    rv_bnez(reg_temp, 0)                                                      \
+    rv_bne(reg_n_cache, reg_v_cache, 0)                                       \
 
 #define generate_condition_lt()                                               \
-    rv_sub(reg_temp, reg_n_cache, reg_v_cache);                               \
     (backpatch_address) = translation_ptr;                                    \
-    rv_beqz(reg_temp, 0)                                                      \
+    rv_beq(reg_n_cache, reg_v_cache, 0)                                       \
 
 #define generate_condition_gt()                                               \
     rv_xor(reg_temp, reg_n_cache, reg_v_cache);                               \

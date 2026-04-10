@@ -118,7 +118,6 @@ _##symbol:
 #define extract_flags(tmpreg)                   \
     lw   tmpreg, REG_CPSR(gp);                   \
     srli s8, tmpreg, 31;                         \
-    andi s8, s8, 1;                              \
     srli s9, tmpreg, 30;                         \
     andi s9, s9, 1;                              \
     srli s10, tmpreg, 29;                        \
@@ -128,8 +127,8 @@ _##symbol:
 
 #define consolidate_flags(tmpreg, tmpreg2)      \
     lw   tmpreg, REG_CPSR(gp);                    \
-    li   tmpreg2, 0x0fffffff;                     \
-    and  tmpreg, tmpreg, tmpreg2;                 \
+    slli tmpreg, tmpreg, 4;                       \
+    srli tmpreg, tmpreg, 4;                       \
     slli tmpreg2, s8, 31;                         \
     or   tmpreg, tmpreg, tmpreg2;                 \
     slli tmpreg2, s9, 30;                         \
@@ -789,8 +788,8 @@ defsymbl(rv_execute_aligned_store32)
     /* Consolidate flags to CPSR:
      * s8=N, s9=Z are live in regs; C/V in REG_C_FLAG/REG_V_FLAG. */
     lw   t0, REG_CPSR(s11)
-    li   t1, 0x0fffffff
-    and  t0, t0, t1
+    slli t0, t0, 4
+    srli t0, t0, 4
     slli t1, s8, 31
     or   t0, t0, t1
     slli t1, s9, 30
