@@ -302,9 +302,9 @@ return_from_jit:
     ret
 
 defsymbl(rv_update_gba)
-    mv   s7, a0                  /* update s7 so store_registers saves correct PC */
     sw   ra, REG_SAVE(gp)
     store_registers()
+    sw   a0, REG_PC(gp)         /* store branch target PC (don't clobber s7) */
     consolidate_flags(t0, t1)
     mv   s11, gp
     mv   s10, tp
@@ -349,8 +349,10 @@ defsymbl(rv_update_gba)
     jalr zero, a0, 0
 1:
     mv   tp, s10
+    mv   a0, s7                  /* save s7 (stored_pc) before load_registers */
     extract_flags(t0)
     load_registers()
+    mv   s7, a0                  /* restore s7 = stored_pc (not reg[REG_PC]) */
     lw   ra, REG_SAVE(gp)
     ret
 

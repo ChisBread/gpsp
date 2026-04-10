@@ -351,13 +351,6 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define generate_load_pc(ireg, new_pc)                                        \
 {                                                                             \
-    generate_load_imm(ireg, (new_pc));                                          \
-}
-
-/* Load a PC value using a delta from reg_pc (s7 = stored_pc) when possible.
- * Saves 1 instruction (ADDI vs LUI+ADDI) when delta fits in imm12. */
-#define generate_load_pc_delta(ireg, new_pc)                                  \
-{                                                                             \
     s32 _delta = (s32)((u32)(new_pc) - stored_pc);                              \
     if (_delta >= -2048 && _delta <= 2047)                                      \
     {                                                                           \

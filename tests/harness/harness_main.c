@@ -22,8 +22,40 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <signal.h>
 #include "common.h"
 #include "sound.h"
+
+#ifdef CHECK_PC_DELTA
+#include <ucontext.h>
+static void sigtrap_handler(int sig, siginfo_t *info, void *uctx_raw) {
+    ucontext_t *uctx = (ucontext_t *)uctx_raw;
+    unsigned long *gregs = (unsigned long *)&uctx->uc_mcontext;
+    unsigned long pc_val  = gregs[0]; /* PC */
+    unsigned long s7_val  = gregs[23]; /* s7 = reg_pc (actual) */
+    unsigned long t0_val  = gregs[5];  /* t0 = reg_temp (expected new_pc) */
+    fprintf(stderr,
+        "PC_DELTA ASSERT @ JIT_PC=0x%08lx: s7=0x%08lx t0=0x%08lx\n",
+        pc_val, s7_val, t0_val);
+    /* Dump JIT code around the ebreak */
+    unsigned long *code = (unsigned long *)(pc_val - 32);
+    fprintf(stderr, "JIT code (pc-32..pc+8):\n");
+    for (int i = 0; i < 11; i++) {
+        unsigned long addr = (unsigned long)code + i*4;
+        unsigned int instr = *(unsigned int *)(addr);
+        fprintf(stderr, "  %08lx: %08x%s\n", addr, instr,
+                (addr == pc_val) ? " <-- EBREAK" : "");
+    }
+    _exit(1);
+}
+static void install_sigtrap_handler(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = sigtrap_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGTRAP, &sa, NULL);
+}
+#endif
 
 /* Defined in harness_stubs.c */
 extern void harness_load_rom_direct(const char *path);
@@ -91,6 +123,9 @@ static void dump_frame_file(int frame_num, const u16 *pixels, const char *tag)
 
 int main(int argc, char **argv)
 {
+#ifdef CHECK_PC_DELTA
+    install_sigtrap_handler();
+#endif
     const char *bios_path   = NULL;
     const char *rom_path    = NULL;
     const char *output_path = NULL;
