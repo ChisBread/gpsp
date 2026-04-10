@@ -324,6 +324,29 @@
 
 ---
 
+### OPT-18/19/23: Block Memory优化 + CMP #0特化
+
+**变更**（三项合并提交）:
+1. **OPT-19**: LDM/STM地址对齐从 `li reg_temp, ~3; and reg_save0, reg_save0, reg_temp` (2指令) 改为 `andi reg_save0, reg_save0, -4` (1指令)
+2. **OPT-18**: STM/PUSH循环内 `generate_load_pc(reg_a2, pc+4/pc+2)` 外提到循环前一次加载，每个寄存器省1-2条指令
+3. **OPT-23**: `CMP Rn, #0` 特化 — 跳过无意义的 `sub rd, rn, zero` + 常量C/V flag计算，从~10条降至2-4条
+
+**文件**: `riscv/riscv_emit.h`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | OPT-14 (no Zbb基准) | OPT-18/19/23 (5次中位数) | 变化 |
+|------|---------------------|--------------------------|------|
+| Total | 5.318 s | 5.197 s | **-2.3%** |
+| FPS | ~564 | ~577 | **+2.3%** |
+
+5次测量: 5.209, 5.261, 5.185, 5.117, 5.197 (中位数 5.197s)
+
+**注意**: OPT-15/16 (Zbb) 在ESP32-P4实际硬件上不可用（触发Illegal Instruction），此处基准为不含Zbb的OPT-14
+
+**结论**: 一致的改善。三项优化均为低复杂度，主要受益于PUSH/POP(Thumb最频繁指令之一)的代码体积缩减。保留。
+
+---
+
 ## 总结
 
 | 阶段 | Total时间 | FPS | vs Baseline |
@@ -340,8 +363,9 @@
 | **+OPT-12 (Store快路径)** | **5.177 s** | **~580** | **-43.8%** |
 | +OPT-13 (IO/PAL/VRAM/OAM) | 5.142 s | ~583 | -44.2% |
 | +OPT-14 (PC消除+Delta) | 5.120 s | ~586 | -44.5% |
-| **+OPT-15 (Zbb扩展)** | **4.455 s** | **~673** | **-51.7%** |
-| +OPT-16 (BIC ANDN) | ~4.455 s | ~673 | -51.7% (噪声) |
+| **+OPT-15 (Zbb扩展, 仅QEMU)** | **4.455 s** | **~673** | **-51.7%** |
+| +OPT-16 (BIC ANDN, 仅QEMU) | ~4.455 s | ~673 | -51.7% (噪声) |
+| **+OPT-18/19/23 (Block优化+CMP#0)** | **5.197 s** | **~577** | **-43.6%** |
 | (参考) Zba+Zbb | 7.28 s | 411 | -21.1% |
 
 ### 已采纳优化
@@ -357,7 +381,10 @@
 - **OPT-13**: IO/Palette/VRAM/OAM Load快路径 — 剩余内存区域汇编读取覆盖
 - **OPT-14**: JIT Load PC消除 + Store/Branch PC Delta编码 — 每条Load省1-2指令, Store/BL省0-1指令
 - **OPT-15**: Zbb扩展支持 — 编译器sext/zext优化 + JIT原生旋转指令 (**-16.4%**)
-- **OPT-16**: BIC操作使用Zbb ANDN指令 — BIC reg 2→1指令
+- **OPT-16**: BIC操作使用Zbb ANDN指令 — BIC reg 2→1指令 (仅QEMU, ESP32-P4不支持Zbb)
+- **OPT-18**: STM/PUSH store PC外提 — 循环内重复load PC移至循环前
+- **OPT-19**: LDM/STM地址对齐 `andi rd, rs, -4` — 2→1指令
+- **OPT-23**: CMP Rn, #0 特化 — ~10→2-4指令
 
 ### 已回退优化
 - **OPT-4**: 去除Load路径PC加载 (QEMU回退)
