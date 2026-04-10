@@ -402,11 +402,18 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     u32 _fc_target = (u32)(uintptr_t)(function_location);                       \
     u32 _fc_pc    = (u32)(uintptr_t)translation_ptr;                            \
     s32 _fc_delta = (s32)(_fc_target - _fc_pc);                                 \
-    u32 _fc_hi = (u32)_fc_delta & 0xFFFFF000;                                   \
-    u32 _fc_lo = (u32)_fc_delta & 0xFFF;                                        \
-    if (_fc_lo & 0x800) _fc_hi += 0x1000;                                       \
-    rv_auipc(reg_temp, _fc_hi);                                                 \
-    rv_jalr(rv_ra, reg_temp, (s32)(_fc_lo << 20) >> 20);                        \
+    if (_fc_delta >= -(1 << 20) && _fc_delta < (1 << 20))                       \
+    {                                                                           \
+        rv_call(_fc_delta);                                                     \
+    }                                                                           \
+    else                                                                        \
+    {                                                                           \
+        u32 _fc_hi = (u32)_fc_delta & 0xFFFFF000;                               \
+        u32 _fc_lo = (u32)_fc_delta & 0xFFF;                                    \
+        if (_fc_lo & 0x800) _fc_hi += 0x1000;                                   \
+        rv_auipc(reg_temp, _fc_hi);                                             \
+        rv_jalr(rv_ra, reg_temp, (s32)(_fc_lo << 20) >> 20);                    \
+    }                                                                           \
 }
 
 #define generate_raw_u32(value)                                               \
