@@ -366,6 +366,12 @@
 | **+OPT-15 (Zbb扩展, 仅QEMU)** | **4.455 s** | **~673** | **-51.7%** |
 | +OPT-16 (BIC ANDN, 仅QEMU) | ~4.455 s | ~673 | -51.7% (噪声) |
 | **+OPT-18/19/23 (Block优化+CMP#0)** | **5.197 s** | **~577** | **-43.6%** |
+| **+OPT-21 (JAL短距跳转)** | **4.588 s** | **~654** | **-50.2%** |
+| +GE/LT+HI/LS+OPT-B/C (条件/flag优化) | ~4.600 s | ~652 | -50.1% (噪声) |
+| +OPT-RC1 (函数调用JAL) | ~4.554 s | ~659 | -50.6% (仅ESP32-P4受益) |
+| +OPT-D (ROM dispatch优先) | ~4.586 s | ~654 | -50.2% (商业ROM受益) |
+| +fix: bge offset动态化 | ~4.551 s | ~660 | -50.6% |
+| +OPT-E (自身MV消除) | ~4.599 s | ~652 | -50.1% |
 | (参考) Zba+Zbb | 7.28 s | 411 | -21.1% |
 
 ### 已采纳优化
@@ -384,9 +390,90 @@
 - **OPT-16**: BIC操作使用Zbb ANDN指令 — BIC reg 2→1指令 (仅QEMU, ESP32-P4不支持Zbb)
 - **OPT-18**: STM/PUSH store PC外提 — 循环内重复load PC移至循环前
 - **OPT-19**: LDM/STM地址对齐 `andi rd, rs, -4` — 2→1指令
+- **OPT-21**: JAL短距无条件跳转 — block间跳转 AUIPC+JALR → JAL (**-11.7%**)
 - **OPT-23**: CMP Rn, #0 特化 — ~10→2-4指令
+- **GE/LT条件**: bne/beq(N,V) 替代 sub+branch (2→1指令)
+- **OPT-A (HI/LS条件)**: bgeu/bltu(Z,C) 替代 xori+or+branch (3→1指令)
+- **OPT-B**: extract_flags N-flag冗余andi移除
+- **OPT-C**: consolidate_flags/store_alert_slow: slli+srli替代li+and (3→2指令)
+- **OPT-RC1**: 函数调用JAL短距优化 (仅ESP32-P4受益)
+- **OPT-D**: Load dispatch ROM优先 — ROM读取19→8条dispatch
+- **OPT-E**: 冗余自身MV消除 — generate_load_reg/store_reg/mov守卫
 
 ### 已回退优化
 - **OPT-4**: 去除Load路径PC加载 (QEMU回退)
 - **OPT-6**: LTO (代码膨胀导致严重回退)
 - **OPT-17**: Block Update Trampoline (RISC-V无delay slot, +2.4%回退)
+
+---
+
+### OPT-21: JAL短距无条件跳转
+
+**变更**: `generate_branch_patch_unconditional` 检查目标距离，±1MB内用单条 `JAL x0, offset` (+ NOP填充) 替代 `AUIPC+JALR` (2条)
+**影响**: 每个block-to-block直接跳转省1条指令。由于几乎所有block间跳转都在±1MB内，影响巨大
+**文件**: `riscv/riscv_emit.h`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | OPT-18/19/23 | OPT-21 (5次中位数) | 变化 |
+|------|-------------|---------------------|------|
+| Total | 5.197 s | 4.588 s | **-11.7%** |
+| FPS | ~577 | ~654 | **+13.3%** |
+
+5次测量: 4.532, 4.588, 4.612, 4.621, 4.579 (中位数 4.588s)
+
+**结论**: **极其显著的提升**。Block-to-block跳转是最高频操作，每次省1条指令累积效果巨大。保留。
+
+---
+
+### OPT-A/B/C + GE/LT条件优化 (合并提交 6abd9df)
+
+**变更**（多项微优化合并）:
+1. **GE/LT条件**: `rv_sub(t,N,V) + bnez/beqz` → `rv_bne/rv_beq(N,V,0)` (2→1指令)
+2. **HI/LS条件(OPT-A)**: `xori + or + bnez/beqz` → `rv_bgeu/rv_bltu(Z,C,0)` (3→1指令)
+3. **OPT-B**: `extract_flags` N-flag: 移除 `srli 31` 后冗余的 `andi 1`
+4. **OPT-C**: `consolidate_flags` + `store_alert_slow`: `li 0x0fffffff + and` → `slli 4 + srli 4` (3→2指令, 两处)
+
+**文件**: `riscv/riscv_emit.h`, `riscv/riscv_stub.S`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | OPT-21 | +A/B/C+GE/LT (5次中位数) | 变化 |
+|------|--------|--------------------------|------|
+| Total | 4.588 s | 4.600 s | ≈平 (噪声) |
+
+**结论**: QEMU上无可测量差异。真实硬件受益于指令数减少（尤其GE/LT/HI/LS条件分支频繁出现在比较+条件跳转序列中）。保留。
+
+---
+
+### OPT-RC1: 函数调用JAL短距优化
+
+**变更**: `generate_function_call` 对±1MB内的C函数使用 `rv_call(offset)` (单JAL) 替代 `AUIPC+JALR`
+**影响**: QEMU中JIT buffer与text段距离远，JAL路径不触发。ESP32-P4内存空间紧凑(几MB SRAM)，所有函数调用可用JAL
+**文件**: `riscv/riscv_emit.h`
+**结论**: QEMU无效果，ESP32-P4逐条内存操作省1条指令。保留。
+
+---
+
+### fix: bge offset动态计算
+
+**变更**: `generate_branch_no_cycle_update` 中 `bge` 跳过 `update_gba` 的offset从硬编码20改为 `rv_patch_branch` 动态计算
+**原因**: OPT-RC1使function_call可能只发1条JAL(非2条AUIPC+JALR)，硬编码offset=20会跳过branch filler
+**文件**: `riscv/riscv_emit.h`
+**结论**: 关键bug修复，防止ESP32-P4上的跳转偏移错误。
+
+---
+
+### OPT-D: Load dispatch ROM优先
+
+**变更**: `load_region_dispatch` 宏中ROM region检查(0x08-0x0C)从最后移至EWRAM/IWRAM之后
+**影响**: ROM数据读取从19条dispatch指令降至8条。IOREG/PALRAM/VRAM/OAM增加3条
+**文件**: `riscv/riscv_stub.S`
+**结论**: game.gba测试ROM中无可测量差异。商业GBA游戏大量ROM数据读取时受益。保留。
+
+---
+
+### OPT-E: 冗余自身MV消除
+
+**变更**: `generate_load_reg`, `generate_store_reg`, `generate_mov` 增加守卫条件：当源==目标寄存器时跳过 `rv_mv`
+**影响**: 消除ARM源/目标寄存器恰好映射到同一RISC-V寄存器时的无用MV指令
+**文件**: `riscv/riscv_emit.h`
+**结论**: QEMU噪声内。减少JIT代码体积，改善真实硬件i-cache利用率。保留。
