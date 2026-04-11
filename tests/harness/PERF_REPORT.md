@@ -372,6 +372,9 @@
 | +OPT-D (ROM dispatch优先) | ~4.586 s | ~654 | -50.2% (商业ROM受益) |
 | +fix: bge offset动态化 | ~4.551 s | ~660 | -50.6% |
 | +OPT-E (自身MV消除) | ~4.599 s | ~652 | -50.1% |
+| **+OPT-F (内联Block Lookup)** | **4.468 s** | **~671** | **-51.5%** |
+| +OPT-G (小立即数SUBS/ADDS) | ~4.490 s | ~668 | -51.3% |
+| **+RVC (压缩指令集)** | **4.411 s** | **~680** | **-52.2%** |
 | (参考) Zba+Zbb | 7.28 s | 411 | -21.1% |
 
 ### 已采纳优化
@@ -399,6 +402,9 @@
 - **OPT-RC1**: 函数调用JAL短距优化 (仅ESP32-P4受益)
 - **OPT-D**: Load dispatch ROM优先 — ROM读取19→8条dispatch
 - **OPT-E**: 冗余自身MV消除 — generate_load_reg/store_reg/mov守卫
+- **OPT-F**: 间接分支内联快路径Block Lookup — RAM tag/ROM hash首项汇编内联 (**-1.9%**)
+- **OPT-G**: 小立即数SUBS/ADDS — addi+sltiu替代load_imm+sub (CMP #imm8全覆盖)
+- **RVC**: HAVE_RVC压缩指令集基础设施 — 自动选择16位编码+pointer-based patching (**-1.8%**)
 
 ### 已回退优化
 - **OPT-4**: 去除Load路径PC加载 (QEMU回退)
@@ -477,3 +483,64 @@
 **影响**: 消除ARM源/目标寄存器恰好映射到同一RISC-V寄存器时的无用MV指令
 **文件**: `riscv/riscv_emit.h`
 **结论**: QEMU噪声内。减少JIT代码体积，改善真实硬件i-cache利用率。保留。
+
+---
+
+### OPT-F: 间接分支内联快路径Block Lookup (b6d4507)
+
+**变更**: `rv_indirect_branch_{arm,thumb,dual}` 汇编 trampoline 内联 RAM tag lookup (EWRAM/IWRAM) 和 ROM hash-table 首项检查，cache hit 时直接跳转到已翻译 block，完全跳过 C 函数调用和 ~30 条寄存器保存/恢复开销
+**实现**:
+- RAM 快路径: `srli t0, a0, 24` 取 region → EWRAM(02)/IWRAM(03) tag 查表 → 非零即跳转 (~17条指令)
+- ROM 快路径: hash table 首项命中检查 → PC匹配即跳转 (~27条指令)
+- 慢路径: tag miss / hash collision / 其他区域 → 完整 C 调用
+- 仅使用 scratch 寄存器 (t0, t1, a1)
+
+**文件**: `riscv/riscv_stub.S`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | OPT-E | OPT-F (5次avg) | 变化 |
+|------|-------|----------------|------|
+| Total | ~4.554 s | 4.468 s | **-1.9%** |
+
+5次测量: 4.487, 4.440, 4.427, 4.477, 4.507 (avg 4.468s)
+
+**结论**: 一致的改善。间接分支 (BX, BLX, POP PC) 在 Thumb 代码中极其频繁，减少慢路径调用次数。保留。
+
+---
+
+### OPT-G: 小立即数 SUBS/ADDS 直接 addi+sltiu (dc0fb0b)
+
+**变更**: `SUBS Rd, Rn, #imm` 当 imm ∈ [1, 2047] 时使用 `addi rd, rn, -imm` + `sltiu` 计算 C flag，避免先 `load_imm` + `sub` 序列。同理处理 `ADDS Rd, Rn, #imm` (V flag 不需要时)
+**影响**: Thumb `CMP Rn, #imm8` 完全覆盖，每条省 1 条指令（无需 load_imm），V flag 被 dead-flag 消除时再省 1-2 条
+**文件**: `riscv/riscv_emit.h`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | OPT-F | OPT-G (5次avg) | 变化 |
+|------|-------|----------------|------|
+| Total | 4.468 s | ~4.490 s | ≈平 (噪声) |
+
+5次测量: 4.616, 4.444, 4.475, 4.463, 4.449 (avg 4.490s)
+
+**结论**: QEMU 噪声内。Thumb CMP #imm8 是最频繁指令之一，每条省 1+ 条指令，真实硬件受益。保留。
+
+---
+
+### RVC: HAVE_RVC 压缩指令集基础设施 (538785e)
+
+**变更**: 完整的 RVC (RISC-V Compressed) 16 位指令编码基础设施，跟随已有 `HAVE_ZBB` 模式:
+1. **编码基础设施**: `rv_emit16()`, RVC 格式宏 (CR, CI, CSS, CA, CL/CS, CB, CJ), 20+ 个 `rvc_c_*()` 指令宏
+2. **安全别名**: `rv_nop_32()`, `rv_mv_32()` — patch 敏感代码使用
+3. **自动选择压缩覆盖**: rv_nop→c.nop, rv_mv→c.mv, rv_add→c.add, rv_sub/and/or/xor→CA-type, rv_slli/srli/srai/andi/addi→压缩形式, rv_load_imm32→c.li/c.lui
+4. **Pointer-based patching**: 所有 `shift_reg_*` 宏从硬编码分支偏移量转换为 `u8 *ptr` + `rv_patch_branch()`/`rv_patch_jal()`，安全支持变长指令
+5. **构建系统**: `-DHAVE_RVC` 添加到 Makefile 和 CMakeLists.txt (两个目标均含 C 扩展)
+
+**文件**: `riscv/riscv_codegen.h`, `riscv/riscv_emit.h`, `tests/harness/Makefile`, `components/gpsp_core/CMakeLists.txt`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | OPT-G | RVC (5次avg) | 变化 |
+|------|-------|--------------|------|
+| Total | ~4.490 s | 4.411 s | **-1.8%** |
+
+5次测量: 4.428, 4.434, 4.426, 4.401, 4.365 (avg 4.411s)
+
+**结论**: 一致的改善。JIT 代码体积缩减 (16 位重编码)，改善 I-cache 利料率。shift_reg_* 的 pointer-based patching 不增加运行时开销（仅 JIT 编译时多几个指针赋值）。保留。
