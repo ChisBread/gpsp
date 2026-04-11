@@ -105,6 +105,9 @@ if(CONFIG_GPSP_HAVE_ZBB)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC HAVE_ZBB)
 endif()
 
+# RVC (Compressed) extension — always available on rv32imafc targets
+target_compile_definitions(${COMPONENT_LIB} PUBLIC HAVE_RVC)
+
 # Suppress warnings in upstream code (treated as errors by IDF default)
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error

@@ -55,7 +55,7 @@ else ifeq ($(ARCH),riscv)
   CXX      = $(CROSS)g++
   JIT_S    = $(ROOT)/riscv/riscv_stub.S
   ARCH_INC = -I$(ROOT)/riscv
-  ARCH_DEF = -DRISCV_ARCH
+  ARCH_DEF = -DRISCV_ARCH -DHAVE_RVC
   ifeq ($(ZBB),1)
     MARCH    = -march=rv32gc_zbb -mabi=ilp32d
     ARCH_DEF += -DHAVE_ZBB

@@ -459,8 +459,8 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
  * The actual target is filled later by generate_branch_patch_unconditional. */
 #define emit_branch_filler(writeback_location)                                \
     (writeback_location) = translation_ptr;                                   \
-    rv_nop();                                                                 \
-    rv_nop();                                                                 \
+    rv_nop_32();                                                              \
+    rv_nop_32();                                                              \
 
 #define generate_branch_patch_unconditional(dest, target)                     \
 {                                                                             \
@@ -682,10 +682,14 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     generate_load_imm(reg_temp2, 32);                                          \
-    rv_bgeu(reg_a1, reg_temp2, 12);                                            \
+    u8 *_sr1 = translation_ptr;                                                \
+    rv_bgeu(reg_a1, reg_temp2, 0);                                             \
     rv_sll(reg_a0, reg_a0, reg_a1);                                            \
-    rv_j(8);                                                                   \
+    u8 *_sr2 = translation_ptr;                                                \
+    rv_j(0);                                                                   \
+    rv_patch_branch((u32 *)_sr1, translation_ptr);                             \
     rv_mv(reg_a0, reg_zero);                                                   \
+    rv_patch_jal((u32 *)_sr2, translation_ptr);                                \
 }                                                                             \
 
 #define generate_shift_reg_lsr_no_flags(_rm, _rs)                             \
@@ -694,10 +698,14 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     generate_load_imm(reg_temp2, 32);                                          \
-    rv_bgeu(reg_a1, reg_temp2, 12);                                            \
+    u8 *_sr1 = translation_ptr;                                                \
+    rv_bgeu(reg_a1, reg_temp2, 0);                                             \
     rv_srl(reg_a0, reg_a0, reg_a1);                                            \
-    rv_j(8);                                                                   \
+    u8 *_sr2 = translation_ptr;                                                \
+    rv_j(0);                                                                   \
+    rv_patch_branch((u32 *)_sr1, translation_ptr);                             \
     rv_mv(reg_a0, reg_zero);                                                   \
+    rv_patch_jal((u32 *)_sr2, translation_ptr);                                \
 }                                                                             \
 
 #define generate_shift_reg_asr_no_flags(_rm, _rs)                             \
@@ -706,10 +714,14 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     generate_load_imm(reg_temp2, 32);                                          \
-    rv_bltu(reg_a1, reg_temp2, 12);                                            \
+    u8 *_sr1 = translation_ptr;                                                \
+    rv_bltu(reg_a1, reg_temp2, 0);                                             \
     rv_srai(reg_a0, reg_a0, 31);                                               \
-    rv_j(8);                                                                   \
+    u8 *_sr2 = translation_ptr;                                                \
+    rv_j(0);                                                                   \
+    rv_patch_branch((u32 *)_sr1, translation_ptr);                             \
     rv_sra(reg_a0, reg_a0, reg_a1);                                            \
+    rv_patch_jal((u32 *)_sr2, translation_ptr);                                \
 }                                                                             \
 
 #define generate_shift_reg_ror_no_flags(_rm, _rs)                             \
@@ -725,19 +737,27 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
-    rv_beqz(reg_a1, 28);                                                       \
+    u8 *_sr0 = translation_ptr;                                                \
+    rv_beqz(reg_a1, 0);                                                        \
     rv_addi(reg_temp2, rv_zero, 32);                                           \
-    rv_bgeu(reg_a1, reg_temp2, 24);                                            \
+    u8 *_sr1 = translation_ptr;                                                \
+    rv_bgeu(reg_a1, reg_temp2, 0);                                             \
     rv_addi(reg_temp, reg_a1, -1);                                             \
     rv_sll(reg_c_cache, reg_a0, reg_temp);                                     \
     rv_srli(reg_c_cache, reg_c_cache, 31);                                     \
     rv_sll(reg_a0, reg_a0, reg_a1);                                            \
-    rv_j(20);                                                                  \
+    u8 *_sr2 = translation_ptr;                                                \
+    rv_j(0);                                                                   \
     /* amt >= 32: C = bit0(Rm) if amt==32, else 0 */                           \
+    rv_patch_branch((u32 *)_sr1, translation_ptr);                             \
     rv_andi(reg_c_cache, reg_a0, 1);                                           \
-    rv_beq(reg_a1, reg_temp2, 8);                                              \
+    u8 *_sr3 = translation_ptr;                                                \
+    rv_beq(reg_a1, reg_temp2, 0);                                              \
     rv_mv(reg_c_cache, reg_zero);                                              \
+    rv_patch_branch((u32 *)_sr3, translation_ptr);                             \
     rv_mv(reg_a0, reg_zero);                                                   \
+    rv_patch_jal((u32 *)_sr2, translation_ptr);                                \
+    rv_patch_branch((u32 *)_sr0, translation_ptr);                             \
 }                                                                             \
 
 #define generate_shift_reg_lsr_flags(_rm, _rs)                                \
@@ -745,19 +765,27 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
-    rv_beqz(reg_a1, 24);                                                       \
+    u8 *_sr0 = translation_ptr;                                                \
+    rv_beqz(reg_a1, 0);                                                        \
     rv_addi(reg_temp2, rv_zero, 32);                                           \
-    rv_bgeu(reg_a1, reg_temp2, 24);                                            \
+    u8 *_sr1 = translation_ptr;                                                \
+    rv_bgeu(reg_a1, reg_temp2, 0);                                             \
     rv_addi(reg_temp, reg_a1, -1);                                             \
     rv_srl(reg_c_cache, reg_a0, reg_temp);                                     \
     rv_andi(reg_c_cache, reg_c_cache, 1);                                      \
     rv_srl(reg_a0, reg_a0, reg_a1);                                            \
-    rv_j(20);                                                                  \
+    u8 *_sr2 = translation_ptr;                                                \
+    rv_j(0);                                                                   \
     /* amt >= 32: C = bit31(Rm) if amt==32, else 0 */                          \
+    rv_patch_branch((u32 *)_sr1, translation_ptr);                             \
     rv_srli(reg_c_cache, reg_a0, 31);                                          \
-    rv_beq(reg_a1, reg_temp2, 8);                                              \
+    u8 *_sr3 = translation_ptr;                                                \
+    rv_beq(reg_a1, reg_temp2, 0);                                              \
     rv_mv(reg_c_cache, reg_zero);                                              \
+    rv_patch_branch((u32 *)_sr3, translation_ptr);                             \
     rv_mv(reg_a0, reg_zero);                                                   \
+    rv_patch_jal((u32 *)_sr2, translation_ptr);                                \
+    rv_patch_branch((u32 *)_sr0, translation_ptr);                             \
 }                                                                             \
 
 #define generate_shift_reg_asr_flags(_rm, _rs)                                \
@@ -765,16 +793,22 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
-    rv_beqz(reg_a1, 20);                                                       \
+    u8 *_sr0 = translation_ptr;                                                \
+    rv_beqz(reg_a1, 0);                                                        \
     rv_addi(reg_temp2, rv_zero, 32);                                           \
-    rv_bltu(reg_a1, reg_temp2, 16);                                            \
+    u8 *_sr1 = translation_ptr;                                                \
+    rv_bltu(reg_a1, reg_temp2, 0);                                             \
     rv_srli(reg_c_cache, reg_a0, 31);                                          \
     rv_srai(reg_a0, reg_a0, 31);                                               \
-    rv_j(20);                                                                  \
+    u8 *_sr2 = translation_ptr;                                                \
+    rv_j(0);                                                                   \
+    rv_patch_branch((u32 *)_sr1, translation_ptr);                             \
     rv_addi(reg_temp, reg_a1, -1);                                             \
     rv_srl(reg_c_cache, reg_a0, reg_temp);                                     \
     rv_andi(reg_c_cache, reg_c_cache, 1);                                      \
     rv_sra(reg_a0, reg_a0, reg_a1);                                            \
+    rv_patch_jal((u32 *)_sr2, translation_ptr);                                \
+    rv_patch_branch((u32 *)_sr0, translation_ptr);                             \
 }                                                                             \
 
 #define generate_shift_reg_ror_flags(_rm, _rs)                                \
@@ -782,16 +816,21 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
-    rv_beqz(reg_a1, 16);                                                       \
+    u8 *_sr0 = translation_ptr;                                                \
+    rv_beqz(reg_a1, 0);                                                        \
     rv_addi(reg_temp, reg_a1, -1);                                             \
     rv_srl(reg_c_cache, reg_a0, reg_temp);                                     \
     rv_andi(reg_c_cache, reg_c_cache, 1);                                      \
     rv_ror(reg_a0, reg_a0, reg_a1, reg_temp, reg_temp2);                      \
-    rv_j(20);                                                                  \
+    u8 *_sr1 = translation_ptr;                                                \
+    rv_j(0);                                                                   \
+    /* amt == 0: RRX (rotate right extended) */                                \
     rv_andi(reg_c_cache, reg_a0, 1);                                           \
     rv_srli(reg_a0, reg_a0, 1);                                                \
     rv_slli(reg_temp, reg_c_cache, 31);                                        \
     rv_or(reg_a0, reg_a0, reg_temp);                                           \
+    rv_patch_jal((u32 *)_sr1, translation_ptr);                                \
+    rv_patch_branch((u32 *)_sr0, translation_ptr);                             \
 }                                                                             \
 
 #define generate_shift_imm(arm_reg, name, flags_op)                           \
