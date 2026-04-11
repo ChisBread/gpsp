@@ -380,6 +380,7 @@
 | +OPT-M (stub符号别名+合并移位) | ~4.44 s | ~675 | ≈平 (真实硬件受益) |
 | +-fno-pic -fno-pie (ESP32-P4) | — | — | 真实硬件受益 |
 | +OPT-K (Store VRAM/OAM快路径+ROM mirror) | ~4.85 s | ~617 | ≈平 (真实硬件受益) |
+| +OPT-N (CMP+Branch融合) | ~4.87 s | ~616 | ≈平 (真实硬件受益) |
 | (参考) Zba+Zbb | 7.28 s | 411 | -21.1% |
 
 ### 已采纳优化
@@ -417,6 +418,7 @@
 - **OPT-M**: Stub符号别名+合并移位 — `ewram_tags`/`iwram_data`/`ram_tag_table`别名省lui+add; `srai t0,t0,17`合并sign-extend+shift
 - **-fno-pic -fno-pie**: ESP32-P4 CMakeLists.txt 添加，消除GOT间接寻址开销
 - **OPT-K**: Store VRAM/OAM汇编快路径 + Load ROM mirror 0x0D/0x0E覆盖修复
+- **OPT-N**: Thumb CMP+Branch融合 — CMP后窥探Bcc，EQ/NE/CS/CC/GE/LT条件直接发出RISC-V比较跳转 (每次省2-6指令)
 
 ### 已回退优化
 - **OPT-4**: 去除Load路径PC加载 (QEMU回退)
@@ -669,3 +671,40 @@
 **注意**: 此测量使用-O2编译（加快编译速度），与之前-O3基准不可直接比较。QEMU中VRAM/OAM store频率低，改善不可测量。真实ESP32-P4上PPU/DMA相关的VRAM写入是热路径，预计受益。
 
 **结论**: 补齐Store快路径覆盖（与已有Load快路径对称），零风险。保留。
+
+---
+
+### OPT-N: Thumb CMP+Branch 融合
+
+**变更**: 在 Thumb CMP 指令翻译时，窥探下一条指令是否为条件分支 (Bcc)。若条件匹配且 flag 无其他消费者，跳过全部 flag 计算，让 Bcc 直接发出 RISC-V 比较跳转指令。
+
+**融合条件**:
+- 下一条指令是 Thumb Bcc (0xD0-0xDD)
+- 条件为 EQ/NE/CS/CC/GE/LT（6种条件可融合）
+- `flag_status` 精确匹配该条件所需的 flag（无额外消费者）
+- 下一条指令不是分支入口点 (`update_cycles == 0`)
+- 不跨越 32KB page 边界
+
+**融合效果**（省略的指令数）:
+
+| 模式 | 原始指令 | 融合后 | 节省 |
+|------|---------|--------|------|
+| CMP rn, rm + BEQ/BNE | sub + seqz + beqz/bnez | beq/bne rn, rm | **2条** |
+| CMP rn, rm + BCS/BCC | sub + sltu + xori + beqz/bnez | bgeu/bltu rn, rm | **3条** |
+| CMP rn, rm + BGE/BLT | sub + N/V flags(4) + beq/bne N,V | blt/bge rn, rm | **6条** |
+| CMP rn, #imm + 同上 | load_imm + 同上 | load_imm + 1条分支 | **同上** |
+
+**安全保护**:
+- 仅 Thumb 模式生效（ARM 的 `flag_status=0xF` 永远不匹配精确条件）
+- dead flag elimination 确保 flag_status 是精确的
+- `cmp_fuse_active` 翻译完 Bcc 后立即清零
+- 不可融合条件 (MI/PL/VS/VC/HI/LS/GT/LE) 自动 fallback 到正常 flag 分支
+
+**文件**: `riscv/riscv_emit.h`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | OPT-K (3次) | OPT-N (3次) | 变化 |
+|------|-------------|-------------|------|
+| Total | 4.811, 4.844, 5.092 | 4.833, 4.867, 4.905 | QEMU噪声内 |
+
+**结论**: QEMU上持平（软件翻译执行，分支预测模型不同）。真实ESP32-P4（顺序执行核）上，省掉的指令直接转化为时钟周期节省。Thumb CMP+Bcc 是 GBA 代码中极常见的模式（循环、条件判断），每次融合省 2-6 条指令。保留。

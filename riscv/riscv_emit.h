@@ -1251,8 +1251,40 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_op_rscs_reg(_rd, _rn, reg_a0);                                   \
 }                                                                             \
 
+/* CMP+Branch fusion: if next Thumb instruction is a fusable Bcc whose
+ * flag requirements exactly match CMP's flag_status, skip flag generation
+ * and let the Bcc emit a direct RISC-V comparison branch instead.
+ * Fusable conditions: EQ/NE (Z), CS/CC (C), GE/LT (N+V). */
+#define cmp_try_fuse(_rn_rv, _rm_rv)                                          \
+({                                                                            \
+    u32 _ok = 0;                                                              \
+    if (pc + 2 < block_end_pc && ((pc & 0x7FFF) < 0x7FFE) &&                  \
+        !block_data[block_data_position + 1].update_cycles)                   \
+    {                                                                         \
+        u16 _nx = address16(pc_address_block, ((pc + 2) & 0x7FFF));           \
+        u32 _nc = (_nx >> 8) & 0x0F;                                          \
+        if ((_nx >> 12) == 0xD && _nc <= 0x0D) {                              \
+            u32 _nf;                                                          \
+            switch (_nc) {                                                    \
+                case 0x0: case 0x1: _nf = 0x04; break;                       \
+                case 0x2: case 0x3: _nf = 0x02; break;                       \
+                case 0xA: case 0xB: _nf = 0x09; break;                       \
+                default: _nf = 0; break;                                      \
+            }                                                                 \
+            if (_nf && (flag_status & 0x0F) == _nf) {                         \
+                cmp_fuse_rn_rv = (_rn_rv);                                    \
+                cmp_fuse_rm_rv = (_rm_rv);                                    \
+                cmp_fuse_active = 1;                                          \
+                _ok = 1;                                                      \
+            }                                                                 \
+        }                                                                     \
+    }                                                                         \
+    _ok;                                                                      \
+})
+
 #define generate_op_cmp_reg(_rd, _rn, _rm)                                    \
-    generate_op_subs_reg(reg_temp2, _rn, _rm)                                 \
+    if (!cmp_try_fuse(_rn, _rm))                                              \
+        generate_op_subs_reg(reg_temp2, _rn, _rm)                             \
 
 #define generate_op_cmn_reg(_rd, _rn, _rm)                                    \
     generate_op_adds_reg(reg_temp2, _rn, _rm)                                 \
@@ -1264,18 +1296,29 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_op_eors_reg(reg_temp2, _rn, _rm)                                 \
 
 #define generate_op_cmp_imm(_rd, _rn)                                         \
-    if (imm == 0)                                                             \
-    {                                                                         \
-        generate_op_logic_flags(_rn)                                          \
-        if (check_generate_c_flag)                                            \
-            rv_addi(reg_c_cache, rv_zero, 1);                                 \
-        if (check_generate_v_flag)                                            \
-            rv_mv(reg_v_cache, rv_zero);                                      \
+{                                                                             \
+    u32 _fuse_imm_ok = 0;                                                     \
+    if (imm == 0) {                                                           \
+        _fuse_imm_ok = cmp_try_fuse(_rn, rv_zero);                            \
+    } else {                                                                  \
+        /* For nonzero imm, load into reg_temp3 before attempting fusion */    \
+        u32 _temp_rm = reg_temp3;                                             \
+        generate_load_imm(reg_temp3, imm);                                    \
+        _fuse_imm_ok = cmp_try_fuse(_rn, _temp_rm);                           \
     }                                                                         \
-    else                                                                      \
-    {                                                                         \
-        generate_op_subs_imm(reg_temp2, _rn)                                  \
-    }
+    if (!_fuse_imm_ok) {                                                      \
+        cmp_fuse_active = 0;  /* safety clear */                              \
+        if (imm == 0) {                                                       \
+            generate_op_logic_flags(_rn)                                      \
+            if (check_generate_c_flag)                                        \
+                rv_addi(reg_c_cache, rv_zero, 1);                             \
+            if (check_generate_v_flag)                                        \
+                rv_mv(reg_v_cache, rv_zero);                                  \
+        } else {                                                              \
+            generate_op_subs_imm(reg_temp2, _rn)                              \
+        }                                                                     \
+    }                                                                         \
+}
 
 #define generate_op_cmn_imm(_rd, _rn)                                         \
     generate_op_adds_imm(reg_temp2, _rn)                                      \
@@ -2019,10 +2062,51 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_cycle_update();                                                  \
     generate_condition();                                                     \
 
+/* Fused condition macros: emit direct RISC-V comparison branch using
+ * saved CMP operands.  The branch sense is INVERTED (skip logic). */
+#define generate_fused_condition_eq()                                         \
+    (backpatch_address) = translation_ptr;                                    \
+    rv_bne(cmp_fuse_rn_rv, cmp_fuse_rm_rv, 0)                                \
+
+#define generate_fused_condition_ne()                                         \
+    (backpatch_address) = translation_ptr;                                    \
+    rv_beq(cmp_fuse_rn_rv, cmp_fuse_rm_rv, 0)                                \
+
+#define generate_fused_condition_cs()                                         \
+    (backpatch_address) = translation_ptr;                                    \
+    rv_bltu(cmp_fuse_rn_rv, cmp_fuse_rm_rv, 0)                               \
+
+#define generate_fused_condition_cc()                                         \
+    (backpatch_address) = translation_ptr;                                    \
+    rv_bgeu(cmp_fuse_rn_rv, cmp_fuse_rm_rv, 0)                               \
+
+#define generate_fused_condition_ge()                                         \
+    (backpatch_address) = translation_ptr;                                    \
+    rv_blt(cmp_fuse_rn_rv, cmp_fuse_rm_rv, 0)                                \
+
+#define generate_fused_condition_lt()                                         \
+    (backpatch_address) = translation_ptr;                                    \
+    rv_bge(cmp_fuse_rn_rv, cmp_fuse_rm_rv, 0)                                \
+
+/* Non-fusable conditions: fallback to normal flag-based branch */
+#define generate_fused_condition_mi()    generate_condition_mi()
+#define generate_fused_condition_pl()    generate_condition_pl()
+#define generate_fused_condition_vs()    generate_condition_vs()
+#define generate_fused_condition_vc()    generate_condition_vc()
+#define generate_fused_condition_hi()    generate_condition_hi()
+#define generate_fused_condition_ls()    generate_condition_ls()
+#define generate_fused_condition_gt()    generate_condition_gt()
+#define generate_fused_condition_le()    generate_condition_le()
+
 #define thumb_conditional_branch(condition)                                   \
 {                                                                             \
     generate_cycle_update();                                                  \
-    generate_condition_##condition();                                         \
+    if (cmp_fuse_active) {                                                    \
+        cmp_fuse_active = 0;                                                  \
+        generate_fused_condition_##condition();                               \
+    } else {                                                                  \
+        generate_condition_##condition();                                     \
+    }                                                                         \
     generate_branch_no_cycle_update(                                          \
         block_exits[block_exit_position].branch_source,                       \
         block_exits[block_exit_position].branch_target);                      \
@@ -2032,6 +2116,9 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define generate_block_extra_vars()                                           \
     u32 stored_pc = pc;                                                         \
+    u32 cmp_fuse_active = 0;                                                    \
+    u32 cmp_fuse_rn_rv = 0;                                                     \
+    u32 cmp_fuse_rm_rv = 0;                                                     \
 
 #define generate_block_extra_vars_arm()                                       \
     generate_block_extra_vars();                                                \

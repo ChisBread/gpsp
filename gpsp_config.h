@@ -35,7 +35,7 @@
   #define ROM_HOT_ZONE_SIZE          (1024 * 256)
   #define ROM_HOT_PC_RING_SIZE       1024
   #define ROM_HOT_DIR_MAX            2048 /* max blocks tracked in hot zone */
-  #define ROM_HOT_SAMPLE_SHIFT       3    /* log2 of hit sampling rate (1/8) */
+  #define ROM_HOT_SAMPLE_SHIFT       4    /* log2 of hit sampling rate (1/16) */
   #define ROM_HOT_ZONE_MAX_AGE       3    /* Path A flushes before forced rebuild */
   #define ROM_HOT_MIN_FREQ           2    /* min ring count to enter hot zone */
 #else
