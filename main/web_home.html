@@ -155,12 +155,13 @@ const MAX_PTS = 60;
 let fpsEma = 0;
 const FPS_ALPHA = 0.15;
 
-/* Series config: key in JSON → label, color */
+/* Series config: key in JSON → label, color.
+ * Drawn bottom-to-top in stacked area chart.
+ * cpu includes render time, so the stack shows total then render
+ * as a sub-portion within it. */
 const SERIES = [
-  {key:'cpu',   label:'CPU',       color:'#50c878'},
-  {key:'render',label:'渲染',      color:'#d9a84a'},
-  {key:'submit',label:'提交',      color:'#8b5cf6'},
-  {key:'wait',  label:'等待',      color:'#4a90d9'},
+  {key:'cpu_only', label:'CPU(不含渲染)', color:'#50c878'},
+  {key:'render',   label:'渲染',           color:'#d9a84a'},
 ];
 
 let history = [];  /* array of {ts, ...key: avg_us} */
@@ -190,50 +191,75 @@ function drawChart(){
 
   const n = history.length;
   const dx = W / (MAX_PTS - 1);
-  const yMax = FRAME_US;  /* 1 frame = 100% */
+  const yMax = FRAME_US * 1.25;  /* 125% headroom */
+  const startX = (MAX_PTS - n) * dx;
 
-  /* Grid lines at 25%, 50%, 75%, 100% */
+  /* Grid lines at 25%, 50%, 75%, 100%, 125% (scaled to yMax=125%) */
+  const pctY = pct => H - (pct / 125) * H;
   ctx.strokeStyle = '#1a2a3a';
   ctx.lineWidth = 0.5;
-  for (let pct of [25, 50, 75, 100]) {
-    const y = H - (pct / 100) * H;
+  for (let pct of [25, 50, 75, 125]) {
+    const y = pctY(pct);
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
   }
+  /* 100% red dashed line */
+  ctx.strokeStyle = '#e06060';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath(); ctx.moveTo(0, pctY(100)); ctx.lineTo(W, pctY(100)); ctx.stroke();
+  ctx.setLineDash([]);
 
   /* Right-side % labels */
   ctx.fillStyle = '#445';
   ctx.font = '10px monospace';
   ctx.textAlign = 'right';
-  for (let pct of [25, 50, 75, 100]) {
-    ctx.fillText(pct + '%', W - 2, H - (pct / 100) * H - 2);
+  for (let pct of [25, 50, 75, 125]) {
+    ctx.fillText(pct + '%', W - 2, pctY(pct) - 2);
+  }
+  ctx.fillStyle = '#e06060';
+  ctx.fillText('100%', W - 2, pctY(100) - 2);
+
+  /* Stacked area chart — draw from top series down so bottom series
+   * visually appears at the bottom of the stack. */
+  const ns = activeSeries.length;
+  if (ns === 0) return;
+
+  /* Compute cumulative sums per point for each layer */
+  const cumY = [];  /* cumY[s][i] = cumulative value up to layer s */
+  for (let s = 0; s < ns; s++) {
+    cumY.push(new Float32Array(n));
+    for (let i = 0; i < n; i++) {
+      const prev = s > 0 ? cumY[s - 1][i] : 0;
+      cumY[s][i] = prev + (history[i][activeSeries[s].key] || 0);
+    }
   }
 
-  /* Independent line chart — each series drawn separately */
-  for (const s of activeSeries) {
-    const startX = (MAX_PTS - n) * dx;
+  /* Draw layers top-down so lower layers paint over upper layers */
+  for (let s = ns - 1; s >= 0; s--) {
+    const color = activeSeries[s].color;
 
-    /* Filled area under line */
+    /* Filled area between this cumulative top and the baseline */
     ctx.beginPath();
     ctx.moveTo(startX, H);
     for (let i = 0; i < n; i++) {
       const x = startX + i * dx;
-      const y = H - ((history[i][s.key] || 0) / yMax) * H;
+      const y = H - (cumY[s][i] / yMax) * H;
       ctx.lineTo(x, y);
     }
     ctx.lineTo(startX + (n - 1) * dx, H);
     ctx.closePath();
-    ctx.fillStyle = s.color + '30';
+    ctx.fillStyle = color + '90';
     ctx.fill();
 
-    /* Line */
+    /* Top edge line */
     ctx.beginPath();
     for (let i = 0; i < n; i++) {
       const x = startX + i * dx;
-      const y = H - ((history[i][s.key] || 0) / yMax) * H;
+      const y = H - (cumY[s][i] / yMax) * H;
       i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
-    ctx.strokeStyle = s.color;
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
     ctx.stroke();
   }
 }
@@ -589,6 +615,13 @@ async function poll(){
     $('snd').textContent = d.snd_us != null ? d.snd_us : '--';
     $('aspd').textContent = d.audio_spd != null ? (d.audio_spd / 100).toFixed(2) : '--';
     $('acq').textContent = d.acquire && d.acquire.avg != null ? d.acquire.avg : '--';
+
+    /* Synthesize cpu_only = cpu - render */
+    if (d.cpu && d.cpu.avg !== undefined) {
+      const rAvg = (d.render && d.render.avg) || 0;
+      const rP99 = (d.render && d.render.p99) || 0;
+      d.cpu_only = {avg: Math.max(0, d.cpu.avg - rAvg), p99: Math.max(0, d.cpu.p99 - rP99)};
+    }
 
     /* Determine active series on first data */
     if (activeSeries.length === 0) {

@@ -2,22 +2,25 @@
  * gpsp app support — AV pipeline
  *
  * Depth-2 pipeline: the LCD panel owns its own triple-buffered DPI
- * framebuffers, and the emulator keeps two GBA render buffers. PPA is
- * fired asynchronously after each frame and awaited at the start of
- * the next frame, so emulation can render into the alternate GBA buffer
- * while PPA DMA is still consuming the previous one.
+ * framebuffers, and the emulator keeps two GBA render buffers.
  *
- * Audio uses a pipelined approach mirroring the video path: the
- * emulation core collects samples from the ring buffer and hands them
- * to a dedicated audio task on the service core, which performs the
- * (costly) resample + I2S DMA write.  The emulation core waits for
- * the previous audio frame to finish at the start of the NEXT frame,
- * so that emulation and audio processing overlap.
+ * All heavyweight per-frame work — PPA submit, audio collection,
+ * dynamic rate control, resampling, I2S DMA write, PPA await, and
+ * VSYNC pacing — runs on a single "AV output task" pinned to the
+ * service core.  The emulation core only flips a buffer pointer and
+ * kicks the task via xTaskNotifyGive, then immediately starts
+ * rendering the next frame.  At the beginning of the NEXT frame,
+ * av_pipeline_wait_for_previous_frame() blocks until the AV task
+ * signals completion, providing natural backpressure.
  *
- * Backpressure is inherent: if I2S DMA is full, the audio task blocks
- * in i2s_write, and the emulation core blocks waiting for the audio
- * task — naturally pacing emulation to real-time.  Dynamic rate
- * control adjusts the resample ratio to minimise this blocking.
+ * On the service core the order is:
+ *   1. video_driver_submit_frame  — kick PPA DMA (async, ~300 µs setup)
+ *   2. collect_audio + DRC        — while PPA hardware runs in parallel
+ *   3. audio_driver_write         — resample + I2S (PPA still parallel)
+ *   4. video_driver_await_frame   — PPA likely done; draw_bitmap + VSYNC
+ *
+ * This keeps PPA DMA, audio processing, and I2S DMA overlapped,
+ * and the emulation core is 100 % free for GBA computation.
  */
 
 #include <string.h>
@@ -39,9 +42,8 @@ static bool audio_enabled;
 #define GBA_FRAME_RATE               59.7275f
 #define GBA_RENDER_FB_COUNT          2
 #define AUDIO_FRAME_SAMPLES_MAX      ((GBA_SOUND_FREQUENCY / 50) + 1)
-#define AUDIO_BUFFER_COUNT           2
-#define AUDIO_TASK_STACK_SIZE        6144
-#define AUDIO_TASK_PRIORITY          (configMAX_PRIORITIES - 2)
+#define AV_TASK_STACK_SIZE           8192
+#define AV_TASK_PRIORITY             (configMAX_PRIORITIES - 2)
 
 /* Dynamic rate control.
  *
@@ -67,19 +69,17 @@ static bool audio_enabled;
 static const char *TAG = "gpsp_av";
 
 static GPSP_EXTRAM_BSS u16 gba_framebuffers[GBA_RENDER_FB_COUNT][GBA_SCREEN_WIDTH * (GBA_SCREEN_HEIGHT + 1)] __attribute__((aligned(64)));
-static GPSP_EXTRAM_BSS int16_t audio_buffers[AUDIO_BUFFER_COUNT][AUDIO_FRAME_SAMPLES_MAX * 2];
-static uint32_t audio_write_idx;        /* which buffer the emu core fills */
+static GPSP_EXTRAM_BSS int16_t audio_buffer[AUDIO_FRAME_SAMPLES_MAX * 2];
 static float audio_frame_samples;
 static float audio_frame_fraction;
 static uint32_t current_render_fb;
-static bool video_frame_pending;
-static bool audio_frame_pending;
 
-/* Audio task. */
-static TaskHandle_t audio_task_handle;
-static volatile uint32_t audio_pending_frames; /* frames to write (set by emu core) */
-static volatile int16_t *audio_pending_buf;    /* buffer pointer for audio task */
-static TaskHandle_t audio_caller_task;         /* emu core task, for completion signal */
+/* Unified AV output task. */
+static TaskHandle_t av_task_handle;
+static TaskHandle_t av_caller_task;            /* emu core task handle */
+static volatile const u16 *av_pending_fb;      /* framebuffer for PPA */
+static volatile bool av_pending_skip_video;
+static bool av_frame_pending;
 
 /* DRC state — owned by emulation core. */
 static uint32_t drc_nominal_step_q16;
@@ -119,32 +119,68 @@ static uint32_t collect_audio_frame(int16_t *audio_buf, size_t audio_buf_frames)
     return frames_produced;
 }
 
-/* Audio task: resample + i2s_write on the service core. */
-static void audio_output_task(void *arg)
+/* Forward declaration — defined below av_output_task. */
+static void audio_dynamic_rate_control(uint32_t frames_consumed);
+
+/* Unified AV output task: PPA + audio + VSYNC on the service core.
+ *
+ * Runs one iteration per emulated frame.  The order is chosen so that
+ * PPA DMA runs in the hardware background while audio is processed:
+ *   1. Kick PPA async  (hardware busy ─────────────────────────┐)
+ *   2. Collect audio from ring buffer                          │
+ *   3. DRC arithmetic                                          │
+ *   4. Resample + I2S DMA write (blocks if DMA full)           │
+ *   5. Await PPA completion  (usually instant by now) ─────────┘
+ *   6. draw_bitmap + VSYNC pacing
+ *   7. Signal emulation core
+ */
+static void av_output_task(void *arg)
 {
     (void)arg;
 
     while (true) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        uint32_t frames = audio_pending_frames;
-        int16_t *buf = (int16_t *)audio_pending_buf;
+        bool skip_video = av_pending_skip_video;
 
-        if (frames > 0 && buf != NULL) {
-            esp_err_t err = audio_driver_write(buf, frames);
+        /* 1. Kick PPA hardware (async DMA). */
+        if (!skip_video) {
+            esp_err_t err = video_driver_submit_frame((const uint16_t *)av_pending_fb);
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Audio write failed: %s", esp_err_to_name(err));
+                ESP_LOGW(TAG, "Video submit failed: %s", esp_err_to_name(err));
             }
         }
 
-        /* Signal completion to the emulation core. */
-        xTaskNotifyGive(audio_caller_task);
+        /* 2-4. Audio: collect → DRC → resample + I2S.
+         * PPA DMA runs in parallel during this entire block. */
+        if (audio_enabled) {
+            uint32_t frames = collect_audio_frame(audio_buffer,
+                                                  AUDIO_FRAME_SAMPLES_MAX);
+            if (frames > 0) {
+                audio_dynamic_rate_control(frames);
+
+                esp_err_t err = audio_driver_write(audio_buffer, frames);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "Audio write failed: %s",
+                             esp_err_to_name(err));
+                }
+            }
+        }
+
+        /* 5-6. Await PPA + VSYNC.  PPA is almost certainly finished
+         * by now, so this is mainly the VSYNC wait. */
+        if (!skip_video) {
+            video_driver_await_frame();
+        }
+
+        /* 7. Signal the emulation core that this frame is done. */
+        xTaskNotifyGive(av_caller_task);
     }
 }
 
 /* Estimates the emulator's true source sample rate from a sliding
  * window of per-frame production and applies a water-level correction.
- * Called synchronously from the emulation core each frame. */
+ * Called from the AV output task on the service core each frame. */
 static void audio_dynamic_rate_control(uint32_t frames_consumed)
 {
     uint32_t pending = sound_samples_pending();
@@ -206,10 +242,9 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
     audio_frame_samples = (float)GBA_SOUND_FREQUENCY / GBA_FRAME_RATE;
     audio_frame_fraction = 0.0f;
     current_render_fb = 0;
-    video_frame_pending = false;
-    audio_frame_pending = false;
-    audio_write_idx = 0;
-    audio_caller_task = NULL;
+    av_frame_pending = false;
+    av_caller_task = NULL;
+    av_task_handle = NULL;
     drc_nominal_prod_q8 = (int32_t)((2.0f * (float)GBA_SOUND_FREQUENCY
                                      / GBA_FRAME_RATE) * 256.0f);
     drc_nominal_step_q16 = (uint32_t)(((uint64_t)GBA_SOUND_FREQUENCY << 16)
@@ -239,25 +274,26 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
         drc_step_q24 = (int32_t)((num << 8) / drc_nominal_prod_q8);
     }
 
-    if (audio_enabled) {
+    /* Create the unified AV output task on the service core. */
+    {
         BaseType_t core = (CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0;
         BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(
-            audio_output_task, "av_audio",
-            AUDIO_TASK_STACK_SIZE, NULL,
-            AUDIO_TASK_PRIORITY,
-            &audio_task_handle,
+            av_output_task, "av_out",
+            AV_TASK_STACK_SIZE, NULL,
+            AV_TASK_PRIORITY,
+            &av_task_handle,
             core,
             MALLOC_CAP_SPIRAM);
         if (ret != pdPASS) {
-            ESP_LOGW(TAG, "Audio task creation failed; audio disabled");
-            audio_enabled = false;
-            audio_task_handle = NULL;
-        } else {
-            ESP_LOGI(TAG, "Audio: pipelined DRC on core %d (source %lu -> output %lu Hz)",
-                     (int)core,
-                     (unsigned long)GBA_SOUND_FREQUENCY,
-                     (unsigned long)CONFIG_GPSP_AUDIO_SAMPLE_RATE);
+            ESP_LOGE(TAG, "AV task creation failed");
+            av_task_handle = NULL;
+            return ESP_FAIL;
         }
+        ESP_LOGI(TAG, "AV output task on core %d (audio %s, source %lu -> output %lu Hz)",
+                 (int)core,
+                 audio_enabled ? "on" : "off",
+                 (unsigned long)GBA_SOUND_FREQUENCY,
+                 (unsigned long)CONFIG_GPSP_AUDIO_SAMPLE_RATE);
     }
 
     ESP_LOGI(TAG, "AV pipeline initialised");
@@ -271,58 +307,39 @@ u16 *av_pipeline_video_buffer(void)
 
 void av_pipeline_wait_for_previous_frame(void)
 {
-    if (video_frame_pending) {
-        video_driver_await_frame();
-        video_frame_pending = false;
-    }
-
-    /* Wait for the previous audio frame's resample + i2s_write to
-     * finish on the service core.  If I2S DMA was full, this is
-     * where we block — propagating backpressure to the emu core. */
-    if (audio_frame_pending) {
+    /* Block until the AV output task finishes the previous frame's
+     * PPA + audio + VSYNC.  If the emulator is faster than real-time,
+     * this is where it stalls — backpressure from I2S/VSYNC. */
+    if (av_frame_pending) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        audio_frame_pending = false;
+        av_frame_pending = false;
     }
 }
 
 esp_err_t av_pipeline_submit_frame(bool skip_video)
 {
+    if (!av_task_handle) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Capture the calling task handle on the first call so the
+     * AV task notifies the correct (emulation) task. */
+    if (av_caller_task == NULL) {
+        av_caller_task = xTaskGetCurrentTaskHandle();
+    }
+
+    /* Set up the work descriptor for the AV task. */
     if (!skip_video) {
-        esp_err_t err = video_driver_submit_frame(gba_framebuffers[current_render_fb]);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Video submit failed: %s", esp_err_to_name(err));
-            return err;
-        }
+        av_pending_fb = gba_framebuffers[current_render_fb];
         current_render_fb = (current_render_fb + 1) % GBA_RENDER_FB_COUNT;
-
-        /* The next av_pipeline_wait_for_previous_frame() waits for
-         * completion while the emulator is already rendering into the
-         * alternate GBA buffer. */
-        video_frame_pending = true;
     }
+    av_pending_skip_video = skip_video;
 
-    if (audio_enabled && audio_task_handle) {
-        /* Capture the calling task handle on the first call so the
-         * audio task notifies the correct (emulation) task. */
-        if (audio_caller_task == NULL) {
-            audio_caller_task = xTaskGetCurrentTaskHandle();
-        }
-
-        /* Collect samples on the emu core (cheap: just memcpy from ring
-         * buffer).  DRC also runs here since it's just arithmetic. */
-        int16_t *buf = audio_buffers[audio_write_idx];
-        uint32_t frames = collect_audio_frame(buf, AUDIO_FRAME_SAMPLES_MAX);
-        if (frames > 0) {
-            audio_dynamic_rate_control(frames);
-
-            /* Hand off to the audio task for resample + i2s_write. */
-            audio_pending_buf = buf;
-            audio_pending_frames = frames;
-            audio_write_idx = (audio_write_idx + 1) % AUDIO_BUFFER_COUNT;
-            xTaskNotifyGive(audio_task_handle);
-            audio_frame_pending = true;
-        }
-    }
+    /* Kick the AV output task and return immediately — the emulation
+     * core is now free to render the next frame into the alternate
+     * GBA buffer while PPA + audio run on the service core. */
+    xTaskNotifyGive(av_task_handle);
+    av_frame_pending = true;
 
     return ESP_OK;
 }

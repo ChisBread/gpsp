@@ -1278,7 +1278,6 @@ int gba_session_stats_json(char *buf, size_t buf_size)
 
     p += json_stat(p, end, "cpu",     &s_perf_stats.cpu_us);
     p += json_stat(p, end, "render",  &s_perf_stats.render_us);
-    p += json_stat(p, end, "submit",  &s_perf_stats.submit_us);
     p += json_stat(p, end, "acquire", &s_perf_stats.acquire_us);
 
 #ifdef CPU_PROFILE_STATS
