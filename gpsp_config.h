@@ -13,11 +13,27 @@
 
 /* Cache sizes and their config knobs */
 #if defined(SMALL_TRANSLATION_CACHE)
-  #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 2)
+  #ifdef ROM_HOT_ZONE
+    #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 2 + ROM_HOT_ZONE_SIZE)
+  #else
+    #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 2)
+  #endif
   #define RAM_TRANSLATION_CACHE_SIZE (1024 * 384)
 #else
   #define ROM_TRANSLATION_CACHE_SIZE (1024 * 1024 * 10)
   #define RAM_TRANSLATION_CACHE_SIZE (1024 * 512)
+#endif
+
+/* Hot zone: extra PSRAM dedicated to surviving ROM cache flushes.
+   After a flush, hot blocks are immediately re-translated from a
+   ring buffer of recent miss PCs, with a single icache sync.
+   Enabled by defining ROM_HOT_ZONE at build time. */
+#ifdef ROM_HOT_ZONE
+  #define ROM_HOT_ZONE_SIZE          (1024 * 256)
+  #define ROM_HOT_PC_RING_SIZE       512
+#else
+  #define ROM_HOT_ZONE_SIZE          0
+  #define ROM_HOT_PC_RING_SIZE       0
 #endif
 
 /* Should be an upperbound to the maximum number of bytes a single JIT'ed

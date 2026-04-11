@@ -84,6 +84,14 @@ ifeq ($(TRACE),1)
   FEAT_DEF += -DTRACE_INSTRUCTIONS
 endif
 
+ifeq ($(SMALL_CACHE),1)
+  FEAT_DEF += -DSMALL_TRANSLATION_CACHE
+endif
+
+ifeq ($(HOT_ZONE),1)
+  FEAT_DEF += -DROM_HOT_ZONE
+endif
+
 # ── Common flags ───────────────────────────────────────────────────
 
 INCS     = -I$(ROOT) $(ARCH_INC) -I$(ROOT)/libretro -I$(LRC)/include -I.

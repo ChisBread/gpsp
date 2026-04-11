@@ -90,6 +90,10 @@ if(CONFIG_GPSP_SMALL_TRANSLATION_CACHE)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC SMALL_TRANSLATION_CACHE)
 endif()
 
+if(CONFIG_GPSP_ROM_HOT_ZONE)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC ROM_HOT_ZONE)
+endif()
+
 if(CONFIG_GPSP_ROM_BUFFER_SIZE)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC
         ROM_BUFFER_SIZE=${CONFIG_GPSP_ROM_BUFFER_SIZE}

@@ -65,6 +65,19 @@ u32 rom_cache_watermark = INITIAL_ROM_WATERMARK;
 
 u8 *bios_swi_entrypoint = NULL;
 
+#ifdef ROM_HOT_ZONE
+/* Ring buffer of recent ROM block miss PCs (with Thumb bit in LSB).
+   Used to re-translate hot blocks immediately after a cache flush. */
+static u32 hot_pc_ring[ROM_HOT_PC_RING_SIZE];
+static u32 hot_pc_ring_pos = 0;
+static u32 rom_hot_watermark = 0;  /* end of hot zone in cache */
+static bool rom_flush_in_progress = false;
+
+#define record_hot_pc(pc, thumb_bit) \
+    hot_pc_ring[hot_pc_ring_pos++ & (ROM_HOT_PC_RING_SIZE - 1)] = \
+        (pc) | (thumb_bit)
+#endif
+
 // Contains an offset table to rom_translation cache area
 // It features a chaining linked list for collisions
 // The rom area has a small header section that contains:
@@ -2600,6 +2613,14 @@ inline static ramtag_type* get_ram_tag(u16 tagval) {
 // be a real PC, for dual the least significant bit will determine if it's
 // ARM or Thumb mode.
 
+#ifdef ROM_HOT_ZONE
+#define hot_zone_record_miss_arm()   record_hot_pc(pc, 0)
+#define hot_zone_record_miss_thumb() record_hot_pc(pc, 1)
+#else
+#define hot_zone_record_miss_arm()
+#define hot_zone_record_miss_thumb()
+#endif
+
 #define block_lookup_address_pc_arm()                                         \
   u32 thumb = 0;                                                              \
   pc &= ~0x03
@@ -2685,6 +2706,7 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
         u8 *blkptr;                                                           \
         bool result;                                                          \
         CPU_PROF_INC(dynarec_lookup_misses);                                     \
+        hot_zone_record_miss_##type();                                        \
         bhdr = (hashhdr_type*)rom_translation_ptr;                            \
         bhdr->pc_value = key;                                                 \
         bhdr->next_entry = 0;                                                 \
@@ -3491,6 +3513,42 @@ void flush_translation_cache_rom(void)
   rom_translation_ptr      = &rom_translation_cache[rom_cache_watermark];
 
   memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
+
+#ifdef ROM_HOT_ZONE
+  /* Re-translate recently-missed ROM blocks into the hot zone.
+     Guard against recursive flush (translate_block may overflow). */
+  if (!rom_flush_in_progress) {
+    rom_flush_in_progress = true;
+
+    u32 count = hot_pc_ring_pos < ROM_HOT_PC_RING_SIZE
+                ? hot_pc_ring_pos : ROM_HOT_PC_RING_SIZE;
+    u8 *hot_limit = &rom_translation_cache[
+                      rom_cache_watermark + ROM_HOT_ZONE_SIZE
+                      - TRANSLATION_CACHE_LIMIT_THRESHOLD];
+
+    for (u32 i = 0; i < count; i++) {
+      u32 entry = hot_pc_ring[i];
+      u32 pc = entry & ~1u;
+      u8 pcregion = pc >> 24;
+
+      /* Only ROM blocks */
+      if (pcregion != 0x00 && (pcregion < 0x08 || pcregion > 0x0D))
+        continue;
+
+      /* Stop if we'd exceed hot zone budget */
+      if (rom_translation_ptr >= hot_limit)
+        break;
+
+      if (entry & 1)
+        block_lookup_translate_thumb(pc);
+      else
+        block_lookup_translate_arm(pc);
+    }
+
+    rom_hot_watermark = (u32)(rom_translation_ptr - rom_translation_cache);
+    rom_flush_in_progress = false;
+  }
+#endif
 }
 
 void init_dynarec_caches(void)

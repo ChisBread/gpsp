@@ -15,6 +15,16 @@ menu "gpSP GBA Emulator"
             Use smaller JIT code caches (2MB ROM / 384KB RAM instead of 10MB/512KB).
             Recommended for ESP32-P4 to conserve PSRAM.
 
+    config GPSP_ROM_HOT_ZONE
+        bool "Enable ROM hot zone (survives cache flush)"
+        default y
+        depends on GPSP_DYNAREC && GPSP_SMALL_TRANSLATION_CACHE
+        help
+            Reserve 256KB of extra PSRAM as a hot zone at the start of the
+            ROM translation cache.  When a full flush occurs, recent hot PCs
+            are re-translated into this zone so that frequently-used blocks
+            survive the flush and reduce re-translation stutter.
+
     config GPSP_ROM_BUFFER_SIZE
         int "ROM buffer size (MB)"
         default 32
