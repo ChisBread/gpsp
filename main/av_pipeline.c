@@ -216,10 +216,28 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
                                       / CONFIG_GPSP_AUDIO_SAMPLE_RATE);
     drc_step_q24 = (int32_t)drc_nominal_step_q16 << 8;
     drc_last_pending = 0;
-    memset(drc_window, 0, sizeof(drc_window));
-    drc_window_idx = 0;
-    drc_window_sum = 0;
-    drc_window_count = 0;
+    /* Pre-seed the DRC window with production matching the actual
+     * emulator speed (~60.5 Hz) rather than the nominal GBA rate
+     * (59.7275 Hz).  This gives the DRC an initial "boost" so the
+     * resample step is already close to the real operating point,
+     * avoiding a ~1-second convergence period that causes audible
+     * buffer oscillation and FPS jitter.
+     *
+     * Factor: 60.5 / 59.7275 ≈ 1.0129 → per-frame production is
+     * inflated by ~1.3% which translates to a ~1.3% higher initial
+     * resample step.  The DRC will refine from here. */
+    {
+        int32_t nom = (int32_t)(2.0f * (float)GBA_SOUND_FREQUENCY / GBA_FRAME_RATE);
+        int32_t seed = (int32_t)((float)nom * (60.5f / GBA_FRAME_RATE));
+        for (uint32_t i = 0; i < DRC_WINDOW_FRAMES; i++)
+            drc_window[i] = seed;
+        drc_window_idx = 0;
+        drc_window_sum = seed * DRC_WINDOW_FRAMES;
+        drc_window_count = DRC_WINDOW_FRAMES;
+        /* Also bias the EMA step so it's consistent with the window. */
+        int64_t num = (int64_t)drc_nominal_step_q16 * (seed << 8);
+        drc_step_q24 = (int32_t)((num << 8) / drc_nominal_prod_q8);
+    }
 
     if (audio_enabled) {
         BaseType_t core = (CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0;
@@ -317,11 +335,10 @@ bool av_pipeline_audio_enabled(void)
 int32_t av_pipeline_audio_speed_pcnt_x100(void)
 {
     /* Return speed relative to nominal as percent×100 (10000 = 100.00%).
-     * drc_step_q24 / (nominal_step_q16 << 8) is the resample ratio;
-     * the inverse is the playback speed ratio. */
+     * A higher resample step consumes more source per output sample,
+     * i.e. plays back faster.  speed = actual_step / nominal_step. */
     if (!audio_enabled || drc_nominal_step_q16 == 0)
         return 10000;
     int64_t nominal_q24 = (int64_t)drc_nominal_step_q16 << 8;
-    /* speed = nominal / actual  →  percent×100 = nominal * 1000000 / actual */
-    return (int32_t)(nominal_q24 * 10000 / drc_step_q24);
+    return (int32_t)((int64_t)drc_step_q24 * 10000 / nominal_q24);
 }

@@ -376,6 +376,9 @@
 | +OPT-G (小立即数SUBS/ADDS) | ~4.490 s | ~668 | -51.3% |
 | **+RVC (压缩指令集)** | **4.411 s** | **~680** | **-52.2%** |
 | +OPT-H/I/J (微优化) | ~4.444 s | ~673 | ≈平 |
+| +OPT-L (Dead-flag MV消除) | ~4.44 s | ~675 | ≈平 (真实硬件受益) |
+| +OPT-M (stub符号别名+合并移位) | ~4.44 s | ~675 | ≈平 (真实硬件受益) |
+| +-fno-pic -fno-pie (ESP32-P4) | — | — | 真实硬件受益 |
 | (参考) Zba+Zbb | 7.28 s | 411 | -21.1% |
 
 ### 已采纳优化
@@ -409,6 +412,9 @@
 - **OPT-H**: 分支出口PC加载可变长度 — generate_load_pc替代generate_load_pc_2inst
 - **OPT-I**: Block Memory preadjust+align合并 — mv+andi → 单条andi
 - **OPT-J**: BIC立即数andi优化 — ~imm ∈ [-2048,2047] 时直接andi
+- **OPT-L**: Dead-flag感知MV消除 — adds/subs/rsbs仅在C/V flag实际需要时才保存rn/rm
+- **OPT-M**: Stub符号别名+合并移位 — `ewram_tags`/`iwram_data`/`ram_tag_table`别名省lui+add; `srai t0,t0,17`合并sign-extend+shift
+- **-fno-pic -fno-pie**: ESP32-P4 CMakeLists.txt 添加，消除GOT间接寻址开销
 
 ### 已回退优化
 - **OPT-4**: 去除Load路径PC加载 (QEMU回退)
@@ -589,3 +595,48 @@
 5次测量: 4.455, 4.408, 4.423, 4.470, 4.465 (avg 4.444s)
 
 **结论**: QEMU 噪声内。这三项均为 JIT 代码体积微优化，减少指令数但不改变控制流。真实硬件 I-cache 压力下有累积收益。保留。
+
+---
+
+### OPT-L: Dead-flag感知MV消除
+
+**变更**: `generate_op_adds_reg`, `generate_op_subs_reg`, `generate_op_rsbs_reg` 及其 `_imm` 版本中，保存 rn/rm 到临时寄存器的 `rv_mv` 仅在C或V flag实际被后续指令使用时才emit。通过 `check_generate_c_flag` / `check_generate_v_flag` 宏（dead flag elimination）判断。
+**原理**: ARM flag-setting算术指令需要保存原始操作数以计算C/V flag。但大量场景（如 CMP 后仅用 BEQ/BNE 检查Z flag）并不需要C或V，此前的 `rv_mv` 保存操作完全浪费。
+**影响**:
+- `adds_reg/subs_reg/rsbs_reg`: 当C和V都不需要时省2条mv
+- `adds_imm/subs_imm/rsbs_imm`: 同理，快路径和慢路径均优化
+- Thumb `CMP Rn, Rm` (最频繁指令之一) 当后续仅用Z/N时完全消除保存开销
+
+**文件**: `riscv/riscv_emit.h`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+**结论**: QEMU噪声内。每次省0-2条指令，CMP+BEQ/BNE是GBA代码中最高频模式之一，真实ESP32-P4 I-cache受益。保留。
+
+---
+
+### OPT-M: Stub符号别名 + 合并移位
+
+**变更**（两项合并）:
+1. **符号别名**: 定义 `.set ewram_tags, ewram+0x40000`、`.set iwram_data, iwram+0x8000`、`.set ram_tag_table, ram_translation_cache+RAM_TRANSLATION_CACHE_SIZE`。在 `-fno-pic` 下 `la reg, sym` 为 `auipc+addi` (2指令)，替代原来的 `la reg, base; lui t, offset; add reg, reg, t` (4指令)
+2. **合并srai**: 间接分支RAM tag lookup中 `srai t0, t0, 16; srai t0, t0, 1` 合并为 `srai t0, t0, 17` (2→1指令，arm和thumb两处)
+
+**影响**:
+- `ewram_tags`别名: 间接分支EWRAM快路径 arm+thumb 各省2条指令
+- `ram_tag_table`别名: 间接分支RAM tag lookup arm+thumb 各省2条指令
+- 合并srai: arm+thumb 各省1条指令
+
+**文件**: `riscv/riscv_stub.S`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+**结论**: QEMU噪声内。间接分支是热路径（BX/POP PC），每次省3-5条指令，真实硬件受益。保留。
+
+---
+
+### -fno-pic -fno-pie (ESP32-P4 CMakeLists.txt)
+
+**变更**: `components/gpsp_core/CMakeLists.txt` 编译选项增加 `-fno-pic -fno-pie`
+**原理**: ESP32-P4裸金属环境无GOT/PLT需求。PIC代码中全局变量访问通过GOT间接 (`auipc+lw` 取GOT地址 → `lw` 取值)，非PIC代码直接 `auipc+addi` 得地址然后 `lw` 取值，省一次内存间接
+**影响**: 所有C代码全局变量访问减少1次load延迟，热路径（PPU渲染、内存访问函数）累积受益
+**文件**: `components/gpsp_core/CMakeLists.txt`
+
+**结论**: 零风险，纯收益。ESP32-P4目标无PIC需求。

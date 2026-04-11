@@ -101,7 +101,7 @@ if(CONFIG_GPSP_ROM_BUFFER_SIZE)
 endif()
 
 # Aggressive optimization for hot emulation code
-target_compile_options(${COMPONENT_LIB} PRIVATE -O3)
+target_compile_options(${COMPONENT_LIB} PRIVATE -O3 -fno-pic -fno-pie)
 
 # Enable Zbb (bit-manipulation) extension
 if(CONFIG_GPSP_HAVE_ZBB)

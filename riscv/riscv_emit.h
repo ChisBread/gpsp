@@ -1062,30 +1062,34 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define generate_op_adds_reg(_rd, _rn, _rm)                                   \
 {                                                                             \
-    u32 _rn_f = (_rd) == (_rn) ? (u32)reg_temp3 : (u32)(_rn);                \
-    u32 _rm_f = (_rd) == (_rm) ? (u32)reg_save0 : (u32)(_rm);                \
-    if ((_rd) == (_rn)) rv_mv(reg_temp3, _rn);                                \
-    if ((_rd) == (_rm)) rv_mv(reg_save0, _rm);                                \
+    u32 _need_cv = (check_generate_c_flag) || (check_generate_v_flag);        \
+    u32 _rn_f = ((_rd) == (_rn) && _need_cv) ? (u32)reg_temp3 : (u32)(_rn);  \
+    u32 _rm_f = ((_rd) == (_rm) && (check_generate_v_flag))                   \
+                ? (u32)reg_save0 : (u32)(_rm);                                \
+    if ((_rd) == (_rn) && _need_cv) rv_mv(reg_temp3, _rn);                    \
+    if ((_rd) == (_rm) && (check_generate_v_flag)) rv_mv(reg_save0, _rm);     \
     rv_add(_rd, _rn, _rm);                                                    \
     generate_op_add_flags(_rd, _rn_f, _rm_f);                                 \
 }
 
 #define generate_op_subs_reg(_rd, _rn, _rm)                                   \
 {                                                                             \
-    u32 _rn_f = (_rd) == (_rn) ? (u32)reg_temp3 : (u32)(_rn);                \
-    u32 _rm_f = (_rd) == (_rm) ? (u32)reg_save0 : (u32)(_rm);                \
-    if ((_rd) == (_rn)) rv_mv(reg_temp3, _rn);                                \
-    if ((_rd) == (_rm)) rv_mv(reg_save0, _rm);                                \
+    u32 _need_cv = (check_generate_c_flag) || (check_generate_v_flag);        \
+    u32 _rn_f = ((_rd) == (_rn) && _need_cv) ? (u32)reg_temp3 : (u32)(_rn);  \
+    u32 _rm_f = ((_rd) == (_rm) && _need_cv) ? (u32)reg_save0 : (u32)(_rm);  \
+    if ((_rd) == (_rn) && _need_cv) rv_mv(reg_temp3, _rn);                    \
+    if ((_rd) == (_rm) && _need_cv) rv_mv(reg_save0, _rm);                    \
     rv_sub(_rd, _rn, _rm);                                                    \
     generate_op_sub_flags(_rd, _rn_f, _rm_f);                                 \
 }
 
 #define generate_op_rsbs_reg(_rd, _rn, _rm)                                   \
 {                                                                             \
-    u32 _rm_f = (_rd) == (_rm) ? (u32)reg_temp3 : (u32)(_rm);                \
-    u32 _rn_f = (_rd) == (_rn) ? (u32)reg_save0 : (u32)(_rn);                \
-    if ((_rd) == (_rm)) rv_mv(reg_temp3, _rm);                                \
-    if ((_rd) == (_rn)) rv_mv(reg_save0, _rn);                                \
+    u32 _need_cv = (check_generate_c_flag) || (check_generate_v_flag);        \
+    u32 _rm_f = ((_rd) == (_rm) && _need_cv) ? (u32)reg_temp3 : (u32)(_rm);  \
+    u32 _rn_f = ((_rd) == (_rn) && _need_cv) ? (u32)reg_save0 : (u32)(_rn);  \
+    if ((_rd) == (_rm) && _need_cv) rv_mv(reg_temp3, _rm);                    \
+    if ((_rd) == (_rn) && _need_cv) rv_mv(reg_save0, _rn);                    \
     rv_sub(_rd, _rm, _rn);                                                    \
     generate_op_sub_flags(_rd, _rm_f, _rn_f);                                 \
 }
@@ -1162,8 +1166,9 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     if ((s32)(imm) >= 1 && (s32)(imm) <= 2047 && !check_generate_v_flag)     \
     {                                                                         \
         /* Small positive imm, no V needed: addi avoids loading imm */        \
-        u32 _rn_f = (_rd) == (_rn) ? (u32)reg_save0 : (u32)(_rn);            \
-        if ((_rd) == (_rn)) rv_mv(reg_save0, _rn);                            \
+        u32 _rn_f = ((_rd) == (_rn) && (check_generate_c_flag))              \
+                    ? (u32)reg_save0 : (u32)(_rn);                            \
+        if ((_rd) == (_rn) && (check_generate_c_flag)) rv_mv(reg_save0, _rn); \
         rv_addi(_rd, _rn, (s32)(imm));                                        \
         if (check_generate_c_flag)                                            \
             rv_sltu(reg_c_cache, _rd, _rn_f);                                 \
@@ -1171,9 +1176,11 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     }                                                                         \
     else                                                                      \
     {                                                                         \
-        u32 _rn_f = (_rd) == (_rn) ? (u32)reg_save0 : (u32)(_rn);            \
+        u32 _need_cv = (check_generate_c_flag) || (check_generate_v_flag);    \
+        u32 _rn_f = ((_rd) == (_rn) && _need_cv)                             \
+                    ? (u32)reg_save0 : (u32)(_rn);                            \
         generate_load_imm(reg_temp3, imm);                                    \
-        if ((_rd) == (_rn)) rv_mv(reg_save0, _rn);                            \
+        if ((_rd) == (_rn) && _need_cv) rv_mv(reg_save0, _rn);               \
         rv_add(_rd, _rn, reg_temp3);                                          \
         generate_op_add_flags(_rd, _rn_f, reg_temp3);                         \
     }                                                                         \
@@ -1184,8 +1191,10 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     if ((s32)(imm) >= 1 && (s32)(imm) <= 2047)                               \
     {                                                                         \
         /* Small positive imm: use addi/sltiu to avoid loading imm */         \
-        u32 _rn_f = (_rd) == (_rn) ? (u32)reg_save0 : (u32)(_rn);            \
-        if ((_rd) == (_rn)) rv_mv(reg_save0, _rn);                            \
+        u32 _need_cv = (check_generate_c_flag) || (check_generate_v_flag);    \
+        u32 _rn_f = ((_rd) == (_rn) && _need_cv)                             \
+                    ? (u32)reg_save0 : (u32)(_rn);                            \
+        if ((_rd) == (_rn) && _need_cv) rv_mv(reg_save0, _rn);               \
         rv_addi(_rd, _rn, -(s32)(imm));                                       \
         if (check_generate_c_flag)                                            \
         {                                                                     \
@@ -1203,9 +1212,11 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     }                                                                         \
     else                                                                      \
     {                                                                         \
-        u32 _rn_f = (_rd) == (_rn) ? (u32)reg_save0 : (u32)(_rn);            \
+        u32 _need_cv2 = (check_generate_c_flag) || (check_generate_v_flag);   \
+        u32 _rn_f = ((_rd) == (_rn) && _need_cv2)                            \
+                    ? (u32)reg_save0 : (u32)(_rn);                            \
         generate_load_imm(reg_temp3, imm);                                    \
-        if ((_rd) == (_rn)) rv_mv(reg_save0, _rn);                            \
+        if ((_rd) == (_rn) && _need_cv2) rv_mv(reg_save0, _rn);              \
         rv_sub(_rd, _rn, reg_temp3);                                          \
         generate_op_sub_flags(_rd, _rn_f, reg_temp3);                         \
     }                                                                         \
@@ -1213,9 +1224,11 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 
 #define generate_op_rsbs_imm(_rd, _rn)                                        \
 {                                                                             \
-    u32 _rn_f = (_rd) == (_rn) ? (u32)reg_save0 : (u32)(_rn);                \
+    u32 _need_cv = (check_generate_c_flag) || (check_generate_v_flag);        \
+    u32 _rn_f = ((_rd) == (_rn) && _need_cv)                                 \
+                ? (u32)reg_save0 : (u32)(_rn);                                \
     generate_load_imm(reg_temp3, imm);                                        \
-    if ((_rd) == (_rn)) rv_mv(reg_save0, _rn);                                \
+    if ((_rd) == (_rn) && _need_cv) rv_mv(reg_save0, _rn);                   \
     rv_sub(_rd, reg_temp3, _rn);                                              \
     generate_op_sub_flags(_rd, reg_temp3, _rn_f);                             \
 }

@@ -96,7 +96,7 @@ btn:hover{background:#3a4a6a}
 <div class="card full">
   <div class="hdr">
     <div><span class="fps" id="fps">--</span> <span class="sub">FPS</span></div>
-    <div class="sub">Heap: <span id="heap">--</span> KB | 帧同步: <span id="acq">--</span> us | Audio: <span id="snd">--</span> us | 调速: <span id="aspd">--</span>%</div>
+    <div class="sub">空闲内存: <span id="heap">--</span> KB | 帧同步: <span id="acq">--</span> us | 音频延迟: <span id="snd">--</span> us | 音频自适应: <span id="aspd">--</span>%</div>
   </div>
   <div class="chart-wrap">
     <canvas id="chart"></canvas>
@@ -150,6 +150,10 @@ btn:hover{background:#3a4a6a}
 const $=id=>document.getElementById(id);
 const FRAME_US = 16743;
 const MAX_PTS = 60;
+
+/* EMA-smoothed FPS display (alpha ≈ 0.15) to avoid 59.5/60.5 jitter */
+let fpsEma = 0;
+const FPS_ALPHA = 0.15;
 
 /* Series config: key in JSON → label, color */
 const SERIES = [
@@ -574,7 +578,13 @@ async function poll(){
     if (!r.ok) return;
     const d = await r.json();
 
-    $('fps').textContent = d.fps_x10 != null ? (d.fps_x10 / 10).toFixed(1) : '--';
+    if (d.fps_x10 != null) {
+      const raw = d.fps_x10 / 10;
+      fpsEma = fpsEma > 0 ? fpsEma + FPS_ALPHA * (raw - fpsEma) : raw;
+      $('fps').textContent = fpsEma.toFixed(1);
+    } else {
+      $('fps').textContent = '--';
+    }
     $('heap').textContent = d.heap_kb ?? '--';
     $('snd').textContent = d.snd_us != null ? d.snd_us : '--';
     $('aspd').textContent = d.audio_spd != null ? (d.audio_spd / 100).toFixed(2) : '--';

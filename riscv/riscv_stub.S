@@ -18,6 +18,14 @@ _##symbol:
         .text
         .align 2
 
+/* Symbol aliases for frequently-used offsets within large arrays.
+ * With -fno-pic, `la reg, sym` resolves to auipc+addi (2 instr)
+ * instead of auipc+lw (GOT-indirect). These aliases save additional
+ * lui+add pairs that were needed to add constant offsets. */
+.set iwram_data,  iwram + 0x8000
+.set ewram_tags,  ewram + 0x40000
+.set ram_tag_table, ram_translation_cache + RAM_TRANSLATION_CACHE_SIZE
+
 #define REG_R0             (0 * 4)
 #define REG_R1             (1 * 4)
 #define REG_R2             (2 * 4)
@@ -461,9 +469,7 @@ defsymbl(rv_indirect_branch_arm)
 .Lfast_ewram_arm:
     slli  t1, a0, 14
     srli  t1, t1, 14              /* t1 = pc & 0x3FFFF */
-    la    t0, ewram
-    lui   a1, 0x40                /* 0x40000 */
-    add   t0, t0, a1
+    la    t0, ewram_tags
     j     .Lfast_tagchk_arm
 
 .Lfast_iwram_arm:
@@ -479,12 +485,10 @@ defsymbl(rv_indirect_branch_arm)
 
     /* Compute trentry: tbl = ram_tc + RAM_TC_SIZE; &tbl[(s16)tag >> 1] */
     slli  t0, t1, 16
-    srai  t0, t0, 16             /* sign-extend tag to s16 */
-    srai  t0, t0, 1              /* (s16)tag >> 1 */
+    srai  t0, t0, 17             /* sign-extend to s16 AND >>1 in one step */
     slli  t0, t0, 3              /* * sizeof(ramtag_type) = 8 */
     la    a1, ram_translation_cache
-    li    t1, RAM_TRANSLATION_CACHE_SIZE
-    add   t1, a1, t1             /* t1 = table base */
+    la    t1, ram_tag_table
     add   t0, t1, t0             /* t0 = &trentry */
     lw    t0, 0(t0)              /* t0 = trentry->offset_arm */
     beqz  t0, .Lslow_arm         /* offset 0 → not translated yet */
@@ -541,9 +545,7 @@ defsymbl(rv_indirect_branch_thumb)
 .Lfast_ewram_thumb:
     slli  t1, a0, 14
     srli  t1, t1, 14
-    la    t0, ewram
-    lui   a1, 0x40
-    add   t0, t0, a1
+    la    t0, ewram_tags
     j     .Lfast_tagchk_thumb
 
 .Lfast_iwram_thumb:
@@ -558,12 +560,10 @@ defsymbl(rv_indirect_branch_thumb)
     bgeu  t0, t1, .Lslow_thumb
 
     slli  t0, t1, 16
-    srai  t0, t0, 16
-    srai  t0, t0, 1
+    srai  t0, t0, 17             /* sign-extend to s16 AND >>1 in one step */
     slli  t0, t0, 3
     la    a1, ram_translation_cache
-    li    t1, RAM_TRANSLATION_CACHE_SIZE
-    add   t1, a1, t1
+    la    t1, ram_tag_table
     add   t0, t1, t0
     lw    t0, 4(t0)              /* trentry->offset_thumb (at +4) */
     beqz  t0, .Lslow_thumb
@@ -582,10 +582,9 @@ defsymbl(rv_indirect_branch_thumb)
 /* ---- Dual (ARM/Thumb) indirect branch ---- */
 defsymbl(rv_indirect_branch_dual)
     andi  t0, a0, 1              /* t0 = thumb bit */
-    andi  a0, a0, -2             /* clear LSB */
     bnez  t0, .Ldual_thumb
 
-    /* ARM path: pc = (pc + 2) & ~3, clear CPSR Thumb bit */
+    /* ARM path: bit 0 already 0, pc = (pc + 2) & ~3, clear CPSR Thumb bit */
     addi  a0, a0, 2
     andi  a0, a0, -4
     lw    t0, REG_CPSR(gp)
@@ -606,6 +605,7 @@ defsymbl(rv_indirect_branch_dual)
     j     .Lslow_arm
 
 .Ldual_thumb:
+    andi  a0, a0, -2             /* clear bit 0 for Thumb alignment */
     /* Thumb path: set CPSR Thumb bit */
     lw    t0, REG_CPSR(gp)
     ori   t0, t0, 0x20
@@ -701,9 +701,7 @@ defsymbl(rv_indirect_branch_dual)
 /* Fast-path IWRAM handler: iwram[(addr & 0x7FFF) + 0x8000] */
 .macro load_fast_iwram ldop, suffix
 .Liwram_\suffix:
-    la    t0, iwram
-    lui   t1, 8                 /* t1 = 0x8000 */
-    add   t0, t0, t1            /* t0 = iwram + 0x8000 (shadow base) */
+    la    t0, iwram_data
     slli  t1, a0, 17
     srli  t1, t1, 17            /* t1 = addr & 0x7FFF */
     add   t0, t0, t1
@@ -896,9 +894,7 @@ defsymbl(rv_execute_aligned_load32)
 /* Store IWRAM WITHOUT SMC check (for aligned_store32) */
 .macro store_fast_iwram_nosmc stop, suffix
 .Lst_iwram_\suffix:
-    la    t0, iwram
-    lui   t1, 8
-    add   t0, t0, t1
+    la    t0, iwram_data
     slli  t1, a0, 17
     srli  t1, t1, 17
     add   t0, t0, t1
