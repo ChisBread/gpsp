@@ -66,11 +66,24 @@ u32 rom_cache_watermark = INITIAL_ROM_WATERMARK;
 u8 *bios_swi_entrypoint = NULL;
 
 #ifdef ROM_HOT_ZONE
-/* Ring buffer of recent ROM block miss PCs (with Thumb bit in LSB).
-   Used to re-translate hot blocks immediately after a cache flush. */
+/* Ring buffer of recently-hit ROM PCs (with Thumb bit in LSB).
+   Populated by 1/16 sampling on hash hits — reflects true execution
+   frequency rather than first-miss order. */
 static u32 hot_pc_ring[ROM_HOT_PC_RING_SIZE];
 static u32 hot_pc_ring_pos = 0;
-static u32 rom_hot_watermark = 0;  /* end of hot zone in cache */
+static u32 hot_sample_counter = 0; /* drives 1/16 sampling */
+
+/* End of the hot zone in rom_translation_cache (byte offset).
+   When > rom_cache_watermark the hot zone is valid and will be
+   preserved across subsequent ROM flushes. */
+static u32 rom_hot_watermark = 0;
+
+/* Directory of hashhdr offsets within the hot zone.  Populated during
+   rewarm so that a later "preserve" flush can re-insert them into the
+   hash table without re-translating anything. */
+static u32 hot_dir_offsets[ROM_HOT_DIR_MAX];
+static u32 hot_dir_count = 0;
+
 static bool rom_flush_in_progress = false;
 
 #define record_hot_pc(pc, thumb_bit) \
@@ -2614,11 +2627,23 @@ inline static ramtag_type* get_ram_tag(u16 tagval) {
 // ARM or Thumb mode.
 
 #ifdef ROM_HOT_ZONE
-#define hot_zone_record_miss_arm()   record_hot_pc(pc, 0)
-#define hot_zone_record_miss_thumb() record_hot_pc(pc, 1)
+/* Sample 1/16 of hash HITS into the ring — tracks real execution frequency */
+#define hot_zone_record_hit_arm() \
+  do { if ((++hot_sample_counter & ((1u << ROM_HOT_SAMPLE_SHIFT) - 1)) == 0) \
+         record_hot_pc(pc, 0); } while(0)
+#define hot_zone_record_hit_thumb() \
+  do { if ((++hot_sample_counter & ((1u << ROM_HOT_SAMPLE_SHIFT) - 1)) == 0) \
+         record_hot_pc(pc, 1); } while(0)
+/* During rewarm, record every block allocated in hot zone range */
+#define hot_zone_record_alloc() \
+  do { if (rom_flush_in_progress && hot_dir_count < ROM_HOT_DIR_MAX) \
+         hot_dir_offsets[hot_dir_count++] = \
+           (u32)(rom_translation_ptr - rom_translation_cache); \
+  } while(0)
 #else
-#define hot_zone_record_miss_arm()
-#define hot_zone_record_miss_thumb()
+#define hot_zone_record_hit_arm()
+#define hot_zone_record_hit_thumb()
+#define hot_zone_record_alloc()
 #endif
 
 #define block_lookup_address_pc_arm()                                         \
@@ -2693,6 +2718,7 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
         bhdr = (hashhdr_type*)&rom_translation_cache[blk_offset];             \
         if(bhdr->pc_value == key) {                                           \
           CPU_PROF_INC(dynarec_lookup_hits);                                     \
+          hot_zone_record_hit_##type();                                       \
           CPU_PROF_SCOPE_ACC(dynarec_lookup_cycles, dynarec_lookup_begin);    \
           return &rom_translation_cache[                                      \
                   blk_offset + sizeof(hashhdr_type) + block_prologue_size];   \
@@ -2706,11 +2732,11 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
         u8 *blkptr;                                                           \
         bool result;                                                          \
         CPU_PROF_INC(dynarec_lookup_misses);                                     \
-        hot_zone_record_miss_##type();                                        \
         bhdr = (hashhdr_type*)rom_translation_ptr;                            \
         bhdr->pc_value = key;                                                 \
         bhdr->next_entry = 0;                                                 \
         *blk_offset_addr = (u32)(rom_translation_ptr - rom_translation_cache);\
+        hot_zone_record_alloc();                                              \
         rom_translation_ptr += sizeof(hashhdr_type);                          \
         blkptr = rom_translation_ptr + block_prologue_size;                   \
         result = translate_block_##type(pc, false);                                                                     \
@@ -3507,47 +3533,103 @@ void flush_translation_cache_ram(void)
 
 void flush_translation_cache_rom(void)
 {
-  /* We flush the generated code except for everything below the watermark. */
   CPU_PROF_INC(dynarec_flush_rom_count);
-  last_rom_translation_ptr = &rom_translation_cache[rom_cache_watermark];
-  rom_translation_ptr      = &rom_translation_cache[rom_cache_watermark];
-
-  memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
 
 #ifdef ROM_HOT_ZONE
-  /* Re-translate recently-missed ROM blocks into the hot zone.
-     Guard against recursive flush (translate_block may overflow). */
+  /* --- Path A: hot zone already valid — preserve it, only flush the
+         normal area that sits *after* the hot zone. --- */
+  if (!rom_flush_in_progress && rom_hot_watermark > rom_cache_watermark) {
+    rom_translation_ptr      = &rom_translation_cache[rom_hot_watermark];
+    last_rom_translation_ptr = rom_translation_ptr;
+
+    /* Wipe the hash table, then re-insert every hot-zone block header so
+       the cached code is reachable again without re-translation. */
+    memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
+    for (u32 i = 0; i < hot_dir_count; i++) {
+      u32 off = hot_dir_offsets[i];
+      hashhdr_type *bhdr = (hashhdr_type *)&rom_translation_cache[off];
+      u32 ht = ((bhdr->pc_value * 2654435761U) >> (32 - ROM_BRANCH_HASH_BITS))
+               & (ROM_BRANCH_HASH_SIZE - 1);
+      bhdr->next_entry = rom_branch_hash[ht];
+      rom_branch_hash[ht] = off;
+    }
+    /* Start fresh frequency sampling for the next cycle. */
+    hot_pc_ring_pos = 0;
+    return;
+  }
+
+  /* --- Path B: first flush (no hot zone yet), or recursive flush
+         triggered by translate_block during rewarm. --- */
+  last_rom_translation_ptr = &rom_translation_cache[rom_cache_watermark];
+  rom_translation_ptr      = &rom_translation_cache[rom_cache_watermark];
+  memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
+
   if (!rom_flush_in_progress) {
     rom_flush_in_progress = true;
+    hot_dir_count = 0;
 
-    u32 count = hot_pc_ring_pos < ROM_HOT_PC_RING_SIZE
-                ? hot_pc_ring_pos : ROM_HOT_PC_RING_SIZE;
+    /* ---- De-duplicate the ring buffer and count per-PC frequency ---- */
+    typedef struct { u32 entry; u32 count; } hot_entry_t;
+    u32 ring_count = hot_pc_ring_pos < ROM_HOT_PC_RING_SIZE
+                     ? hot_pc_ring_pos : ROM_HOT_PC_RING_SIZE;
+    hot_entry_t unique[ROM_HOT_PC_RING_SIZE];
+    u32 unique_count = 0;
+
+    for (u32 i = 0; i < ring_count; i++) {
+      u32 e = hot_pc_ring[i];
+      u32 pc = e & ~1u;
+      u8 pcregion = pc >> 24;
+      /* Keep only ROM PCs */
+      if (pcregion != 0x00 && (pcregion < 0x08 || pcregion > 0x0D))
+        continue;
+      bool found = false;
+      for (u32 j = 0; j < unique_count; j++) {
+        if (unique[j].entry == e) { unique[j].count++; found = true; break; }
+      }
+      if (!found && unique_count < ROM_HOT_PC_RING_SIZE) {
+        unique[unique_count].entry = e;
+        unique[unique_count].count = 1;
+        unique_count++;
+      }
+    }
+
+    /* ---- Sort by frequency (descending) — insertion sort, small N ---- */
+    for (u32 i = 1; i < unique_count; i++) {
+      hot_entry_t tmp = unique[i];
+      u32 j = i;
+      while (j > 0 && unique[j - 1].count < tmp.count) {
+        unique[j] = unique[j - 1];
+        j--;
+      }
+      unique[j] = tmp;
+    }
+
+    /* ---- Translate the hottest blocks into the hot zone ---- */
     u8 *hot_limit = &rom_translation_cache[
                       rom_cache_watermark + ROM_HOT_ZONE_SIZE
                       - TRANSLATION_CACHE_LIMIT_THRESHOLD];
 
-    for (u32 i = 0; i < count; i++) {
-      u32 entry = hot_pc_ring[i];
-      u32 pc = entry & ~1u;
-      u8 pcregion = pc >> 24;
-
-      /* Only ROM blocks */
-      if (pcregion != 0x00 && (pcregion < 0x08 || pcregion > 0x0D))
-        continue;
-
-      /* Stop if we'd exceed hot zone budget */
+    for (u32 i = 0; i < unique_count; i++) {
       if (rom_translation_ptr >= hot_limit)
         break;
-
+      u32 entry = unique[i].entry;
       if (entry & 1)
-        block_lookup_translate_thumb(pc);
+        block_lookup_translate_thumb(entry & ~1u);
       else
-        block_lookup_translate_arm(pc);
+        block_lookup_translate_arm(entry);
     }
 
     rom_hot_watermark = (u32)(rom_translation_ptr - rom_translation_cache);
+    hot_pc_ring_pos = 0;
     rom_flush_in_progress = false;
   }
+  /* else: recursive flush during rewarm — bare reset already done above */
+
+#else
+  /* Non-hot-zone path: simple full flush */
+  last_rom_translation_ptr = &rom_translation_cache[rom_cache_watermark];
+  rom_translation_ptr      = &rom_translation_cache[rom_cache_watermark];
+  memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
 #endif
 }
 
@@ -3565,6 +3647,13 @@ void init_dynarec_caches(void)
   ewram_code_max = 0x40000;
   iwram_code_min = 0;
   iwram_code_max = 0x8000;
+
+#ifdef ROM_HOT_ZONE
+  rom_hot_watermark = 0;
+  hot_dir_count = 0;
+  hot_pc_ring_pos = 0;
+  hot_sample_counter = 0;
+#endif
 }
 
 void flush_dynarec_caches(void)

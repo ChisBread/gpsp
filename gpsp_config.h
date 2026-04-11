@@ -25,12 +25,17 @@
 #endif
 
 /* Hot zone: extra PSRAM dedicated to surviving ROM cache flushes.
-   After a flush, hot blocks are immediately re-translated from a
-   ring buffer of recent miss PCs, with a single icache sync.
+   On the first ROM flush the ring buffer of sampled-hit PCs is
+   de-duplicated, sorted by frequency, and the hottest blocks are
+   re-translated into a protected region.  Subsequent flushes only
+   clear the area *after* the hot zone and re-insert the hot zone's
+   hash entries — so hot blocks survive without re-translation.
    Enabled by defining ROM_HOT_ZONE at build time. */
 #ifdef ROM_HOT_ZONE
   #define ROM_HOT_ZONE_SIZE          (1024 * 256)
   #define ROM_HOT_PC_RING_SIZE       512
+  #define ROM_HOT_DIR_MAX            2048 /* max blocks tracked in hot zone */
+  #define ROM_HOT_SAMPLE_SHIFT       4    /* log2 of hit sampling rate (1/16) */
 #else
   #define ROM_HOT_ZONE_SIZE          0
   #define ROM_HOT_PC_RING_SIZE       0
