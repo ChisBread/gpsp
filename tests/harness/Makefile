@@ -6,22 +6,18 @@
 #  Parameters (all optional, shown with defaults):
 #
 #    ARCH=x86          Target architecture: x86 | arm | riscv
-#    DUAL=0            Dual-core PPU simulation: 0 | 1
 #    TRACE=0           Instruction tracing: 0 | 1
 #    DYNAREC=1         JIT recompiler: 0 (interpreter only) | 1
 #
 #  Examples:
-#    make                              # x86 JIT, single-core
-#    make DUAL=1                       # x86 JIT, dual-core PPU
+#    make                              # x86 JIT
 #    make ARCH=riscv                   # RISC-V JIT (qemu-riscv32)
 #    make ARCH=arm                     # ARM32 JIT  (qemu-arm)
 #    make DYNAREC=0                    # x86 interpreter
-#    make DUAL=1 TRACE=1              # x86 JIT, dual-core, tracing
 #    make clean                        # remove build artifacts
 # ─────────────────────────────────────────────────────────────────────
 
 ARCH    ?= x86
-DUAL    ?= 0
 TRACE   ?= 0
 DYNAREC ?= 1
 
@@ -136,11 +132,10 @@ HARNESS_C = harness_main.c harness_stubs.c
 
 # ── Build directory (per-config, allows parallel builds) ───────────
 
-_DUAL_TAG  = $(if $(filter 1,$(DUAL)),_dual)
 _TRACE_TAG = $(if $(filter 1,$(TRACE)),_trace)
 _JIT_TAG   = $(if $(filter 0,$(DYNAREC)),_interp)
-BUILD      = build/$(ARCH)$(_DUAL_TAG)$(_TRACE_TAG)$(_JIT_TAG)
-TARGET     = test_gba_$(ARCH)$(_DUAL_TAG)$(_TRACE_TAG)$(_JIT_TAG)
+BUILD      = build/$(ARCH)$(_TRACE_TAG)$(_JIT_TAG)
+TARGET     = test_gba_$(ARCH)$(_TRACE_TAG)$(_JIT_TAG)
 
 # ── Object lists ───────────────────────────────────────────────────
 
@@ -187,7 +182,6 @@ clean:
 
 info:
 	@echo "ARCH     = $(ARCH)"
-	@echo "DUAL     = $(DUAL)"
 	@echo "TRACE    = $(TRACE)"
 	@echo "DYNAREC  = $(DYNAREC)"
 	@echo "TARGET   = $(TARGET)"
