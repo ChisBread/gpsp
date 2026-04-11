@@ -54,6 +54,16 @@ esp_err_t audio_driver_write(const int16_t *samples, size_t count);
 esp_err_t audio_driver_set_volume(int volume_percent);
 
 /**
+ * Nudge the resample ratio for dynamic rate control.
+ *
+ * @param delta_q16  Signed adjustment to the Q16.16 resample step.
+ *                   Positive = step larger = fewer output samples (emu slow).
+ *                   Negative = step smaller = more output samples (emu fast).
+ *                   Typical range: ±(nominal_step * 0.005).
+ */
+void audio_driver_adjust_rate(int32_t delta_q16);
+
+/**
  * Deinitialize audio driver.
  */
 void audio_driver_deinit(void);

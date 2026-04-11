@@ -30,6 +30,7 @@ static __attribute__((section(".ext_ram.bss"))) struct {
     uint32_t sample_rate;
     uint32_t source_sample_rate;
     uint32_t resample_step_q16;
+    uint32_t resample_step_nominal_q16;
     uint32_t resample_phase_q16;
     int16_t tail_sample[2];
     bool tail_valid;
@@ -231,6 +232,7 @@ esp_err_t audio_driver_init(const audio_driver_config_t *config)
     s_audio.tail_sample[0] = 0;
     s_audio.tail_sample[1] = 0;
     s_audio.tail_valid = false;
+    s_audio.resample_step_nominal_q16 = s_audio.resample_step_q16;
 
     esp_err_t err = audio_i2c_init();
     if (err != ESP_OK) {
@@ -290,6 +292,13 @@ esp_err_t audio_driver_set_volume(int volume_percent)
     return (esp_codec_dev_set_out_vol(s_audio.codec, volume_percent) == ESP_CODEC_DEV_OK)
                ? ESP_OK
                : ESP_FAIL;
+}
+
+void audio_driver_adjust_rate(int32_t delta_q16)
+{
+    int32_t new_step = (int32_t)s_audio.resample_step_nominal_q16 + delta_q16;
+    if (new_step < 1) new_step = 1;
+    s_audio.resample_step_q16 = (uint32_t)new_step;
 }
 
 void audio_driver_deinit(void)

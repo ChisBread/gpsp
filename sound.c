@@ -794,6 +794,11 @@ unsigned sound_write_savestate(u8 *dst)
   return (unsigned int)(dst - startp);
 }
 
+u32 sound_samples_pending(void)
+{
+   return (gbc_sound_buffer_index - sound_buffer_base) & BUFFER_SIZE_MASK;
+}
+
 u32 sound_read_samples(s16 *out, u32 frames)
 {
    u32 i;

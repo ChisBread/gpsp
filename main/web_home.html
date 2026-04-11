@@ -96,7 +96,7 @@ btn:hover{background:#3a4a6a}
 <div class="card full">
   <div class="hdr">
     <div><span class="fps" id="fps">--</span> <span class="sub">FPS</span></div>
-    <div class="sub">Heap: <span id="heap">--</span> KB</div>
+    <div class="sub">Heap: <span id="heap">--</span> KB | 帧同步: <span id="acq">--</span> us | Audio: <span id="snd">--</span> us | 调速: <span id="aspd">--</span>%</div>
   </div>
   <div class="chart-wrap">
     <canvas id="chart"></canvas>
@@ -576,6 +576,9 @@ async function poll(){
 
     $('fps').textContent = d.fps_x10 != null ? (d.fps_x10 / 10).toFixed(1) : '--';
     $('heap').textContent = d.heap_kb ?? '--';
+    $('snd').textContent = d.snd_us != null ? d.snd_us : '--';
+    $('aspd').textContent = d.audio_spd != null ? (d.audio_spd / 100).toFixed(2) : '--';
+    $('acq').textContent = d.acquire && d.acquire.avg != null ? d.acquire.avg : '--';
 
     /* Determine active series on first data */
     if (activeSeries.length === 0) {

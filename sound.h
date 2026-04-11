@@ -92,6 +92,7 @@ extern u32 gbc_sound_master_volume_left;
 extern u32 gbc_sound_master_volume_right;
 extern u32 gbc_sound_master_volume;
 extern u32 gbc_sound_buffer_index;
+u32 sound_samples_pending(void);
 extern u32 gbc_sound_last_cpu_ticks;
 
 extern const u32 sound_frequency;
