@@ -3600,7 +3600,7 @@ path_b:
     typedef struct { u32 entry; u32 count; } hot_entry_t;
     u32 ring_count = hot_pc_ring_pos < ROM_HOT_PC_RING_SIZE
                      ? hot_pc_ring_pos : ROM_HOT_PC_RING_SIZE;
-    hot_entry_t unique[ROM_HOT_PC_RING_SIZE];
+    static GPSP_EXTRAM_BSS hot_entry_t unique[ROM_HOT_PC_RING_SIZE]; /* static: too large for stack */
     u32 unique_count = 0;
 
     for (u32 i = 0; i < ring_count; i++) {
