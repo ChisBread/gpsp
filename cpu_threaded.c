@@ -84,6 +84,7 @@ static u32 rom_hot_watermark = 0;
 static u32 hot_dir_offsets[ROM_HOT_DIR_MAX];
 static u32 hot_dir_count = 0;
 
+static u32 hot_zone_age = 0;  /* consecutive Path A flushes since last rebuild */
 static bool rom_flush_in_progress = false;
 
 #define record_hot_pc(pc, thumb_bit) \
@@ -3536,9 +3537,36 @@ void flush_translation_cache_rom(void)
   CPU_PROF_INC(dynarec_flush_rom_count);
 
 #ifdef ROM_HOT_ZONE
-  /* --- Path A: hot zone already valid — preserve it, only flush the
-         normal area that sits *after* the hot zone. --- */
+  /* --- Path A: hot zone valid — preserve it, only flush the normal
+         area that sits *after* the hot zone. --- */
   if (!rom_flush_in_progress && rom_hot_watermark > rom_cache_watermark) {
+
+    /* When age expires, check whether the hot zone is actually stale
+       by sampling the ring buffer against existing hot-zone entries.
+       If >=75% of sampled PCs already live in the hot zone, the content
+       is still relevant — just reset age and keep going. */
+    if (hot_zone_age >= ROM_HOT_ZONE_MAX_AGE) {
+      u32 ring_count = hot_pc_ring_pos < ROM_HOT_PC_RING_SIZE
+                       ? hot_pc_ring_pos : ROM_HOT_PC_RING_SIZE;
+      u32 checked = 0, found = 0;
+      for (u32 i = 0; i < ring_count && checked < 64; i++) {
+        u32 key = hot_pc_ring[i];
+        u32 ht = ((key * 2654435761U) >> (32 - ROM_BRANCH_HASH_BITS))
+                 & (ROM_BRANCH_HASH_SIZE - 1);
+        u32 off = rom_branch_hash[ht];
+        checked++;
+        while (off) {
+          hashhdr_type *bhdr = (hashhdr_type *)&rom_translation_cache[off];
+          if (bhdr->pc_value == key) { found++; break; }
+          off = bhdr->next_entry;
+        }
+      }
+      /* Stale: <75% overlap → fall through to Path B for rebuild */
+      if (checked > 0 && found * 4 < checked * 3)
+        goto path_b;
+    }
+
+    hot_zone_age++;
     rom_translation_ptr      = &rom_translation_cache[rom_hot_watermark];
     last_rom_translation_ptr = rom_translation_ptr;
 
@@ -3553,10 +3581,10 @@ void flush_translation_cache_rom(void)
       bhdr->next_entry = rom_branch_hash[ht];
       rom_branch_hash[ht] = off;
     }
-    /* Start fresh frequency sampling for the next cycle. */
-    hot_pc_ring_pos = 0;
     return;
   }
+
+path_b:
 
   /* --- Path B: first flush (no hot zone yet), or recursive flush
          triggered by translate_block during rewarm. --- */
@@ -3620,6 +3648,7 @@ void flush_translation_cache_rom(void)
     }
 
     rom_hot_watermark = (u32)(rom_translation_ptr - rom_translation_cache);
+    hot_zone_age = 0;
     hot_pc_ring_pos = 0;
     rom_flush_in_progress = false;
   }
@@ -3650,6 +3679,7 @@ void init_dynarec_caches(void)
 
 #ifdef ROM_HOT_ZONE
   rom_hot_watermark = 0;
+  hot_zone_age = 0;
   hot_dir_count = 0;
   hot_pc_ring_pos = 0;
   hot_sample_counter = 0;
