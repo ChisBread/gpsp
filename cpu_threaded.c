@@ -87,6 +87,32 @@ static u32 hot_dir_count = 0;
 static u32 hot_zone_age = 0;  /* consecutive Path A flushes since last rebuild */
 static bool rom_flush_in_progress = false;
 
+#ifdef CPU_PROFILE_STATS
+/* Cumulative lifecycle counters (never reset, only for profiling) */
+static u32 cum_path_a_count = 0;    /* Path A preserves */
+static u32 cum_path_b_count = 0;    /* Path B rebuilds */
+static u32 cum_stale_ok_count = 0;  /* staleness checks that passed */
+#endif
+
+void get_hot_zone_info(hot_zone_info_t *out) {
+    out->hot_watermark  = rom_hot_watermark;
+    out->hot_blocks     = hot_dir_count;
+    out->hot_age        = hot_zone_age;
+#ifdef CPU_PROFILE_STATS
+    out->path_a_count   = cum_path_a_count;
+    out->path_b_count   = cum_path_b_count;
+    out->stale_ok_count = cum_stale_ok_count;
+#endif
+}
+
+void reset_hot_zone_stats(void) {
+#ifdef CPU_PROFILE_STATS
+    cum_path_a_count   = 0;
+    cum_path_b_count   = 0;
+    cum_stale_ok_count = 0;
+#endif
+}
+
 #define record_hot_pc(pc, thumb_bit) \
     hot_pc_ring[hot_pc_ring_pos++ & (ROM_HOT_PC_RING_SIZE - 1)] = \
         (pc) | (thumb_bit)
@@ -3549,8 +3575,10 @@ void flush_translation_cache_rom(void)
       u32 ring_count = hot_pc_ring_pos < ROM_HOT_PC_RING_SIZE
                        ? hot_pc_ring_pos : ROM_HOT_PC_RING_SIZE;
       u32 checked = 0, found = 0;
+      /* Walk backwards from the newest entry so the sample reflects
+         the most recent execution pattern, not stale ring tail. */
       for (u32 i = 0; i < ring_count && checked < 64; i++) {
-        u32 key = hot_pc_ring[i];
+        u32 key = hot_pc_ring[(hot_pc_ring_pos - 1 - i) & (ROM_HOT_PC_RING_SIZE - 1)];
         u32 ht = ((key * 2654435761U) >> (32 - ROM_BRANCH_HASH_BITS))
                  & (ROM_BRANCH_HASH_SIZE - 1);
         u32 off = rom_branch_hash[ht];
@@ -3564,6 +3592,10 @@ void flush_translation_cache_rom(void)
       /* Stale: <75% overlap → fall through to Path B for rebuild */
       if (checked > 0 && found * 4 < checked * 3)
         goto path_b;
+      /* Staleness check passed — hot zone still relevant */
+#ifdef CPU_PROFILE_STATS
+      cum_stale_ok_count++;
+#endif
     }
 
     hot_zone_age++;
@@ -3581,6 +3613,9 @@ void flush_translation_cache_rom(void)
       bhdr->next_entry = rom_branch_hash[ht];
       rom_branch_hash[ht] = off;
     }
+#ifdef CPU_PROFILE_STATS
+    cum_path_a_count++;
+#endif
     return;
   }
 
@@ -3638,6 +3673,8 @@ path_b:
                       - TRANSLATION_CACHE_LIMIT_THRESHOLD];
 
     for (u32 i = 0; i < unique_count; i++) {
+      if (unique[i].count < ROM_HOT_MIN_FREQ)
+        break;  /* sorted descending — remaining entries are even lower */
       if (rom_translation_ptr >= hot_limit)
         break;
       u32 entry = unique[i].entry;
@@ -3651,6 +3688,9 @@ path_b:
     hot_zone_age = 0;
     hot_pc_ring_pos = 0;
     rom_flush_in_progress = false;
+#ifdef CPU_PROFILE_STATS
+    cum_path_b_count++;
+#endif
   }
   /* else: recursive flush during rewarm — bare reset already done above */
 

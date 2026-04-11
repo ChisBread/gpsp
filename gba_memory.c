@@ -2524,6 +2524,11 @@ static s32 load_gamepak_raw(const char *name)
   int64_t read_us = 0;
   int64_t map_us = 0;
 #endif
+  /* Close previous handle to avoid file descriptor leak on ROM switch */
+  if (gamepak_file_large) {
+    filestream_close(gamepak_file_large);
+    gamepak_file_large = NULL;
+  }
   gamepak_file_large = filestream_open(name, RETRO_VFS_FILE_ACCESS_READ,
                                        RETRO_VFS_FILE_ACCESS_HINT_NONE);
 #ifdef ESP_PLATFORM

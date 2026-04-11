@@ -130,9 +130,55 @@ typedef struct {
     u32 thumb_count;
     u32 dynarec_lookup_hits;
     u32 dynarec_lookup_misses;
+    /* JIT cache metrics (per-frame averages) */
+    u32 dynarec_translate_arm;
+    u32 dynarec_translate_thumb;
+    u32 dynarec_translate_arm_ram;
+    u32 dynarec_translate_thumb_ram;
+    u32 dynarec_flush_rom;
+    u32 dynarec_flush_ram;
+    u32 dynarec_icache_sync_count;
+    /* cache utilization (absolute bytes at snapshot time) */
+    u32 rom_cache_used;
+    u32 ram_cache_used;
+    /* hot zone info */
+    u32 hot_watermark;
+    u32 hot_blocks;
+    u32 hot_age;
+    u32 hot_path_a;
+    u32 hot_path_b;
+    u32 hot_stale_ok;
 } cpu_prof_snapshot_t;
 
+/* ── 60-second sliding window for aggregate stats ── */
+typedef struct {
+    u32 lookup_hits;
+    u32 lookup_misses;
+    u32 translate_total;   /* arm+thumb ROM+RAM */
+    u32 flush_rom;
+    u32 flush_ram;
+    u32 icache_syncs;
+} prof_window_entry_t;
+
+#define PROF_WINDOW_SIZE 60
+
+/* Cumulative counters (never reset, survive across snapshot intervals) */
+typedef struct {
+    u64 lookup_hits;
+    u64 lookup_misses;
+    u64 translate_total;
+    u64 flush_rom;
+    u64 flush_ram;
+    u64 icache_syncs;
+    int64_t last_rebuild_us;   /* esp_timer timestamp of last Path B */
+    u32 last_path_b_seen;      /* to detect new rebuilds */
+} prof_cumulative_t;
+
 static GPSP_EXTRAM_BSS cpu_prof_snapshot_t s_prof_snap;
+static prof_window_entry_t s_prof_window[PROF_WINDOW_SIZE];
+static u32 s_prof_window_pos;
+static u32 s_prof_window_count;
+static prof_cumulative_t s_prof_cum;
 #endif
 
 static const char *TAG = "gpsp_session";
@@ -300,6 +346,65 @@ static void gba_session_snapshot_cpu_prof(void)
     s_prof_snap.thumb_count = cpu_prof.thumb_count / f;
     s_prof_snap.dynarec_lookup_hits = cpu_prof.dynarec_lookup_hits / f;
     s_prof_snap.dynarec_lookup_misses = cpu_prof.dynarec_lookup_misses / f;
+    /* JIT cache metrics */
+    s_prof_snap.dynarec_translate_arm = cpu_prof.dynarec_translate_arm_blocks / f;
+    s_prof_snap.dynarec_translate_thumb = cpu_prof.dynarec_translate_thumb_blocks / f;
+    s_prof_snap.dynarec_translate_arm_ram = cpu_prof.dynarec_translate_arm_ram_blocks / f;
+    s_prof_snap.dynarec_translate_thumb_ram = cpu_prof.dynarec_translate_thumb_ram_blocks / f;
+    s_prof_snap.dynarec_flush_rom = cpu_prof.dynarec_flush_rom_count / f;
+    s_prof_snap.dynarec_flush_ram = cpu_prof.dynarec_flush_ram_count / f;
+    s_prof_snap.dynarec_icache_sync_count = cpu_prof.dynarec_icache_sync_count / f;
+    /* cache utilization (snapshot of current pointer positions) */
+    s_prof_snap.rom_cache_used = (u32)(rom_translation_ptr - rom_translation_cache);
+    s_prof_snap.ram_cache_used = (u32)(ram_translation_ptr - ram_translation_cache);
+#ifdef ROM_HOT_ZONE
+    { hot_zone_info_t hzi; get_hot_zone_info(&hzi);
+      s_prof_snap.hot_watermark = hzi.hot_watermark;
+      s_prof_snap.hot_blocks    = hzi.hot_blocks;
+      s_prof_snap.hot_age       = hzi.hot_age;
+      s_prof_snap.hot_path_a    = hzi.path_a_count;
+      s_prof_snap.hot_path_b    = hzi.path_b_count;
+      s_prof_snap.hot_stale_ok  = hzi.stale_ok_count;
+      /* Track last rebuild timestamp */
+      if (hzi.path_b_count != s_prof_cum.last_path_b_seen) {
+          s_prof_cum.last_rebuild_us = esp_timer_get_time();
+          s_prof_cum.last_path_b_seen = hzi.path_b_count;
+      }
+    }
+#endif
+
+    /* ── Accumulate into sliding window and cumulative totals ── */
+    {
+        u32 raw_hits   = cpu_prof.dynarec_lookup_hits;
+        u32 raw_misses = cpu_prof.dynarec_lookup_misses;
+        u32 raw_xlat   = cpu_prof.dynarec_translate_arm_blocks
+                       + cpu_prof.dynarec_translate_thumb_blocks
+                       + cpu_prof.dynarec_translate_arm_ram_blocks
+                       + cpu_prof.dynarec_translate_thumb_ram_blocks;
+        u32 raw_fl_rom = cpu_prof.dynarec_flush_rom_count;
+        u32 raw_fl_ram = cpu_prof.dynarec_flush_ram_count;
+        u32 raw_isync  = cpu_prof.dynarec_icache_sync_count;
+
+        /* Push to 60-second ring buffer */
+        u32 wi = s_prof_window_pos % PROF_WINDOW_SIZE;
+        s_prof_window[wi].lookup_hits     = raw_hits;
+        s_prof_window[wi].lookup_misses   = raw_misses;
+        s_prof_window[wi].translate_total = raw_xlat;
+        s_prof_window[wi].flush_rom       = raw_fl_rom;
+        s_prof_window[wi].flush_ram       = raw_fl_ram;
+        s_prof_window[wi].icache_syncs    = raw_isync;
+        s_prof_window_pos++;
+        if (s_prof_window_count < PROF_WINDOW_SIZE)
+            s_prof_window_count++;
+
+        /* Accumulate into lifetime totals */
+        s_prof_cum.lookup_hits     += raw_hits;
+        s_prof_cum.lookup_misses   += raw_misses;
+        s_prof_cum.translate_total += raw_xlat;
+        s_prof_cum.flush_rom       += raw_fl_rom;
+        s_prof_cum.flush_ram       += raw_fl_ram;
+        s_prof_cum.icache_syncs    += raw_isync;
+    }
 
     cpu_prof_reset();
 }
@@ -768,6 +873,17 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
     t_reset1 = esp_timer_get_time();
     reset_us = t_reset1 - t_reset0;
 
+#ifdef CPU_PROFILE_STATS
+    /* Reset profiling window and cumulative stats for the new ROM */
+    memset(s_prof_window, 0, sizeof(s_prof_window));
+    s_prof_window_pos   = 0;
+    s_prof_window_count = 0;
+    memset(&s_prof_cum, 0, sizeof(s_prof_cum));
+#ifdef ROM_HOT_ZONE
+    reset_hot_zone_stats();
+#endif
+#endif
+
     s_session.has_content = true;
     s_session.builtin_bios_active = next_builtin_bios;
     s_session.stop_requested = false;
@@ -1169,7 +1285,14 @@ int gba_session_stats_json(char *buf, size_t buf_size)
             "\"obj\":%u,\"fx\":%u,\"ord\":%u,\"aff\":%u,\"blank\":%u,"
             "\"sound\":%u,\"dma\":%u,\"timer\":%u,\"serial\":%u,\"irq\":%u,"
             "\"drc_lkup\":%u,\"drc_xlat\":%u,\"drc_sync\":%u,"
-            "\"insn\":%u,\"lkup_hit\":%u,\"lkup_miss\":%u},",
+            "\"insn\":%u,\"lkup_hit\":%u,\"lkup_miss\":%u,"
+            "\"xlat_arm\":%u,\"xlat_thumb\":%u,"
+            "\"xlat_arm_ram\":%u,\"xlat_thumb_ram\":%u,"
+            "\"fl_rom\":%u,\"fl_ram\":%u,\"ic_sync\":%u,"
+            "\"rom_used\":%u,\"ram_used\":%u,"
+            "\"rom_cap\":%u,\"ram_cap\":%u,"
+            "\"hot_wm\":%u,\"hot_blk\":%u,\"hot_age\":%u,"
+            "\"hz_a\":%u,\"hz_b\":%u,\"hz_sok\":%u},",
             (unsigned)s_prof_snap.total,
             (unsigned)s_prof_snap.exec,
             (unsigned)s_prof_snap.update,
@@ -1194,7 +1317,77 @@ int gba_session_stats_json(char *buf, size_t buf_size)
             (unsigned)s_prof_snap.dynarec_icache_sync,
             (unsigned)s_prof_snap.arm_count,
             (unsigned)s_prof_snap.dynarec_lookup_hits,
-            (unsigned)s_prof_snap.dynarec_lookup_misses);
+            (unsigned)s_prof_snap.dynarec_lookup_misses,
+            (unsigned)s_prof_snap.dynarec_translate_arm,
+            (unsigned)s_prof_snap.dynarec_translate_thumb,
+            (unsigned)s_prof_snap.dynarec_translate_arm_ram,
+            (unsigned)s_prof_snap.dynarec_translate_thumb_ram,
+            (unsigned)s_prof_snap.dynarec_flush_rom,
+            (unsigned)s_prof_snap.dynarec_flush_ram,
+            (unsigned)s_prof_snap.dynarec_icache_sync_count,
+            (unsigned)s_prof_snap.rom_cache_used,
+            (unsigned)s_prof_snap.ram_cache_used,
+            (unsigned)ROM_TRANSLATION_CACHE_SIZE,
+            (unsigned)RAM_TRANSLATION_CACHE_SIZE,
+            (unsigned)s_prof_snap.hot_watermark,
+            (unsigned)s_prof_snap.hot_blocks,
+            (unsigned)s_prof_snap.hot_age,
+            (unsigned)s_prof_snap.hot_path_a,
+            (unsigned)s_prof_snap.hot_path_b,
+            (unsigned)s_prof_snap.hot_stale_ok);
+        if (n > 0 && p + n < end) p += n;
+    }
+
+    /* ── 60-second sliding window aggregate ── */
+    if (s_prof_window_count > 0) {
+        u64 w_hits = 0, w_misses = 0, w_xlat = 0;
+        u64 w_fl_rom = 0, w_fl_ram = 0, w_isync = 0;
+        u32 wc = s_prof_window_count;
+        u32 base = (s_prof_window_pos >= wc) ? (s_prof_window_pos - wc) : 0;
+        for (u32 i = 0; i < wc; i++) {
+            const prof_window_entry_t *we = &s_prof_window[(base + i) % PROF_WINDOW_SIZE];
+            w_hits   += we->lookup_hits;
+            w_misses += we->lookup_misses;
+            w_xlat   += we->translate_total;
+            w_fl_rom += we->flush_rom;
+            w_fl_ram += we->flush_ram;
+            w_isync  += we->icache_syncs;
+        }
+        u32 w_total = (u32)(w_hits + w_misses);
+        u32 w_hit_x10 = w_total > 0 ? (u32)(w_hits * 1000 / w_total) : 0;
+        int n = snprintf(p, end - p,
+            "\"win\":{\"secs\":%u,\"hr_x10\":%u,"
+            "\"hits\":%u,\"misses\":%u,"
+            "\"xlat\":%u,\"fl_rom\":%u,\"fl_ram\":%u,\"ic\":%u},",
+            wc, w_hit_x10,
+            (unsigned)w_hits, (unsigned)w_misses,
+            (unsigned)w_xlat, (unsigned)w_fl_rom,
+            (unsigned)w_fl_ram, (unsigned)w_isync);
+        if (n > 0 && p + n < end) p += n;
+    }
+
+    /* ── Cumulative (since session start) ── */
+    {
+        u64 c_total = s_prof_cum.lookup_hits + s_prof_cum.lookup_misses;
+        u32 c_hr_x10 = c_total > 0
+            ? (u32)(s_prof_cum.lookup_hits * 1000 / c_total) : 0;
+        u32 fresh_s = 0;
+        if (s_prof_cum.last_rebuild_us > 0)
+            fresh_s = (u32)((esp_timer_get_time() - s_prof_cum.last_rebuild_us)
+                            / 1000000);
+        int n = snprintf(p, end - p,
+            "\"cum\":{\"hr_x10\":%u,"
+            "\"hits\":%llu,\"misses\":%llu,"
+            "\"xlat\":%llu,\"fl_rom\":%llu,\"fl_ram\":%llu,\"ic\":%llu,"
+            "\"hz_fresh_s\":%u},",
+            c_hr_x10,
+            (unsigned long long)s_prof_cum.lookup_hits,
+            (unsigned long long)s_prof_cum.lookup_misses,
+            (unsigned long long)s_prof_cum.translate_total,
+            (unsigned long long)s_prof_cum.flush_rom,
+            (unsigned long long)s_prof_cum.flush_ram,
+            (unsigned long long)s_prof_cum.icache_syncs,
+            fresh_s);
         if (n > 0 && p + n < end) p += n;
     }
 #endif

@@ -6,12 +6,16 @@
 <title>gpsp Console</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0c0c1a;color:#e0e0e0;font-family:system-ui,sans-serif;padding:12px;max-width:540px;margin:0 auto}
+body{background:#0c0c1a;color:#e0e0e0;font-family:system-ui,sans-serif;padding:12px;max-width:1200px;margin:0 auto}
 h1{font-size:1.2em;color:#8af;margin-bottom:10px;text-align:center}
 nav{display:flex;gap:8px;margin-bottom:14px;justify-content:center}
 nav a{color:#8af;text-decoration:none;padding:5px 14px;border:1px solid #334;border-radius:6px;font-size:.82em;transition:background .15s}
 nav a:hover,nav a.active{background:#2a2a4a;border-color:#88f}
-.card{background:#121a2e;border:1px solid #293;border-radius:8px;padding:12px;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:1fr;gap:12px}
+@media(min-width:760px){.grid{grid-template-columns:1fr 1fr}}
+@media(min-width:1100px){.grid{grid-template-columns:1fr 1fr 1fr}}
+.card{background:#121a2e;border:1px solid #293;border-radius:8px;padding:12px}
+.card.full{grid-column:1/-1}
 .card h2{font-size:.9em;color:#8af;margin-bottom:8px}
 /* Stats bar */
 .hdr{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
@@ -55,11 +59,29 @@ btn{background:#2a3a5a;color:#8af;border:1px solid #446;border-radius:4px;paddin
 btn:hover{background:#3a4a6a}
 /* Prof bars */
 .prof-wrap{margin-top:6px}
-.prof-row{display:flex;align-items:center;font-size:.75em;margin-bottom:3px}
+.prof-row{display:flex;align-items:center;font-size:.75em;margin-bottom:0;cursor:pointer;padding:2px 0;transition:background .12s;border-radius:3px}
+.prof-row:hover{background:#1a2a4a}
 .prof-row .plbl{width:60px;color:#888;text-align:right;padding-right:6px;flex-shrink:0;font-size:.78em}
 .prof-row .pbar-bg{flex:1;height:14px;background:#0a0f1a;border-radius:2px;overflow:hidden;position:relative}
 .prof-row .pbar{height:100%;border-radius:2px;min-width:1px}
 .prof-row .ppct{width:40px;text-align:right;color:#aaa;padding-left:4px;flex-shrink:0}
+/* Mini chart for expanded metric */
+.mini-chart{width:100%;height:50px;background:#0a0f1a;border:1px solid #1a2a3a;border-radius:3px;margin:2px 0 4px 0;display:none}
+.mini-chart.open{display:block}
+/* JIT cache section */
+.cache-row{display:flex;align-items:center;font-size:.75em;margin-bottom:3px}
+.cache-row .clbl{width:40px;color:#888;text-align:right;padding-right:6px;flex-shrink:0}
+.cache-row .cbar-bg{flex:1;height:12px;background:#0a0f1a;border-radius:2px;overflow:hidden}
+.cache-row .cbar{height:100%;border-radius:2px;transition:width .3s}
+.cache-row .cval{width:80px;text-align:right;color:#aaa;padding-left:4px;flex-shrink:0;font-family:monospace}
+.cnt-grid{display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:.75em;margin-top:4px;font-family:monospace}
+.cnt-grid .ck{color:#888}.cnt-grid .cv{color:#afa;text-align:right}
+/* Tooltip */
+[data-tip]{position:relative;cursor:help;border-bottom:1px dotted #556}
+[data-tip]:hover::after{content:attr(data-tip);position:absolute;left:0;bottom:calc(100% + 6px);background:#1a2040;color:#dde;border:1px solid #446;border-radius:5px;padding:6px 10px;font-size:12px;font-family:system-ui,sans-serif;white-space:pre-line;width:max-content;max-width:300px;z-index:100;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.5);line-height:1.4}
+[data-tip]:hover::before{content:'';position:absolute;left:12px;bottom:calc(100% + 2px);border:4px solid transparent;border-top-color:#446;z-index:101;pointer-events:none}
+.cnt-grid [data-tip]:hover::after{bottom:auto;top:calc(100% + 6px)}
+.cnt-grid [data-tip]:hover::before{bottom:auto;top:calc(100% + 2px);border-top-color:transparent;border-bottom-color:#446}
 </style>
 </head>
 <body>
@@ -69,7 +91,9 @@ btn:hover{background:#3a4a6a}
   <a href="/input">手柄</a>
 </nav>
 
-<div class="card">
+<div class="grid">
+
+<div class="card full">
   <div class="hdr">
     <div><span class="fps" id="fps">--</span> <span class="sub">FPS</span></div>
     <div class="sub">Heap: <span id="heap">--</span> KB</div>
@@ -82,9 +106,15 @@ btn:hover{background:#3a4a6a}
 </div>
 
 <div class="card" id="prof_card" style="display:none">
-  <h2>CPU 剖析 (cycles/frame)</h2>
+  <h2><span data-tip="每帧CPU时间在各模块中的分配比例。点击任一指标可展开时间序列图">CPU 剖析 (cycles/frame)</span></h2>
   <div class="prof-wrap" id="prof_bars"></div>
   <table class="st" id="prof_tbl"></table>
+</div>
+
+<div class="card" id="jit_card" style="display:none">
+  <h2><span data-tip="JIT动态重编译缓存的使用状态。GBA代码先编译为RISC-V本地代码存入缓存，之后可直接执行">JIT 缓存</span></h2>
+  <div id="jit_cache_bars"></div>
+  <div class="cnt-grid" id="jit_counts"></div>
 </div>
 
 <div class="card">
@@ -113,6 +143,8 @@ btn:hover{background:#3a4a6a}
   <div class="msg" id="rom_msg"></div>
 </div>
 
+</div><!-- /grid -->
+
 <script>
 (function(){
 const $=id=>document.getElementById(id);
@@ -128,7 +160,9 @@ const SERIES = [
 ];
 
 let history = [];  /* array of {ts, ...key: avg_us} */
+let profHistory = []; /* array of prof objects */
 let activeSeries = [];
+let expandedMetric = null; /* currently expanded mini-chart key */
 
 /* ── Chart ────────────────────────────────────────── */
 const canvas = $('chart');
@@ -200,6 +234,61 @@ function drawChart(){
   }
 }
 
+/* ── Mini chart drawer ─────────────────────────────── */
+function drawMiniChart(cvs, key, color) {
+  if (profHistory.length < 2) return;
+  const d = cvs.getContext('2d');
+  const r = cvs.getBoundingClientRect();
+  const dp = window.devicePixelRatio || 1;
+  cvs.width = r.width * dp;
+  cvs.height = r.height * dp;
+  d.setTransform(dp, 0, 0, dp, 0, 0);
+
+  const W = r.width, H = r.height;
+  const n = profHistory.length;
+  const dx = W / (MAX_PTS - 1);
+
+  /* Find max value for auto-scale */
+  let vMax = 0;
+  for (let i = 0; i < n; i++) {
+    const v = profHistory[i][key] || 0;
+    if (v > vMax) vMax = v;
+  }
+  if (vMax === 0) vMax = 1;
+  vMax *= 1.15; /* headroom */
+
+  const startX = (MAX_PTS - n) * dx;
+
+  /* Fill */
+  d.beginPath();
+  d.moveTo(startX, H);
+  for (let i = 0; i < n; i++) {
+    d.lineTo(startX + i * dx, H - ((profHistory[i][key] || 0) / vMax) * H);
+  }
+  d.lineTo(startX + (n - 1) * dx, H);
+  d.closePath();
+  d.fillStyle = color + '30';
+  d.fill();
+
+  /* Line */
+  d.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x = startX + i * dx;
+    const y = H - ((profHistory[i][key] || 0) / vMax) * H;
+    i === 0 ? d.moveTo(x, y) : d.lineTo(x, y);
+  }
+  d.strokeStyle = color;
+  d.lineWidth = 1.5;
+  d.stroke();
+
+  /* Current value label */
+  const cur = profHistory[n - 1][key] || 0;
+  d.fillStyle = '#aaa';
+  d.font = '9px monospace';
+  d.textAlign = 'right';
+  d.fillText(String(cur), W - 3, 10);
+}
+
 /* ── Legend ────────────────────────────────────────── */
 function buildLegend(){
   const el = $('legend');
@@ -226,43 +315,70 @@ function updateTable(data){
 }
 
 /* ── CPU profiling breakdown ──────────────────────── */
-/* update_gba breakdown, as % of update */
-const UPDATE_ITEMS = [
-  {key:'scan',  label:'扫描线', color:'#4a90d9'},
-  {key:'sound', label:'音频',  color:'#8b5cf6'},
-  {key:'dma',   label:'DMA',   color:'#d9a84a'},
-  {key:'timer', label:'定时器', color:'#e06060'},
-  {key:'serial',label:'串口',  color:'#60c0a0'},
-  {key:'irq',   label:'IRQ',   color:'#c080e0'},
-];
-/* scanline sub-breakdown, as % of scanline */
-const SCAN_ITEMS = [
-  {key:'bg',    label:'BG',     color:'#4a90d9'},
-  {key:'obj',   label:'OBJ',    color:'#60c0a0'},
-  {key:'fx',    label:'效果',   color:'#d9a84a'},
-  {key:'ord',   label:'排序',   color:'#c080e0'},
-  {key:'aff',   label:'仿射',   color:'#e06060'},
-  {key:'blank', label:'空白',   color:'#666'},
-];
-/* BG sub-breakdown, as % of bg */
-const BG_ITEMS = [
-  {key:'bg_tf', label:'text快', color:'#4a90d9'},
-  {key:'bg_tm', label:'text马赛克',color:'#60c0a0'},
-  {key:'bg_af', label:'仿射BG', color:'#c080e0'},
-  {key:'bg_bm', label:'位图BG', color:'#e06060'},
-];
-/* exec sub-breakdown (dynarec overhead), as % of exec */
-const EXEC_ITEMS = [
-  {key:'drc_lkup',label:'查找', color:'#d9a84a'},
-  {key:'drc_xlat',label:'编译', color:'#e06060'},
-  {key:'drc_sync',label:'同步', color:'#c080e0'},
+/* All metric definitions with hierarchy info */
+const PROF_METRICS = [
+  /* top-level cycle metrics */
+  {key:'exec',   label:'执行',      color:'#50c878', indent:0,  parent:null, tip:'CPU执行JIT生成的本地代码的时间（包含查找+编译+同步）'},
+  {key:'drc_lkup',label:'查找',     color:'#d9a84a', indent:30, parent:'exec', tip:'在哈希表中查找PC地址对应的已编译代码块的开销'},
+  {key:'drc_xlat',label:'编译',     color:'#e06060', indent:30, parent:'exec', tip:'将GBA指令翻译为RISC-V本地代码的开销'},
+  {key:'drc_sync',label:'同步',     color:'#c080e0', indent:30, parent:'exec', tip:'JIT生成代码后刷新D-Cache和I-Cache的开销'},
+  {key:'update', label:'update',    color:'#4a90d9', indent:0,  parent:null, tip:'GBA模拟器每帧更新：PPU扫描线+音频+DMA+定时器等'},
+  {key:'scan',   label:'扫描线',    color:'#4a90d9', indent:30, parent:'update', tip:'PPU每帧228条扫描线的总渲染开销'},
+  {key:'bg',     label:'BG',        color:'#4a90d9', indent:60, parent:'scan', tip:'背景层渲染（BG0~BG3）'},
+  {key:'bg_tf',  label:'text快',    color:'#4a90d9', indent:90, parent:'bg', tip:'Text模式背景快速路径（无马赛克/无仿射）'},
+  {key:'bg_tm',  label:'text马赛克',color:'#60c0a0', indent:90, parent:'bg'},
+  {key:'bg_af',  label:'仿射BG',   color:'#c080e0', indent:90, parent:'bg', tip:'仿射变换背景渲染（旋转/缩放）'},
+  {key:'bg_bm',  label:'位图BG',   color:'#e06060', indent:90, parent:'bg', tip:'位图模式背景渲染（Mode3/4/5）'},
+  {key:'obj',    label:'OBJ',       color:'#60c0a0', indent:60, parent:'scan', tip:'精灵对象渲染（最多128个精灵）'},
+  {key:'fx',     label:'效果',      color:'#d9a84a', indent:60, parent:'scan', tip:'混合效果（Alpha混合、亮度渐变、窗口裁剪）'},
+  {key:'ord',    label:'排序',      color:'#c080e0', indent:60, parent:'scan', tip:'图层优先级排序'},
+  {key:'aff',    label:'仿射',      color:'#e06060', indent:60, parent:'scan', tip:'OBJ仿射变换计算'},
+  {key:'blank',  label:'空白',      color:'#666',    indent:60, parent:'scan', tip:'V-Blank/H-Blank期间的空闲扫描线'},
+  {key:'sound',  label:'音频',      color:'#8b5cf6', indent:30, parent:'update', tip:'GBA音频合成（PSG+DirectSound）'},
+  {key:'dma',    label:'DMA',       color:'#d9a84a', indent:30, parent:'update', tip:'DMA传输模拟'},
+  {key:'timer',  label:'定时器',    color:'#e06060', indent:30, parent:'update', tip:'GBA硬件定时器模拟'},
+  {key:'serial', label:'串口',      color:'#60c0a0', indent:30, parent:'update', tip:'串行通信模拟'},
+  {key:'irq',    label:'IRQ',       color:'#c080e0', indent:30, parent:'update', tip:'中断处理开销'},
 ];
 
-function profBar(label, pct, color, indent) {
-  const pad = indent ? `padding-left:${indent}px` : '';
-  return `<div class="prof-row" style="${pad}"><span class="plbl">${label}</span>`
-       + `<div class="pbar-bg"><div class="pbar" style="width:${Math.min(pct,100)}%;background:${color}"></div></div>`
-       + `<span class="ppct">${pct}%</span></div>`;
+/* Count metrics (not cycle-based) */
+const COUNT_METRICS = [
+  {key:'insn',         label:'指令/帧',       color:'#50c878', tip:'CPU每帧执行的GBA指令总数（ARM+Thumb）'},
+  {key:'lkup_hit',     label:'哈希表命中',    color:'#4a90d9', tip:'JIT哈希表查找命中：PC地址已有编译好的本地代码，可直接执行'},
+  {key:'lkup_miss',    label:'哈希表未中',    color:'#e06060', tip:'JIT哈希表查找未中：该PC地址没有编译过的代码，需要触发新编译'},
+  {key:'xlat_arm',     label:'编译ARM',       color:'#d9a84a', tip:'从ROM区域新编译的ARM指令块数量'},
+  {key:'xlat_thumb',   label:'编译Thumb',     color:'#8b5cf6', tip:'从ROM区域新编译的Thumb指令块数量'},
+  {key:'xlat_arm_ram', label:'编译ARM(RAM)',   color:'#60c0a0', tip:'从RAM区域(IWRAM/EWRAM)新编译的ARM指令块数量'},
+  {key:'xlat_thumb_ram',label:'编译Thumb(RAM)',color:'#c080e0', tip:'从RAM区域(IWRAM/EWRAM)新编译的Thumb指令块数量'},
+  {key:'fl_rom',       label:'ROM缓存重置',   color:'#e06060', tip:'ROM翻译缓存已满，整体回收并重新编译。频率越低缓存效率越高'},
+  {key:'fl_ram',       label:'RAM缓存重置',   color:'#d9a84a', tip:'RAM翻译缓存因游戏自修改代码(SMC)而被回收重置'},
+  {key:'ic_sync',      label:'I-Cache同步',   color:'#c080e0', tip:'JIT生成新代码后，刷新CPU指令缓存使其生效的次数'},
+];
+
+function profBar(metric, pct, p) {
+  const id = 'mc_' + metric.key;
+  const pad = metric.indent ? `padding-left:${metric.indent}px` : '';
+  const tipAttr = metric.tip ? ` data-tip="${metric.tip}"` : '';
+  return `<div class="prof-row" style="${pad}" data-key="${metric.key}" data-color="${metric.color}">`
+       + `<span class="plbl"${tipAttr}>${metric.label}</span>`
+       + `<div class="pbar-bg"><div class="pbar" style="width:${Math.min(pct,100)}%;background:${metric.color}"></div></div>`
+       + `<span class="ppct">${pct}%</span></div>`
+       + `<canvas class="mini-chart ${expandedMetric===metric.key?'open':''}" id="${id}"></canvas>`;
+}
+
+function countRow(metric, value) {
+  const id = 'mc_' + metric.key;
+  const tipAttr = metric.tip ? ` data-tip="${metric.tip}"` : '';
+  return `<div class="prof-row" data-key="${metric.key}" data-color="${metric.color}">`
+       + `<span class="plbl"${tipAttr}>${metric.label}</span>`
+       + `<div class="pbar-bg" style="display:flex;align-items:center;padding-left:6px;color:#afa;font-family:monospace;font-size:.78em">${value}</div>`
+       + `<span class="ppct"></span></div>`
+       + `<canvas class="mini-chart ${expandedMetric===metric.key?'open':''}" id="${id}"></canvas>`;
+}
+
+function getParentVal(p, metric) {
+  if (!metric.parent) return p.total;
+  return p[metric.parent] || 0;
 }
 
 function updateProf(data){
@@ -271,50 +387,184 @@ function updateProf(data){
   if (!p || !p.total) { card.style.display='none'; return; }
   card.style.display='';
 
+  /* Store prof history */
+  profHistory.push(Object.assign({}, p));
+  if (profHistory.length > MAX_PTS) profHistory.shift();
+
   const barsEl = $('prof_bars');
   let html = '';
-  const t = p.total;
   const pf = (v,d) => d > 0 ? (v / d * 100).toFixed(1) : '0.0';
 
-  /* 执行 + dynarec子项 */
-  html += profBar('执行', pf(p.exec||0, t), '#50c878', 0);
-  if ((p.drc_lkup||0) + (p.drc_xlat||0) + (p.drc_sync||0) > 0) {
-    for (const it of EXEC_ITEMS) {
-      html += profBar(it.label, pf(p[it.key]||0, p.exec), it.color, 30);
-    }
+  /* Cycle breakdown bars */
+  for (const m of PROF_METRICS) {
+    const parentVal = getParentVal(p, m);
+    if (parentVal <= 0 && m.parent) continue;
+    if ((p[m.key] || 0) === 0 && m.indent > 0) continue;
+    html += profBar(m, pf(p[m.key]||0, parentVal), p);
   }
-  /* update + 子项 */
-  html += profBar('update', pf(p.update||0, t), '#4a90d9', 0);
-  if (p.update > 0) {
-    for (const it of UPDATE_ITEMS) {
-      html += profBar(it.label, pf(p[it.key]||0, p.update), it.color, 30);
-      /* BG子项紧跟BG行 */
-      if (it.key === 'scan' && p.scan > 0) {
-        for (const si of SCAN_ITEMS) {
-          html += profBar(si.label, pf(p[si.key]||0, p.scan), si.color, 60);
-          /* BG类型紧跟BG行 */
-          if (si.key === 'bg' && p.bg > 0) {
-            for (const bi of BG_ITEMS) {
-              html += profBar(bi.label, pf(p[bi.key]||0, p.bg), bi.color, 90);
-            }
-          }
-        }
-      }
-    }
+
+  /* Separator */
+  html += '<div style="border-top:1px solid #1a2a3a;margin:6px 0"></div>';
+
+  /* Count metrics */
+  for (const m of COUNT_METRICS) {
+    if (p[m.key] == null) continue;
+    html += countRow(m, p[m.key]);
   }
+
   barsEl.innerHTML = html;
 
-  /* Info table */
-  let thtml = '';
-  if (p.insn > 0) {
-    thtml += `<tr><td>指令/帧</td><td class="v" colspan="2">${p.insn}</td></tr>`;
+  /* Attach click handlers */
+  barsEl.querySelectorAll('.prof-row').forEach(row => {
+    row.addEventListener('click', function() {
+      const key = this.dataset.key;
+      const cvs = this.nextElementSibling;
+      if (!cvs || !cvs.classList.contains('mini-chart')) return;
+      if (expandedMetric === key) {
+        expandedMetric = null;
+        cvs.classList.remove('open');
+      } else {
+        /* Close previous */
+        const prev = barsEl.querySelector('.mini-chart.open');
+        if (prev) prev.classList.remove('open');
+        expandedMetric = key;
+        cvs.classList.add('open');
+        drawMiniChart(cvs, key, this.dataset.color);
+      }
+    });
+  });
+
+  /* Redraw open mini chart if any */
+  if (expandedMetric) {
+    const mc = $('mc_' + expandedMetric);
+    if (mc && mc.classList.contains('open')) {
+      const row = mc.previousElementSibling;
+      drawMiniChart(mc, expandedMetric, row ? row.dataset.color : '#8af');
+    }
   }
+
+  /* Info table: hit rate */
+  let thtml = '';
   if (p.lkup_hit > 0 || p.lkup_miss > 0) {
     const hr = p.lkup_hit + p.lkup_miss > 0
       ? (p.lkup_hit / (p.lkup_hit + p.lkup_miss) * 100).toFixed(1) : '0';
-    thtml += `<tr><td>块查找</td><td class="v">命中 ${hr}%</td><td class="p99">${p.lkup_hit} / ${p.lkup_hit+p.lkup_miss}</td></tr>`;
+    thtml += `<tr><td><span data-tip="JIT哈希表查找命中 / 总查找次数。命中=直接执行已编译代码，未中=需要新编译">块查找命中率</span></td><td class="v" colspan="2">${hr}%</td></tr>`;
   }
   $('prof_tbl').innerHTML = thtml;
+}
+
+/* ── JIT Cache utilization ───────────────────────── */
+function updateJitCache(data) {
+  const p = data.prof;
+  const w = data.win;
+  const c = data.cum;
+  const card = $('jit_card');
+  if (!p || !p.rom_cap) { card.style.display='none'; return; }
+  card.style.display='';
+
+  const bars = $('jit_cache_bars');
+  const romPct = p.rom_cap > 0 ? (p.rom_used / p.rom_cap * 100).toFixed(1) : '0.0';
+  const ramPct = p.ram_cap > 0 ? (p.ram_used / p.ram_cap * 100).toFixed(1) : '0.0';
+  const romKB = (p.rom_used / 1024).toFixed(0);
+  const romCapKB = (p.rom_cap / 1024).toFixed(0);
+  const ramKB = (p.ram_used / 1024).toFixed(0);
+  const ramCapKB = (p.ram_cap / 1024).toFixed(0);
+  const romColor = romPct > 90 ? '#e06060' : romPct > 70 ? '#d9a84a' : '#50c878';
+  const ramColor = ramPct > 90 ? '#e06060' : ramPct > 70 ? '#d9a84a' : '#50c878';
+
+  let html =
+    `<div class="cache-row"><span class="clbl">ROM</span>`
+  + `<div class="cbar-bg"><div class="cbar" style="width:${romPct}%;background:${romColor}"></div></div>`
+  + `<span class="cval">${romKB}/${romCapKB}K ${romPct}%</span></div>`
+  + `<div class="cache-row"><span class="clbl">RAM</span>`
+  + `<div class="cbar-bg"><div class="cbar" style="width:${ramPct}%;background:${ramColor}"></div></div>`
+  + `<span class="cval">${ramKB}/${ramCapKB}K ${ramPct}%</span></div>`;
+
+  /* ── Hot zone distribution ── */
+  if (p.hot_wm > 0) {
+    const hotKB = (p.hot_wm / 1024).toFixed(0);
+    const coldKB = Math.max(0, (p.rom_used - p.hot_wm) / 1024).toFixed(0);
+    const hotPct = p.rom_used > 0 ? (p.hot_wm / p.rom_used * 100).toFixed(1) : '0.0';
+    const coldPct = p.rom_used > 0 ? (Math.max(0, p.rom_used - p.hot_wm) / p.rom_used * 100).toFixed(1) : '0.0';
+    const hotW = p.rom_cap > 0 ? (p.hot_wm / p.rom_cap * 100).toFixed(1) : '0';
+    const coldW = p.rom_cap > 0 ? (Math.max(0, p.rom_used - p.hot_wm) / p.rom_cap * 100).toFixed(1) : '0';
+    html += `<div style="margin-top:8px;font-size:.72em;color:#888;margin-bottom:2px">`
+         +  `<span data-tip="ROM缓存中热区(高频代码)与冷区(低频代码)的空间占比。热区在缓存重置时被保留">ROM 热/冷分布</span></div>`
+         +  `<div class="cache-row"><span class="clbl"></span>`
+         +  `<div class="cbar-bg" style="display:flex">`
+         +  `<div class="cbar" style="width:${hotW}%;background:#d9a84a;flex-shrink:0"></div>`
+         +  `<div class="cbar" style="width:${coldW}%;background:#4a90d9;flex-shrink:0"></div>`
+         +  `</div>`
+         +  `<span class="cval" style="width:auto;min-width:80px">热${hotKB}K 冷${coldKB}K</span></div>`;
+    html += `<div style="display:flex;flex-wrap:wrap;gap:6px 12px;font-size:.7em;margin-top:2px;padding-left:46px">`
+         +  `<span><span style="color:#d9a84a">■</span> 热区 ${hotPct}%</span>`
+         +  `<span><span style="color:#4a90d9">■</span> 冷区 ${coldPct}%</span>`
+         +  `<span style="color:#666" data-tip="热区中已索引的代码块数量">块 ${p.hot_blk||0}</span>`
+         +  `<span style="color:#666" data-tip="当前热区连续被保留(Path A)的次数。达到阈值后触发新鲜度检查">存活轮次 ${p.hot_age||0}</span>`
+         +  `</div>`;
+  }
+
+  /* ── Hot zone lifecycle ── */
+  const hzA = p.hz_a || 0, hzB = p.hz_b || 0, hzS = p.hz_sok || 0;
+  if (hzA + hzB > 0) {
+    const totalFlush = hzA + hzB;
+    const reuseRate = totalFlush > 0 ? (hzA / totalFlush * 100).toFixed(1) : '0';
+    const freshS = c ? (c.hz_fresh_s || 0) : 0;
+    const freshLabel = freshS < 60 ? `${freshS}s` : `${(freshS/60).toFixed(1)}m`;
+    const freshColor = freshS < 60 ? '#6f6' : freshS < 300 ? '#d9a84a' : '#e06060';
+    /* Avoided recompilation estimate: blocks preserved × Path A count */
+    const avoidedBlocks = (p.hot_blk || 0) * hzA;
+    html += `<div style="margin-top:8px;font-size:.72em;color:#888;margin-bottom:3px">`
+         +  `<span data-tip="ROM缓存重置时，热区机制对高频代码块的保护情况">热区生命周期</span></div>`
+         +  `<div style="display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.72em;font-family:monospace;padding-left:6px">`
+         +  `<span data-tip="ROM缓存满时，热区内容有效，直接保留并重新插入哈希表，跳过重编译">保留 <span style="color:#6f6">${hzA}</span></span>`
+         +  `<span data-tip="热区过期或命中率低于75%阈值，重新扫描频率环构建新热区">重建 <span style="color:#e06060">${hzB}</span></span>`
+         +  `<span data-tip="热区新鲜度检查：75%以上的热区块仍在近期频率环中出现，确认热区仍然有效">新鲜度通过 <span style="color:#afa">${hzS}</span></span>`
+         +  `</div>`
+         +  `<div style="display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.72em;font-family:monospace;padding-left:6px;margin-top:3px">`
+         +  `<span data-tip="保留次数/(保留+重建)。越高说明热区越稳定，越少触发昂贵的重编译">复用率 <span style="color:#8af">${reuseRate}%</span></span>`
+         +  `<span data-tip="距上次热区重建(Path B)经过的时间。越久说明热区越稳定">距上次重建 <span style="color:${freshColor}">${freshLabel}</span></span>`
+         +  `<span data-tip="热区保留期间免于重编译的代码块总数 = 热区块数 × 保留次数">免编译块 <span style="color:#afa">${avoidedBlocks}</span></span>`
+         +  `</div>`;
+  }
+
+  bars.innerHTML = html;
+
+  /* ── Window + Cumulative stats ── */
+  const counts = $('jit_counts');
+  let chtml = '';
+
+  if (w && w.secs > 0) {
+    const ws = w.secs;
+    const wHr = (w.hr_x10 / 10).toFixed(1);
+    const wXlatS = (w.xlat / ws).toFixed(1);
+    const wFlRomS = (w.fl_rom / ws).toFixed(2);
+    const wFlRamS = (w.fl_ram / ws).toFixed(2);
+    const wIcS = (w.ic / ws).toFixed(1);
+    const wLife = w.fl_rom > 0 ? (ws / w.fl_rom).toFixed(1) : '∞';
+    chtml += `<div style="grid-column:1/-1;color:#888;font-size:.72em;margin-top:2px;border-top:1px solid #1a2a3a;padding-top:4px">`
+          +  `<span data-tip="最近${ws}秒的滑动窗口统计，反映当前运行状态">${ws}秒滑动窗口</span></div>`
+          +  `<span class="ck" data-tip="哈希表查找命中 / 总查找次数。越高说明JIT缓存越有效，较少触发新编译">块查找命中率</span><span class="cv">${wHr}%</span>`
+          +  `<span class="ck" data-tip="每秒新编译的GBA代码块数（ARM+Thumb, ROM+RAM），越低越好">新编译/s</span><span class="cv">${wXlatS}</span>`
+          +  `<span class="ck" data-tip="ROM翻译缓存满后整体重置的频率。频率越低说明缓存容量和热区策略越有效">ROM重置/s</span><span class="cv">${wFlRomS}</span>`
+          +  `<span class="ck" data-tip="RAM缓存因自修改代码(SMC)而重置的频率">RAM重置/s</span><span class="cv">${wFlRamS}</span>`
+          +  `<span class="ck" data-tip="JIT生成代码后同步CPU指令缓存的频率">I-Cache同步/s</span><span class="cv">${wIcS}</span>`
+          +  `<span class="ck" data-tip="两次ROM缓存重置之间的平均间隔。越长说明缓存效率越高，热区保护越有效">ROM缓存寿命</span><span class="cv">${wLife}s</span>`;
+  }
+
+  if (c) {
+    const cHr = (c.hr_x10 / 10).toFixed(1);
+    const cTotal = Number(c.hits) + Number(c.misses);
+    chtml += `<div style="grid-column:1/-1;color:#888;font-size:.72em;margin-top:2px;border-top:1px solid #1a2a3a;padding-top:4px">`
+          +  `<span data-tip="从本次会话启动至今的累计统计">累计统计（自启动）</span></div>`
+          +  `<span class="ck" data-tip="累计哈希表查找命中率。括号内为总查找次数">块查找命中率</span><span class="cv">${cHr}% (${cTotal})</span>`
+          +  `<span class="ck" data-tip="累计编译的代码块总数">编译总量</span><span class="cv">${c.xlat}</span>`
+          +  `<span class="ck" data-tip="累计ROM缓存重置次数">ROM重置</span><span class="cv">${c.fl_rom}</span>`
+          +  `<span class="ck" data-tip="累计RAM缓存重置次数">RAM重置</span><span class="cv">${c.fl_ram}</span>`
+          +  `<span class="ck" data-tip="累计I-Cache同步次数">I-Cache同步</span><span class="cv">${c.ic}</span>`;
+  }
+
+  counts.innerHTML = chtml;
 }
 
 /* ── Polling ──────────────────────────────────────── */
@@ -343,6 +593,7 @@ async function poll(){
 
     updateTable(d);
     updateProf(d);
+    updateJitCache(d);
     drawChart();
   } catch(e){}
 }

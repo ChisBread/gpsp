@@ -152,7 +152,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
 /* ---- GET /api/stats → JSON performance snapshot ---- */
 static esp_err_t stats_get_handler(httpd_req_t *req)
 {
-    char buf[1024];
+    char buf[2048];
     int len = gba_session_stats_json(buf, sizeof(buf));
     if (len < 0) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "stats unavailable");

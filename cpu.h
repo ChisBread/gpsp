@@ -166,6 +166,22 @@ extern u32 rom_branch_hash[ROM_BRANCH_HASH_SIZE];
 
 void flush_translation_cache_rom(void);
 void flush_translation_cache_ram(void);
+
+#ifdef ROM_HOT_ZONE
+/* Query hot-zone state (read-only snapshot for profiling). */
+typedef struct {
+    u32 hot_watermark;   /* bytes occupied by hot zone */
+    u32 hot_blocks;      /* number of blocks in hot zone directory */
+    u32 hot_age;         /* consecutive Path A flushes since last rebuild */
+#ifdef CPU_PROFILE_STATS
+    u32 path_a_count;    /* cumulative Path A (preserve) completions */
+    u32 path_b_count;    /* cumulative Path B (rebuild) completions */
+    u32 stale_ok_count;  /* staleness checks that passed (zone still valid) */
+#endif
+} hot_zone_info_t;
+void get_hot_zone_info(hot_zone_info_t *out);
+void reset_hot_zone_stats(void);
+#endif
 void dump_translation_cache(void);
 void init_dynarec_caches(void);
 void flush_dynarec_caches(void);
