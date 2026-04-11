@@ -50,6 +50,7 @@ _##symbol:
 #define REG_Z_FLAG         (21 * 4)
 #define REG_C_FLAG         (22 * 4)
 #define REG_V_FLAG         (23 * 4)
+#define OAM_UPDATED        (25 * 4)
 #define REG_SAVE           (26 * 4)
 #define REG_SAVE2          (27 * 4)
 #define REG_SAVE3          (28 * 4)
@@ -735,7 +736,7 @@ defsymbl(rv_indirect_branch_dual)
     addi  t1, t0, -3
     beqz  t1, .Liwram_\suffix
     addi  t1, t0, -8
-    sltiu t1, t1, 5
+    sltiu t1, t1, 7
     bnez  t1, .Lrom_\suffix
     addi  t1, t0, -4
     beqz  t1, .Lioreg_\suffix
@@ -902,13 +903,79 @@ defsymbl(rv_execute_aligned_load32)
     ret
 .endm
 
-/* Store region dispatch: EWRAM and IWRAM only */
+/* Store VRAM with 0x18000 mirror (u16/u32/aligned32 only) */
+.macro store_fast_vram stop, suffix
+.Lst_vram_\suffix:
+    la    t0, vram
+    slli  t1, a0, 15
+    srli  t1, t1, 15            /* t1 = addr & 0x1FFFF */
+    li    a0, 0x18000
+    bltu  t1, a0, 1f
+    lui   a0, 8                 /* a0 = 0x8000 */
+    sub   t1, t1, a0
+1:
+    add   t0, t0, t1
+    \stop a1, 0(t0)
+    ret
+.endm
+
+/* Store VRAM u8: byte→halfword duplex mirror
+ * GBA spec: byte writes to VRAM duplicate the byte to both halves
+ * of a 16-bit unit. addr &= ~1; val16 = (val << 8) | val */
+.macro store_fast_vram_u8 suffix
+.Lst_vram_\suffix:
+    la    t0, vram
+    slli  t1, a0, 15
+    srli  t1, t1, 15            /* t1 = addr & 0x1FFFF */
+    li    a0, 0x18000
+    bltu  t1, a0, 1f
+    lui   a0, 8
+    sub   t1, t1, a0
+1:
+    andi  t1, t1, -2            /* align to halfword boundary */
+    add   t0, t0, t1
+    andi  a1, a1, 0xFF          /* ensure single byte */
+    slli  a0, a1, 8
+    or    a1, a1, a0             /* val16 = (val << 8) | val */
+    sh    a1, 0(t0)             /* store as halfword */
+    ret
+.endm
+
+/* Store OAM (u16/u32/aligned32): write + set OAM_UPDATED flag
+ * Note: u8 writes to OAM are no-op per GBA spec → use slow path (returns 0) */
+.macro store_fast_oam stop, suffix
+.Lst_oam_\suffix:
+    la    t0, oam_ram
+    andi  t1, a0, 0x3FF
+    add   t0, t0, t1
+    \stop a1, 0(t0)
+    li    t0, 1
+    sw    t0, OAM_UPDATED(gp)   /* reg[OAM_UPDATED] = 1 */
+    ret
+.endm
+
+/* Store region dispatch: EWRAM, IWRAM, VRAM, OAM */
 .macro store_region_dispatch suffix
     srli  t0, a0, 24
     addi  t1, t0, -2
     beqz  t1, .Lst_ewram_\suffix
     addi  t1, t0, -3
     beqz  t1, .Lst_iwram_\suffix
+    addi  t1, t0, -6
+    beqz  t1, .Lst_vram_\suffix
+    addi  t1, t0, -7
+    beqz  t1, .Lst_oam_\suffix
+.endm
+
+/* u8 dispatch: no OAM (byte writes to OAM are no-ops per GBA spec) */
+.macro store_region_dispatch_u8 suffix
+    srli  t0, a0, 24
+    addi  t1, t0, -2
+    beqz  t1, .Lst_ewram_\suffix
+    addi  t1, t0, -3
+    beqz  t1, .Lst_iwram_\suffix
+    addi  t1, t0, -6
+    beqz  t1, .Lst_vram_\suffix
 .endm
 
 /* Store slow-path: full C call with alert check */
@@ -929,10 +996,11 @@ defsymbl(rv_execute_aligned_load32)
 /* ── Store trampolines with fast paths ────────────────────────── */
 
 defsymbl(rv_execute_store_u8)
-    store_region_dispatch st_u8
+    store_region_dispatch_u8 st_u8
     store_slow_path execute_store_u8, st_u8
     store_fast_ewram  sb, lbu, st_u8
     store_fast_iwram  sb, lbu, st_u8
+    store_fast_vram_u8 st_u8
 
 defsymbl(rv_execute_store_u16)
     andi  t1, a0, 1             /* unaligned? → slow path */
@@ -941,6 +1009,8 @@ defsymbl(rv_execute_store_u16)
     store_slow_path execute_store_u16, st_u16
     store_fast_ewram  sh, lhu, st_u16
     store_fast_iwram  sh, lhu, st_u16
+    store_fast_vram   sh, st_u16
+    store_fast_oam    sh, st_u16
 
 defsymbl(rv_execute_store_u32)
     andi  t1, a0, 3             /* unaligned? → slow path */
@@ -949,12 +1019,16 @@ defsymbl(rv_execute_store_u32)
     store_slow_path execute_store_u32, st_u32
     store_fast_ewram  sw, lw, st_u32
     store_fast_iwram  sw, lw, st_u32
+    store_fast_vram   sw, st_u32
+    store_fast_oam    sw, st_u32
 
 defsymbl(rv_execute_aligned_store32)
     store_region_dispatch st_al32
     store_slow_path execute_aligned_store32, st_al32
     store_fast_ewram_nosmc  sw, st_al32
     store_fast_iwram_nosmc  sw, st_al32
+    store_fast_vram   sw, st_al32
+    store_fast_oam    sw, st_al32
 
 /*
  * Store alert slow path: complete the full register+flag save that the

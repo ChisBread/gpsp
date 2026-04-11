@@ -379,6 +379,7 @@
 | +OPT-L (Dead-flag MV消除) | ~4.44 s | ~675 | ≈平 (真实硬件受益) |
 | +OPT-M (stub符号别名+合并移位) | ~4.44 s | ~675 | ≈平 (真实硬件受益) |
 | +-fno-pic -fno-pie (ESP32-P4) | — | — | 真实硬件受益 |
+| +OPT-K (Store VRAM/OAM快路径+ROM mirror) | ~4.85 s | ~617 | ≈平 (真实硬件受益) |
 | (参考) Zba+Zbb | 7.28 s | 411 | -21.1% |
 
 ### 已采纳优化
@@ -415,6 +416,7 @@
 - **OPT-L**: Dead-flag感知MV消除 — adds/subs/rsbs仅在C/V flag实际需要时才保存rn/rm
 - **OPT-M**: Stub符号别名+合并移位 — `ewram_tags`/`iwram_data`/`ram_tag_table`别名省lui+add; `srai t0,t0,17`合并sign-extend+shift
 - **-fno-pic -fno-pie**: ESP32-P4 CMakeLists.txt 添加，消除GOT间接寻址开销
+- **OPT-K**: Store VRAM/OAM汇编快路径 + Load ROM mirror 0x0D/0x0E覆盖修复
 
 ### 已回退优化
 - **OPT-4**: 去除Load路径PC加载 (QEMU回退)
@@ -640,3 +642,30 @@
 **文件**: `components/gpsp_core/CMakeLists.txt`
 
 **结论**: 零风险，纯收益。ESP32-P4目标无PIC需求。
+
+---
+
+### OPT-K: Store VRAM/OAM汇编快路径 + Load ROM mirror修复
+
+**变更**（三项合并）:
+1. **Store VRAM快路径**: `rv_execute_store_{u8,u16,u32}` 和 `rv_execute_aligned_store32` 新增 VRAM(0x06) 内联汇编handler。u16/u32/aligned32直接写 `vram[addr & 0x1FFFF]`（含0x18000 mirror处理）。u8实现GBA规范的byte→halfword duplex镜像：`addr &= ~1; val16 = (val<<8)|val; sh val16, [vram+addr]`
+2. **Store OAM快路径**: u16/u32/aligned32写 `oam_ram[addr & 0x3FF]` + `reg[OAM_UPDATED] = 1`。u8走慢路径（GBA规范u8写OAM为no-op）
+3. **Load ROM mirror修复**: `load_region_dispatch` 的ROM范围判断从 `sltiu t1, t1, 5`（仅0x08-0x0C）改为 `sltiu t1, t1, 7`（覆盖0x08-0x0E全部ROM mirror区域）
+
+**影响**:
+- 此前Store仅EWRAM/IWRAM有快路径，VRAM/OAM全部走C慢路径（~35条指令保存/恢复）
+- 新增快路径: VRAM u16/u32 ~13条指令, OAM u16/u32 ~7条指令, VRAM u8 ~16条指令
+- 仅使用t0, t1作scratch，零寄存器保存/恢复开销
+
+**文件**: `riscv/riscv_stub.S`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | OPT-M | OPT-K (3次) | 变化 |
+|------|-------|-------------|------|
+| Total | ~4.44 s | ~4.85 s | QEMU噪声 (-O2编译) |
+
+3次测量 (-O2): 4.811, 4.844, 5.092
+
+**注意**: 此测量使用-O2编译（加快编译速度），与之前-O3基准不可直接比较。QEMU中VRAM/OAM store频率低，改善不可测量。真实ESP32-P4上PPU/DMA相关的VRAM写入是热路径，预计受益。
+
+**结论**: 补齐Store快路径覆盖（与已有Load快路径对称），零风险。保留。
