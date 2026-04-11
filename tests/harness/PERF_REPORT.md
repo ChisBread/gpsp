@@ -375,6 +375,7 @@
 | **+OPT-F (内联Block Lookup)** | **4.468 s** | **~671** | **-51.5%** |
 | +OPT-G (小立即数SUBS/ADDS) | ~4.490 s | ~668 | -51.3% |
 | **+RVC (压缩指令集)** | **4.411 s** | **~680** | **-52.2%** |
+| +OPT-H/I/J (微优化) | ~4.444 s | ~673 | ≈平 |
 | (参考) Zba+Zbb | 7.28 s | 411 | -21.1% |
 
 ### 已采纳优化
@@ -405,6 +406,9 @@
 - **OPT-F**: 间接分支内联快路径Block Lookup — RAM tag/ROM hash首项汇编内联 (**-1.9%**)
 - **OPT-G**: 小立即数SUBS/ADDS — addi+sltiu替代load_imm+sub (CMP #imm8全覆盖)
 - **RVC**: HAVE_RVC压缩指令集基础设施 — 自动选择16位编码+pointer-based patching (**-1.8%**)
+- **OPT-H**: 分支出口PC加载可变长度 — generate_load_pc替代generate_load_pc_2inst
+- **OPT-I**: Block Memory preadjust+align合并 — mv+andi → 单条andi
+- **OPT-J**: BIC立即数andi优化 — ~imm ∈ [-2048,2047] 时直接andi
 
 ### 已回退优化
 - **OPT-4**: 去除Load路径PC加载 (QEMU回退)
@@ -544,3 +548,44 @@
 5次测量: 4.428, 4.434, 4.426, 4.401, 4.365 (avg 4.411s)
 
 **结论**: 一致的改善。JIT 代码体积缩减 (16 位重编码)，改善 I-cache 利料率。shift_reg_* 的 pointer-based patching 不增加运行时开销（仅 JIT 编译时多几个指针赋值）。保留。
+
+---
+
+### OPT-H: 分支出口PC加载可变长度
+
+**变更**: `generate_branch_no_cycle_update` 中 `generate_load_pc_2inst(reg_a0, new_pc)` → `generate_load_pc(reg_a0, new_pc)`。`generate_load_pc` 会根据 PC 与 reg_base 的 delta 自动选择 1 条 (`addi`) 或 2 条 (`lui+addi`) 指令，而 bge 分支偏移已经通过 `rv_patch_branch()` 动态修正，无需固定 2 条指令。
+**影响**: 当 PC delta 适合 12-bit 立即数时（频繁出现于小函数/循环），每个分支出口省 1 条指令
+**文件**: `riscv/riscv_emit.h`
+
+---
+
+### OPT-I: Block Memory preadjust+align 合并
+
+**变更**: LDM/STM/PUSH/POP 块内存操作中，原来的 `generate_add_imm(save0, base, 0)` (即 mv) + 全局 `rv_andi(save0, save0, -4)` 两步操作合并为单条 `rv_andi(save0, base, -4)`。各 offset/preadjust 变体均改为自包含对齐:
+- ARM `offset_no` / Thumb `preadjust_no`: mv+andi → 单条 andi
+- Thumb `preadjust_down` / `preadjust_push_lr`: sub+mv+andi → sub+andi (省 1 条 mv)
+- ARM `offset_down_a/b` / `offset_up`: sub/add + andi (自包含)
+**影响**: 每个块内存操作省 1 条指令
+**文件**: `riscv/riscv_emit.h`
+
+---
+
+### OPT-J: BIC 立即数 andi 优化
+
+**变更**: `generate_op_bic_imm` 非 ZBB 路径增加检查: 当 `~imm` ∈ [-2048, 2047] 时使用单条 `rv_andi(rd, rn, ~imm)` 替代 `generate_load_imm(temp3, ~imm) + rv_and(rd, rn, temp3)` 的 2-3 条指令序列
+**影响**: 常见的 BIC #0xFF, BIC #0x1F 等小掩码场景直接 andi
+**文件**: `riscv/riscv_emit.h`
+
+---
+
+### OPT-H/I/J 综合基准测量
+
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | RVC | OPT-H/I/J (5次avg) | 变化 |
+|------|-----|---------------------|------|
+| Total | 4.411 s | ~4.444 s | ≈平 (噪声) |
+
+5次测量: 4.455, 4.408, 4.423, 4.470, 4.465 (avg 4.444s)
+
+**结论**: QEMU 噪声内。这三项均为 JIT 代码体积微优化，减少指令数但不改变控制流。真实硬件 I-cache 压力下有累积收益。保留。

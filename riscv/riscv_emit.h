@@ -491,7 +491,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
         /* If cycles >= 0, skip the update_gba() call and jump to target. */  \
         u8 *_bge_ptr = translation_ptr;                                       \
         rv_bge(reg_cycles, reg_zero, 0);       /* placeholder offset */       \
-        generate_load_pc_2inst(reg_a0, new_pc);                               \
+        generate_load_pc(reg_a0, new_pc);                                     \
         generate_function_call(rv_update_gba);                                \
         rv_patch_branch((u32 *)_bge_ptr, translation_ptr);                    \
         emit_branch_filler(writeback_location);                               \
@@ -883,8 +883,15 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #else
 #define generate_op_bic_imm(_rd, _rn)                                         \
 {                                                                             \
-    generate_load_imm(reg_temp3, ~(imm));                                     \
-    rv_and(_rd, _rn, reg_temp3);                                              \
+    if (((s32)(~(imm)) >= -2048) && ((s32)(~(imm)) <= 2047))                  \
+    {                                                                         \
+        rv_andi(_rd, _rn, ~(imm));                                            \
+    }                                                                         \
+    else                                                                      \
+    {                                                                         \
+        generate_load_imm(reg_temp3, ~(imm));                                 \
+        rv_and(_rd, _rn, reg_temp3);                                          \
+    }                                                                         \
 }                                                                             \
 
 #endif
@@ -1564,16 +1571,19 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     }                                                                         \
 
 #define arm_block_memory_offset_down_a()                                      \
-    generate_sub_imm(reg_save0, base_reg, ((word_bit_count(reg_list) - 1) * 4)) \
+    generate_sub_imm(reg_save0, base_reg, ((word_bit_count(reg_list) - 1) * 4)); \
+    rv_andi(reg_save0, reg_save0, -4)                                          \
 
 #define arm_block_memory_offset_down_b()                                      \
-    generate_sub_imm(reg_save0, base_reg, (word_bit_count(reg_list) * 4))     \
+    generate_sub_imm(reg_save0, base_reg, (word_bit_count(reg_list) * 4));     \
+    rv_andi(reg_save0, reg_save0, -4)                                          \
 
 #define arm_block_memory_offset_no()                                          \
-    generate_add_imm(reg_save0, base_reg, 0)                                  \
+    rv_andi(reg_save0, base_reg, -4)                                  \
 
 #define arm_block_memory_offset_up()                                          \
-    generate_add_imm(reg_save0, base_reg, 4)                                  \
+    generate_add_imm(reg_save0, base_reg, 4);                                  \
+    rv_andi(reg_save0, reg_save0, -4)                                          \
 
 #define arm_block_memory_writeback_down()                                     \
     generate_sub_imm(base_reg, base_reg, (word_bit_count(reg_list) * 4))      \
@@ -1603,8 +1613,6 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
                                                                               \
     arm_block_memory_offset_##offset_type();                                  \
     arm_block_memory_writeback_pre_##access_type(writeback_type);             \
-                                                                              \
-    rv_andi(reg_save0, reg_save0, -4);                                   \
     arm_block_memory_preload_pc_##access_type();                              \
                                                                               \
     for (i = 0; i < 16; i++)                                                  \
@@ -1889,15 +1897,15 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 }                                                                             \
 
 #define thumb_block_address_preadjust_no(base_reg)                            \
-    generate_add_imm(reg_save0, base_reg, 0)                                  \
+    rv_andi(reg_save0, base_reg, -4)                                  \
 
 #define thumb_block_address_preadjust_down(base_reg)                          \
-    generate_sub_imm(reg_save0, base_reg, (bit_count[reg_list] * 4));         \
-    generate_add_imm(base_reg, reg_save0, 0)                                  \
+    generate_sub_imm(base_reg, base_reg, (bit_count[reg_list] * 4));          \
+    rv_andi(reg_save0, base_reg, -4)                                  \
 
 #define thumb_block_address_preadjust_push_lr(base_reg)                       \
-    generate_sub_imm(reg_save0, base_reg, ((bit_count[reg_list] + 1) * 4));   \
-    generate_add_imm(base_reg, reg_save0, 0)                                  \
+    generate_sub_imm(base_reg, base_reg, ((bit_count[reg_list] + 1) * 4));    \
+    rv_andi(reg_save0, base_reg, -4)                                  \
 
 #define thumb_block_address_postadjust_no(base_reg)                           \
 
@@ -1968,8 +1976,6 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     u32 base_reg = arm_to_rv_reg[arm_base_reg];                               \
                                                                               \
     thumb_block_address_preadjust_##pre_op(base_reg);                         \
-                                                                              \
-    rv_andi(reg_save0, reg_save0, -4);                                   \
     thumb_block_memory_preload_pc_##access_type();                            \
                                                                               \
     thumb_block_address_postadjust_##post_op(base_reg);                       \
