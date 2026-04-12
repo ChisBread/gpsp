@@ -1251,11 +1251,16 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_op_rscs_reg(_rd, _rn, reg_a0);                                   \
 }                                                                             \
 
-/* CMP+Branch fusion: if next Thumb instruction is a fusable Bcc whose
- * flag requirements exactly match CMP's flag_status, skip flag generation
- * and let the Bcc emit a direct RISC-V comparison branch instead.
- * Fusable conditions: EQ/NE (Z), CS/CC (C), GE/LT (N+V). */
-#define cmp_try_fuse(_rn_rv, _rm_rv)                                          \
+/* CMP/TST+Branch fusion: if next Thumb instruction is a fusable Bcc whose
+ * flag requirements exactly match the current instruction's flag_status,
+ * skip flag generation and emit a direct RISC-V branch instead.
+ *
+ * cmp_fuse_active values:
+ *   0 = no fusion
+ *   1 = CMP fusion: EQ/NE/CS/CC/GE/LT use beq/bne/bgeu/bltu/bge/blt(rn,rm)
+ *   2 = TST fusion: EQ/NE only — use bnez/beqz on AND result register
+ */
+#define next_is_fusable_bcc(_required_flags)                                  \
 ({                                                                            \
     u32 _ok = 0;                                                              \
     if (pc + 2 < block_end_pc && ((pc & 0x7FFF) < 0x7FFE) &&                  \
@@ -1271,13 +1276,39 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
                 case 0xA: case 0xB: _nf = 0x09; break;                       \
                 default: _nf = 0; break;                                      \
             }                                                                 \
-            if (_nf && (flag_status & 0x0F) == _nf) {                         \
-                cmp_fuse_rn_rv = (_rn_rv);                                    \
-                cmp_fuse_rm_rv = (_rm_rv);                                    \
-                cmp_fuse_active = 1;                                          \
+            if (_nf == (_required_flags) &&                                   \
+                (flag_status & 0x0F) == (_required_flags)) {                  \
                 _ok = 1;                                                      \
             }                                                                 \
         }                                                                     \
+    }                                                                         \
+    _ok;                                                                      \
+})
+
+#define cmp_try_fuse(_rn_rv, _rm_rv)                                          \
+({                                                                            \
+    u32 _ok = 0;                                                              \
+    u32 _fs = flag_status & 0x0F;                                             \
+    u32 _req = (_fs == 0x04) ? 0x04 :                                         \
+               (_fs == 0x02) ? 0x02 :                                         \
+               (_fs == 0x09) ? 0x09 : 0;                                      \
+    if (_req && next_is_fusable_bcc(_req)) {                                  \
+        cmp_fuse_rn_rv = (_rn_rv);                                            \
+        cmp_fuse_rm_rv = (_rm_rv);                                            \
+        cmp_fuse_active = 1;                                                  \
+        _ok = 1;                                                              \
+    }                                                                         \
+    _ok;                                                                      \
+})
+
+/* TST/TEQ fusion: only EQ/BNE (Z flag only) */
+#define tst_try_fuse(_result_rv)                                              \
+({                                                                            \
+    u32 _ok = 0;                                                              \
+    if ((flag_status & 0x0F) == 0x04 && next_is_fusable_bcc(0x04)) {          \
+        cmp_fuse_rn_rv = (_result_rv);                                        \
+        cmp_fuse_active = 2;                                                  \
+        _ok = 1;                                                              \
     }                                                                         \
     _ok;                                                                      \
 })
@@ -1290,7 +1321,11 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_op_adds_reg(reg_temp2, _rn, _rm)                                 \
 
 #define generate_op_tst_reg(_rd, _rn, _rm)                                    \
-    generate_op_ands_reg(reg_temp2, _rn, _rm)                                 \
+{                                                                             \
+    rv_and(reg_temp2, _rn, _rm);                                              \
+    if (!tst_try_fuse(reg_temp2))                                             \
+        generate_op_logic_flags(reg_temp2)                                    \
+}
 
 #define generate_op_teq_reg(_rd, _rn, _rm)                                    \
     generate_op_eors_reg(reg_temp2, _rn, _rm)                                 \
@@ -1324,7 +1359,11 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     generate_op_adds_imm(reg_temp2, _rn)                                      \
 
 #define generate_op_tst_imm(_rd, _rn)                                         \
-    generate_op_ands_imm(reg_temp2, _rn)                                      \
+{                                                                             \
+    generate_op_and_imm(reg_temp2, _rn);                                      \
+    if (!tst_try_fuse(reg_temp2))                                             \
+        generate_op_logic_flags(reg_temp2)                                    \
+}
 
 #define generate_op_teq_imm(_rd, _rn)                                         \
     generate_op_eors_imm(reg_temp2, _rn)                                      \
@@ -2098,12 +2137,39 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define generate_fused_condition_gt()    generate_condition_gt()
 #define generate_fused_condition_le()    generate_condition_le()
 
+/* TST-fused conditions: branch on AND result register directly.
+ * Only EQ/NE are valid for TST fusion. */
+#define generate_tst_fused_condition_eq()                                     \
+    (backpatch_address) = translation_ptr;                                    \
+    rv_bnez(cmp_fuse_rn_rv, 0)                                                \
+
+#define generate_tst_fused_condition_ne()                                     \
+    (backpatch_address) = translation_ptr;                                    \
+    rv_beqz(cmp_fuse_rn_rv, 0)                                                \
+
+/* Non-fusable via TST: fallback */
+#define generate_tst_fused_condition_cs()    generate_condition_cs()
+#define generate_tst_fused_condition_cc()    generate_condition_cc()
+#define generate_tst_fused_condition_mi()    generate_condition_mi()
+#define generate_tst_fused_condition_pl()    generate_condition_pl()
+#define generate_tst_fused_condition_vs()    generate_condition_vs()
+#define generate_tst_fused_condition_vc()    generate_condition_vc()
+#define generate_tst_fused_condition_hi()    generate_condition_hi()
+#define generate_tst_fused_condition_ls()    generate_condition_ls()
+#define generate_tst_fused_condition_ge()    generate_condition_ge()
+#define generate_tst_fused_condition_lt()    generate_condition_lt()
+#define generate_tst_fused_condition_gt()    generate_condition_gt()
+#define generate_tst_fused_condition_le()    generate_condition_le()
+
 #define thumb_conditional_branch(condition)                                   \
 {                                                                             \
     generate_cycle_update();                                                  \
-    if (cmp_fuse_active) {                                                    \
+    if (cmp_fuse_active == 1) {                                               \
         cmp_fuse_active = 0;                                                  \
         generate_fused_condition_##condition();                               \
+    } else if (cmp_fuse_active == 2) {                                        \
+        cmp_fuse_active = 0;                                                  \
+        generate_tst_fused_condition_##condition();                           \
     } else {                                                                  \
         generate_condition_##condition();                                     \
     }                                                                         \
