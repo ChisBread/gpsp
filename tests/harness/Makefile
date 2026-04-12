@@ -56,7 +56,7 @@ else ifeq ($(ARCH),riscv)
     MARCH    = -march=rv32gc_zbb -mabi=ilp32d
     ARCH_DEF += -DHAVE_ZBB
   else
-    MARCH    = -march=rv32gc -mabi=ilp32d
+    MARCH    = -march=rv32gc -mtune=rocket -mabi=ilp32d
   endif
   STATIC   = -static
   LDLIBS   = -lm -lgcc -lc -lgcc
@@ -93,11 +93,11 @@ endif
 INCS     = -I$(ROOT) $(ARCH_INC) -I$(ROOT)/libretro -I$(LRC)/include -I.
 DEFS     = -DQEMU_HARNESS $(ARCH_DEF) $(FEAT_DEF)
 
-CFLAGS   = $(MARCH) $(STATIC) -O2 -fno-pic -fno-pie -g -Wall -Wno-unused -Wno-sign-compare \
+CFLAGS   = $(MARCH) $(STATIC) -O3 -ffunction-sections -fdata-sections -fno-pic -fno-pie -g -Wall -Wno-unused -Wno-sign-compare \
            $(DEFS) $(INCS)
 CXXFLAGS = $(CFLAGS) -std=c++17 -fno-exceptions -fno-rtti
 ASFLAGS  = $(MARCH) -fno-pic -fno-pie $(DEFS) $(INCS)
-LDFLAGS  = $(MARCH) $(STATIC) -no-pie -Wl,-z,muldefs
+LDFLAGS  = $(MARCH) $(STATIC) -no-pie -Wl,-z,muldefs -Wl,--gc-sections
 
 # ── Source files ───────────────────────────────────────────────────
 

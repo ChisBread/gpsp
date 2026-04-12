@@ -181,26 +181,35 @@ static inline void rend_part_tile_Nbpp(u32 bg_comb, u32 px_comb,
     tile_ptr += vertical_pixel_flip;
 
   if (is8bpp) {
-    // Each byte is a color, mapped to a palete. 8 bytes can be read as 64bit
-    for (u32 i = start; i < end; i++, dest_ptr++) {
-      // Honor hflip by selecting bytes in the correct order
-      u32 sel = hflip ? (7-i) : i;
-      u8 pval = tile_ptr[sel];
-      // Alhpa mode stacks previous value (unless rendering the first layer)
-      if (pval) {
-        if (rdtype == FULLCOLOR)
-          *dest_ptr = paltbl[pval];
-        else if (rdtype == INDXCOLOR)
-          *dest_ptr = pval | px_comb;  // Add combine flags
-        else if (rdtype == STCKCOLOR)
-          // Stack pixels on top of the pixel value and combine flags
-          *dest_ptr = pval | px_comb | ((isbase ? bg_comb : *dest_ptr) << 16);
+    if (isbase && rdtype == FULLCOLOR) {
+      // Branchless: paltbl[0]==bgcolor, so paltbl[pval] always correct
+      for (u32 i = start; i < end; i++, dest_ptr++) {
+        u32 sel = hflip ? (7-i) : i;
+        u8 pval = tile_ptr[sel];
+        *dest_ptr = paltbl[pval];
       }
-      else if (isbase) {
-        if (rdtype == FULLCOLOR)
-          *dest_ptr = bgcolor;
-        else
-          *dest_ptr = 0 | bg_comb;  // Add combine flags
+    } else {
+      // Each byte is a color, mapped to a palete. 8 bytes can be read as 64bit
+      for (u32 i = start; i < end; i++, dest_ptr++) {
+        // Honor hflip by selecting bytes in the correct order
+        u32 sel = hflip ? (7-i) : i;
+        u8 pval = tile_ptr[sel];
+        // Alhpa mode stacks previous value (unless rendering the first layer)
+        if (pval) {
+          if (rdtype == FULLCOLOR)
+            *dest_ptr = paltbl[pval];
+          else if (rdtype == INDXCOLOR)
+            *dest_ptr = pval | px_comb;  // Add combine flags
+          else if (rdtype == STCKCOLOR)
+            // Stack pixels on top of the pixel value and combine flags
+            *dest_ptr = pval | px_comb | ((isbase ? bg_comb : *dest_ptr) << 16);
+        }
+        else if (isbase) {
+          if (rdtype == FULLCOLOR)
+            *dest_ptr = bgcolor;
+          else
+            *dest_ptr = 0 | bg_comb;  // Add combine flags
+        }
       }
     }
   } else {
@@ -256,18 +265,26 @@ static inline void render_tile_Nbpp(
     for (u32 j = 0; j < 2; j++) {
       u32 tilepix = eswap32(((u32*)tile_ptr)[hflip ? 1-j : j]);
       if (tilepix) {
-        for (u32 i = 0; i < 4; i++, dest_ptr++) {
-          u8 pval = hflip ? (tilepix >> (24 - i*8)) : (tilepix >> (i*8));
-          if (pval) {
-            if (rdtype == FULLCOLOR)
-              *dest_ptr = paltbl[pval];
-            else if (rdtype == INDXCOLOR)
-              *dest_ptr = pval | px_comb;  // Add combine flags
-            else if (rdtype == STCKCOLOR)
-              *dest_ptr = pval | px_comb | ((isbase ? bg_comb : *dest_ptr) << 16);
+        if (isbase && rdtype == FULLCOLOR) {
+          // Branchless: paltbl[0]==bgcolor, so paltbl[pval] always correct
+          for (u32 i = 0; i < 4; i++, dest_ptr++) {
+            u8 pval = hflip ? (tilepix >> (24 - i*8)) : (tilepix >> (i*8));
+            *dest_ptr = paltbl[pval];
           }
-          else if (isbase) {
-            *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+        } else {
+          for (u32 i = 0; i < 4; i++, dest_ptr++) {
+            u8 pval = hflip ? (tilepix >> (24 - i*8)) : (tilepix >> (i*8));
+            if (pval) {
+              if (rdtype == FULLCOLOR)
+                *dest_ptr = paltbl[pval];
+              else if (rdtype == INDXCOLOR)
+                *dest_ptr = pval | px_comb;  // Add combine flags
+              else if (rdtype == STCKCOLOR)
+                *dest_ptr = pval | px_comb | ((isbase ? bg_comb : *dest_ptr) << 16);
+            }
+            else if (isbase) {
+              *dest_ptr = (rdtype == FULLCOLOR) ? bgcolor : 0 | bg_comb;
+            }
           }
         }
       } else {
@@ -630,8 +647,12 @@ template<typename dsttype, rendtype rdtype, bool isbase>
 static inline void rend_pix_8bpp(
   dsttype *dest_ptr, u8 pval, u32 bg_comb, u32 px_comb, const u16 *pal
 ) {
+  if (isbase && rdtype == FULLCOLOR) {
+    // Branchless: pal[0] is the bg color, so pal[pval] always correct.
+    *dest_ptr = pal[pval];
+  }
   // Alhpa mode stacks previous value (unless rendering the first layer)
-  if (pval) {
+  else if (pval) {
     if (rdtype == FULLCOLOR)
       *dest_ptr = pal[pval];
     else if (rdtype == INDXCOLOR)
@@ -1725,8 +1746,19 @@ extern "C" void gpsp_p4_fill_u32_pie(u32 *dst, u32 count, u32 value);
 #endif
 
 static inline void fill_pixels_scalar(u16 *dst, u32 count, u16 value) {
-  for (u32 i = 0; i < count; i++)
-    dst[i] = value;
+  // Word-at-a-time: pack two u16 pixels into one u32 write
+  if (count && ((uintptr_t)dst & 2)) {
+    *dst++ = value;
+    count--;
+  }
+  u32 pair = (u32)value | ((u32)value << 16);
+  u32 *dst32 = (u32 *)dst;
+  u32 pairs = count >> 1;
+  while (pairs--) {
+    *dst32++ = pair;
+  }
+  if (count & 1)
+    *(u16 *)dst32 = value;
 }
 
 static inline void fill_pixels_scalar(u32 *dst, u32 count, u32 value) {
@@ -1829,14 +1861,18 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
         u32 p2e = (p2 | (p2 << 16)) & BLND_MSK;
         u32 pfe = (((p1e * blend_a) + (p2e * blend_b)) >> 4);
 
-        // If the overflow bit is set, saturate (set) all bits to one.
-        if (pfe & (OVFR_MSK | OVFG_MSK | OVFB_MSK)) {
-          if (pfe & OVFG_MSK)
-            pfe |= SATG_MSK;
-          if (pfe & OVFR_MSK)
-            pfe |= SATR_MSK;
-          if (pfe & OVFB_MSK)
-            pfe |= SATB_MSK;
+        // Branchless saturation: propagate overflow bits into channel masks.
+        {
+          u32 ovf = pfe & (OVFR_MSK | OVFG_MSK | OVFB_MSK);
+        #ifdef USE_XBGR1555_FORMAT
+          // All channels 5-bit: OVF - (OVF >> 5) produces SAT mask.
+          pfe |= ovf - (ovf >> 5);
+        #else
+          // RGB565: green is 6-bit, red/blue are 5-bit.
+          u32 ovf_rb = ovf & (OVFR_MSK | OVFB_MSK);
+          u32 ovf_g  = ovf & OVFG_MSK;
+          pfe |= (ovf_rb - (ovf_rb >> 5)) | (ovf_g - (ovf_g >> 6));
+        #endif
         }
         pfe &= BLND_MSK;
         dst[start++] = (pfe >> 16) | pfe;

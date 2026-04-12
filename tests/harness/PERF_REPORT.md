@@ -708,3 +708,126 @@
 | Total | 4.811, 4.844, 5.092 | 4.833, 4.867, 4.905 | QEMU噪声内 |
 
 **结论**: QEMU上持平（软件翻译执行，分支预测模型不同）。真实ESP32-P4（顺序执行核）上，省掉的指令直接转化为时钟周期节省。Thumb CMP+Bcc 是 GBA 代码中极常见的模式（循环、条件判断），每次融合省 2-6 条指令。保留。
+
+---
+
+## PPU / C-level 优化（视频渲染 & 编译器）
+
+### PPU-1: 编译器 -O3 + gc-sections + mtune
+
+**变更**:
+1. Makefile CFLAGS 从 `-O2` 改为 `-O3`
+2. 添加 `-ffunction-sections -fdata-sections` + LDFLAGS `-Wl,--gc-sections`
+3. 添加 `-mtune=rocket` (RISC-V)
+
+**Baseline**: OPT-N + -O2 编译 = ~5.0s (median 5.006s)
+
+**尝试与排除**:
+- `-O3 -funroll-loops`: 回退，4.72s vs 4.35s，代码膨胀导致I-cache压力
+- `-O3 -flto`: 回退，二进制翻倍(7.3→13MB)，性能持平
+- PGO (`-fprofile-generate`): 失败，musl交叉编译缺少libgcov
+
+**影响**: -O3 对 video.cc 的模板展开（render_tile_Nbpp、merge_blend等）提供更激进的内联和调度优化。gc-sections剔除未使用代码段(.text减少31.5%)。
+
+**文件**: `tests/harness/Makefile`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | -O2 Baseline | PPU-1 (-O3) | 变化 |
+|------|-------------|-------------|------|
+| Total (median) | ~5.0 s | ~4.35 s | **-13%** |
+| .text size | 1.55 MB | 1.06 MB | **-31.5%** |
+
+**结论**: 巨大改善。-O3 是单项最大收益。保留全部三项。
+
+---
+
+### PPU-2: 无分支 8bpp tile 渲染
+
+**变更**: 在 `render_tile_Nbpp`、`rend_part_tile_Nbpp`、`rend_pix_8bpp` 的 8bpp FULLCOLOR+isbase 模板特化路径中，消除透明像素分支。
+
+**原理**: 对于8bpp基底层(isbase=true)，`paltbl[0]` == bgcolor。因此 `paltbl[pval]` 在 pval==0 时自动给出背景色，无需 `if(pval) { write pixel } else { write bgcolor }`。
+
+**原始代码**:
+```cpp
+if (pval) { *dest = paltbl[pval]; }
+else if (isbase) { *dest = bgcolor; /* = paltbl[0] */ }
+```
+
+**优化后**（isbase && FULLCOLOR 特化）:
+```cpp
+*dest = paltbl[pval];  // pval==0 → paltbl[0]==bgcolor ✓
+```
+
+**适用范围**:
+- ✅ `render_tile_Nbpp` 8bpp (全tile渲染)
+- ✅ `rend_part_tile_Nbpp` 8bpp (部分tile渲染)
+- ✅ `rend_pix_8bpp` (仿射背景逐像素渲染)
+- ❌ `render_obj_tile_Nbpp` (精灵层必须保留透明检查)
+- ❌ 4bpp (subpal[0] ≠ bgcolor)
+
+**文件**: `video.cc`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | PPU-1 | PPU-2 (5次) | 变化 |
+|------|-------|-------------|------|
+| Total (median) | ~4.35 s | ~4.21 s | **-3.1%** |
+| 5次测量 | — | 4.214, 4.251, 4.206, 4.192, 4.233 | — |
+
+**结论**: 显著改善。在tile为主的游戏中，每个8bpp基底层像素省去1次分支判断。保留。
+
+---
+
+### PPU-3: 无分支混合饱和 (merge_blend)
+
+**变更**: 将 `merge_blend` 中的4条分支饱和逻辑替换为纯算术运算。
+
+**原始代码**:
+```cpp
+if (pfe & (OVFR_MSK | OVFG_MSK | OVFB_MSK)) {
+  if (pfe & OVFG_MSK) pfe |= SATG_MSK;
+  if (pfe & OVFR_MSK) pfe |= SATR_MSK;
+  if (pfe & OVFB_MSK) pfe |= SATB_MSK;
+}
+```
+
+**优化后**:
+```cpp
+u32 ovf = pfe & (OVFR_MSK | OVFG_MSK | OVFB_MSK);
+u32 ovf_rb = ovf & (OVFR_MSK | OVFB_MSK);
+u32 ovf_g  = ovf & OVFG_MSK;
+pfe |= (ovf_rb - (ovf_rb >> 5)) | (ovf_g - (ovf_g >> 6));
+```
+
+**原理**: RGB565格式中，溢出位恰在饱和掩码的高一位。对于5位通道(R/B): `OVF - (OVF >> 5)` = SAT_MSK。对于6位通道(G): `OVF - (OVF >> 6)` = SAT_MSK。XBGR1555格式(全5位)可进一步简化为 `ovf - (ovf >> 5)`。
+
+**文件**: `video.cc`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | PPU-2 | PPU-3 (5次) | 变化 |
+|------|-------|-------------|------|
+| Total (median) | ~4.21 s | ~4.23 s | 噪声内 |
+| 5次测量 | — | 4.194, 4.271, 4.238, 4.204, 4.233 | — |
+
+**结论**: 性能持平(此ROM混合未密集使用)。消除4条分支→纯算术运算，在混合密集的游戏中将受益。保留。
+
+---
+
+### PPU辅助: fill_pixels_scalar word-at-a-time
+
+**变更**: `fill_pixels_scalar(u16*)` 优化为将两个u16打包为u32进行写入，处理首尾对齐。
+
+**性能**: QEMU上持平。真实硬件上减少总线事务数（2:1压缩）。保留。
+
+---
+
+## 累积优化总结
+
+| 阶段 | Total (3000帧) | vs 原始Baseline | vs -O2 C-level Baseline |
+|------|----------------|-----------------|-------------------------|
+| 原始 Baseline (-O2, 无JIT优化) | 9.219 s | — | — |
+| JIT OPT-1～OPT-N 累积 (-O2) | ~5.0 s | -45.8% | — |
+| PPU-1: -O3 + gc-sections | ~4.35 s | -52.8% | -13.0% |
+| PPU-2: 无分支8bpp tile | ~4.21 s | -54.3% | -15.8% |
+| PPU-3: 无分支混合饱和 | ~4.21 s | -54.3% | -15.8% |
+
+**最终**: 9.219s → 4.21s = **-54.3% 总改善** (2.19x 加速)
