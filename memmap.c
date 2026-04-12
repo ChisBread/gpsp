@@ -35,6 +35,14 @@
   #define _MAP_STEP           (1024*1024)
   #define _VALIDATE_BLOCK_FN(ptr, size) \
           validate_addr_offset(ptr, size, 128)
+#elif defined(RISCV_ARCH)
+  /* RISC-V JAL has ±1MB range.  Place JIT cache start close to .text so that
+     early (hot) translations can use 1-instr JAL instead of 2-instr AUIPC+JALR.
+     generate_function_call checks distance per-instruction and falls back. */
+  #define _MAP_ITERATIONS            256
+  #define _MAP_STEP          (256*1024)
+  #define _VALIDATE_BLOCK_FN(ptr, size) \
+          validate_addr_offset(ptr, size, 4)
 #else
   #define _MAP_ITERATIONS           1024   // Test -/+2GB in 4MB steps
   #define _MAP_STEP         (4*1024*1024)

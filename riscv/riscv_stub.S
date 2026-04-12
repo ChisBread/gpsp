@@ -1325,6 +1325,19 @@ defsymbl(rv_trace_instruction)
         .bss
         .align 6
 
+#ifdef QEMU_HARNESS
+    /* Place JIT caches early in .bss so they're within JAL range (±1MB)
+       of .text trampolines, enabling 1-instr JAL instead of 2-instr
+       AUIPC+JALR for generate_function_call. */
+        .align 12
+    defobj(rom_translation_cache)
+        .space ROM_TRANSLATION_CACHE_SIZE
+        .align 12
+    defobj(ram_translation_cache)
+        .space RAM_TRANSLATION_CACHE_SIZE
+        .align 6
+#endif
+
     defobj(memory_map_read)
         .space 0x8000
     defobj(iwram)
@@ -1345,16 +1358,22 @@ defsymbl(rv_trace_instruction)
         .space 0x400
     defobj(palette_ram_converted)
         .space 0x400
+#ifdef QEMU_HARNESS
+        .align 6
+#else
         .section .ext_ram.bss,"aw",@nobits
         .align 6
+#endif
     defobj(ewram)
         .space 0x80000
+#ifndef QEMU_HARNESS
         .align 12
     defobj(rom_translation_cache)
         .space ROM_TRANSLATION_CACHE_SIZE
         .align 12
     defobj(ram_translation_cache)
         .space RAM_TRANSLATION_CACHE_SIZE
+#endif
 
         .text
         .align 2

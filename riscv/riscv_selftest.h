@@ -1045,7 +1045,11 @@ static void test_address_calc(u8 *buf)
  * ==================================================================== */
 static void jit_selftest(void)
 {
+#if defined(MMAP_JIT_CACHE)
+    extern u8 *rom_translation_cache;
+#else
     extern u8 rom_translation_cache[];
+#endif
     u8 *buf = rom_translation_cache;
 
     st_pass = 0;

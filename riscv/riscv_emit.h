@@ -1257,7 +1257,7 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
  *
  * cmp_fuse_active values:
  *   0 = no fusion
- *   1 = CMP fusion: EQ/NE/CS/CC/GE/LT use beq/bne/bgeu/bltu/bge/blt(rn,rm)
+ *   1 = CMP fusion: EQ/NE/CS/CC/HI/LS/GE/LT/GT/LE use direct rn,rm compare
  *   2 = TST fusion: EQ/NE only — use bnez/beqz on AND result register
  */
 #define next_is_fusable_bcc(_required_flags)                                  \
@@ -1273,7 +1273,9 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
             switch (_nc) {                                                    \
                 case 0x0: case 0x1: _nf = 0x04; break;                       \
                 case 0x2: case 0x3: _nf = 0x02; break;                       \
+                case 0x8: case 0x9: _nf = 0x06; break;                       \
                 case 0xA: case 0xB: _nf = 0x09; break;                       \
+                case 0xC: case 0xD: _nf = 0x0D; break;                       \
                 default: _nf = 0; break;                                      \
             }                                                                 \
             if (_nf == (_required_flags) &&                                   \
@@ -1291,7 +1293,9 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     u32 _fs = flag_status & 0x0F;                                             \
     u32 _req = (_fs == 0x04) ? 0x04 :                                         \
                (_fs == 0x02) ? 0x02 :                                         \
-               (_fs == 0x09) ? 0x09 : 0;                                      \
+               (_fs == 0x06) ? 0x06 :                                         \
+               (_fs == 0x09) ? 0x09 :                                         \
+               (_fs == 0x0D) ? 0x0D : 0;                                      \
     if (_req && next_is_fusable_bcc(_req)) {                                  \
         cmp_fuse_rn_rv = (_rn_rv);                                            \
         cmp_fuse_rm_rv = (_rm_rv);                                            \
@@ -2132,10 +2136,25 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 #define generate_fused_condition_pl()    generate_condition_pl()
 #define generate_fused_condition_vs()    generate_condition_vs()
 #define generate_fused_condition_vc()    generate_condition_vc()
-#define generate_fused_condition_hi()    generate_condition_hi()
-#define generate_fused_condition_ls()    generate_condition_ls()
-#define generate_fused_condition_gt()    generate_condition_gt()
-#define generate_fused_condition_le()    generate_condition_le()
+/* HI = unsigned rn > rm → skip if NOT HI = LS = rm >= rn unsigned */
+#define generate_fused_condition_hi()                                         \
+    (backpatch_address) = translation_ptr;                                    \
+    rv_bgeu(cmp_fuse_rm_rv, cmp_fuse_rn_rv, 0)                               \
+
+/* LS = unsigned rn <= rm → skip if NOT LS = HI = rm < rn unsigned */
+#define generate_fused_condition_ls()                                         \
+    (backpatch_address) = translation_ptr;                                    \
+    rv_bltu(cmp_fuse_rm_rv, cmp_fuse_rn_rv, 0)                               \
+
+/* GT = signed rn > rm → skip if NOT GT = LE = rm >= rn signed */
+#define generate_fused_condition_gt()                                         \
+    (backpatch_address) = translation_ptr;                                    \
+    rv_bge(cmp_fuse_rm_rv, cmp_fuse_rn_rv, 0)                                \
+
+/* LE = signed rn <= rm → skip if NOT LE = GT = rm < rn signed */
+#define generate_fused_condition_le()                                         \
+    (backpatch_address) = translation_ptr;                                    \
+    rv_blt(cmp_fuse_rm_rv, cmp_fuse_rn_rv, 0)
 
 /* TST-fused conditions: branch on AND result register directly.
  * Only EQ/NE are valid for TST fusion. */
