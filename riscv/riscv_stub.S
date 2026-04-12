@@ -309,6 +309,10 @@ return_from_jit:
     addi sp, sp, FRAME_SIZE
     ret
 
+    .globl _jit_trampoline_start
+    .type  _jit_trampoline_start, @function
+_jit_trampoline_start:
+
 defsymbl(rv_update_gba)
     sw   ra, REG_SAVE(gp)
     store_registers()
@@ -1322,6 +1326,9 @@ defsymbl(rv_trace_instruction)
     ret
 #endif
 
+    .globl _jit_trampoline_end
+_jit_trampoline_end:
+
         .bss
         .align 6
 
@@ -1367,6 +1374,9 @@ defsymbl(rv_trace_instruction)
     defobj(ewram)
         .space 0x80000
 #ifndef QEMU_HARNESS
+        .align 6
+    defobj(trampoline_psram_buf)
+        .space 16384
         .align 12
     defobj(rom_translation_cache)
         .space ROM_TRANSLATION_CACHE_SIZE

@@ -831,3 +831,31 @@ pfe |= (ovf_rb - (ovf_rb >> 5)) | (ovf_g - (ovf_g >> 6));
 | PPU-3: 无分支混合饱和 | ~4.21 s | -54.3% | -15.8% |
 
 **最终**: 9.219s → 4.21s = **-54.3% 总改善** (2.19x 加速)
+
+---
+
+### OPT-P: PSRAM Trampoline 重定位 (ESP32-P4专用)
+
+**变更**: 将 trampoline 函数（rv\_update\_gba, rv\_indirect\_branch\_\*, rv\_execute\_load/store\_\* 等）从 flash 复制到 PSRAM 缓冲区，修复所有 AUIPC 指令的 PC-relative 偏移量。JIT `generate_function_call` 对目标地址加 `trampoline_reloc_delta`，使调用目标指向 PSRAM 副本。
+
+**问题**: ESP32-P4 上 trampoline 在 flash (0x40xx)，JIT cache 在 PSRAM (0x48xx)，距离 ~129MB，远超 JAL ±1MB 范围。每次调用需 AUIPC+JALR (2条8字节)。
+
+**方案**:
+1. riscv\_stub.S 添加 `_jit_trampoline_start` / `_jit_trampoline_end` 边界标签
+2. `.ext_ram.bss` 中分配 16KB `trampoline_psram_buf`（紧接 translation cache 前）
+3. `init_emitter()` 时 memcpy + `fixup_auipc_relocations()` + fence.i
+4. `generate_function_call` 加 delta 偏移，使 trampoline 在 JAL ±1MB 范围内
+
+**AUIPC 修复算法**: 遍历复制后的代码，识别 AUIPC 指令 (opcode=0x17)，提取原始 hi20+lo12 组合偏移，加上 `old_base - new_base` 差值，重新编码 hi20/lo12 写回 AUIPC 和配对的 I-type 指令。
+
+**QEMU行为**: `trampoline_reloc_delta = 0`，不复制不修复，行为等同原版。
+
+**文件**: `riscv/riscv_emit.h`, `riscv/riscv_stub.S`, `cpu_threaded.c`
+**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致
+
+| 指标 | PPU-3 (5次) | OPT-P (5次) | 变化 |
+|------|-------------|-------------|------|
+| Total | 4.194, 4.271, 4.238, 4.204, 4.233 | 4.305, 4.225, 4.297, 4.240, 4.303 | QEMU: 无变化 |
+| Median | ~4.23 s | ~4.30 s | 噪声内 |
+
+**结论**: QEMU上无变化（delta=0，代码路径不变）。ESP32-P4上，trampoline位于 PSRAM 与 JIT cache 相邻，大部分调用可用单条 JAL (4字节) 替代 AUIPC+JALR (8字节)，减少 I-cache 压力和代码体积。保留。

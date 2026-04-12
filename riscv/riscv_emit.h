@@ -400,9 +400,73 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
         rv_sub(ireg_dest, ireg_src, reg_temp);                                   \
     }                                                                           \
 
+/* ================================================================
+ * PSRAM trampoline relocation
+ *
+ * On ESP32-P4 the trampoline functions live in flash (0x40xx_xxxx) while the
+ * JIT caches are in PSRAM (0x48xx_xxxx) — ~129 MB apart, far beyond JAL's
+ * ±1 MB range.
+ *
+ * Fix: at init time, memcpy the trampoline code to a buffer in PSRAM
+ * (.ext_ram.bss, right before the translation caches) and fix up all
+ * AUIPC instructions so their PC-relative offsets point to the correct
+ * targets from the new address.  JIT generate_function_call then targets
+ * the PSRAM copies, which are within JAL range of the JIT code.
+ * ================================================================ */
+
+/* Delta to add to flash trampoline addresses to get PSRAM copy addresses.
+   0 on QEMU (trampolines stay in .text, caches are nearby in .bss). */
+static s32 trampoline_reloc_delta;
+
+extern u8 _jit_trampoline_start[];
+extern u8 _jit_trampoline_end[];
+#ifndef QEMU_HARNESS
+extern u8 trampoline_psram_buf[];
+#endif
+
+/* Fix up AUIPC instructions after memcpy to a new address.
+ * Every AUIPC+ADDI/JALR pair encodes a PC-relative offset; when the code
+ * moves, the offset must be adjusted by (old_pc - new_pc).
+ */
+static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 size_bytes)
+{
+    s32 delta = (s32)(old_base - new_base);
+    u32 off = 0;
+    while (off + 8 <= size_bytes) {
+        u16 half = *(u16 *)(code + off);
+        if ((half & 3) != 3) {
+            off += 2;  /* compressed instruction */
+            continue;
+        }
+        u32 inst = *(u32 *)(code + off);
+        if ((inst & 0x7F) == 0x17) {  /* AUIPC opcode */
+            u32 next = *(u32 *)(code + off + 4);
+            /* Extract original hi20 (already in upper 20 bits position) */
+            s32 hi20 = (s32)(inst & 0xFFFFF000);
+            /* Extract lo12 from the paired I-type instruction (bits[31:20]) */
+            s32 lo12 = (s32)next >> 20;
+            /* Original combined PC-relative offset */
+            s32 orig_offset = hi20 + lo12;
+            /* Adjust for new location */
+            s32 new_offset = orig_offset + delta;
+            /* Recompute hi20 and lo12 */
+            s32 new_hi20 = (new_offset + 0x800) & (s32)0xFFFFF000;
+            s32 new_lo12 = new_offset - new_hi20;
+            /* Patch AUIPC: replace imm[31:12], keep rd and opcode */
+            *(u32 *)(code + off) = (inst & 0xFFF) | (u32)new_hi20;
+            /* Patch paired instruction: replace imm[31:20], keep rest */
+            *(u32 *)(code + off + 4) = (next & 0x000FFFFF) | ((u32)new_lo12 << 20);
+            off += 8;
+        } else {
+            off += 4;
+        }
+    }
+}
+
 #define generate_function_call(function_location)                             \
 {                                                                             \
-    u32 _fc_target = (u32)(uintptr_t)(function_location);                       \
+    u32 _fc_target = (u32)(uintptr_t)(function_location)                        \
+                   + trampoline_reloc_delta;                                     \
     u32 _fc_pc    = (u32)(uintptr_t)translation_ptr;                            \
     s32 _fc_delta = (s32)(_fc_target - _fc_pc);                                 \
     if (_fc_delta >= -(1 << 20) && _fc_delta < (1 << 20))                       \
@@ -411,11 +475,11 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
     }                                                                           \
     else                                                                        \
     {                                                                           \
-        u32 _fc_hi = (u32)_fc_delta & 0xFFFFF000;                               \
-        u32 _fc_lo = (u32)_fc_delta & 0xFFF;                                    \
-        if (_fc_lo & 0x800) _fc_hi += 0x1000;                                   \
-        rv_auipc(reg_temp, _fc_hi);                                             \
-        rv_jalr(rv_ra, reg_temp, (s32)(_fc_lo << 20) >> 20);                    \
+        u32 _fc_hi = (u32)_fc_delta & 0xFFFFF000;                              \
+        u32 _fc_lo = (u32)_fc_delta & 0xFFF;                                   \
+        if (_fc_lo & 0x800) _fc_hi += 0x1000;                                  \
+        rv_auipc(reg_temp, _fc_hi);                                            \
+        rv_jalr(rv_ra, reg_temp, (s32)(_fc_lo << 20) >> 20);                   \
     }                                                                           \
 }
 
@@ -2372,6 +2436,24 @@ static inline void rv_patch_branch(u32 *inst, const void *target)
 void init_emitter(bool must_swap)
 {
     (void)must_swap;
+
+#ifndef QEMU_HARNESS
+    /* Copy trampoline code from flash to PSRAM buffer, then fix up all
+       AUIPC instructions so PC-relative offsets are correct at the new
+       address.  This puts the trampolines within JAL range of JIT code. */
+    {
+        u32 tramp_size = (u32)(_jit_trampoline_end - _jit_trampoline_start);
+        u32 old_base = (u32)(uintptr_t)_jit_trampoline_start;
+        u32 new_base = (u32)(uintptr_t)trampoline_psram_buf;
+        memcpy(trampoline_psram_buf, _jit_trampoline_start, tramp_size);
+        fixup_auipc_relocations(trampoline_psram_buf, old_base, new_base, tramp_size);
+        trampoline_reloc_delta = (s32)(new_base - old_base);
+        asm volatile ("fence.i" ::: "memory");
+    }
+#else
+    trampoline_reloc_delta = 0;
+#endif
+
     // jit_selftest();
     init_bios_hooks();
 }
