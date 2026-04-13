@@ -91,7 +91,7 @@ endif
 # ── Common flags ───────────────────────────────────────────────────
 
 INCS     = -I$(ROOT) $(ARCH_INC) -I$(ROOT)/libretro -I$(LRC)/include -I.
-DEFS     = -DQEMU_HARNESS $(ARCH_DEF) $(FEAT_DEF)
+DEFS     = $(ARCH_DEF) $(FEAT_DEF)
 
 CFLAGS   = $(MARCH) $(STATIC) -O3 -ffunction-sections -fdata-sections -fno-pic -fno-pie -g -Wall -Wno-unused -Wno-sign-compare \
            $(DEFS) $(INCS)

@@ -267,6 +267,9 @@ typedef struct
   u32 offset = opcode & 0x07FF                                                \
 
 /* Include the right emitter headers */
+/* Forward declaration — init_emitter() may call this during startup */
+void platform_cache_sync(void *baseaddr, void *endptr);
+
 #if defined(MIPS_ARCH)
   #include "mips/mips_emit.h"
 #elif defined(RISCV_ARCH)

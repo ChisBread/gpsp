@@ -83,6 +83,8 @@ if(CONFIG_GPSP_DYNAREC)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC
         HAVE_DYNAREC
         RISCV_ARCH
+        JIT_CACHE_PSRAM
+        JIT_TRAMPOLINE_PSRAM
     )
 endif()
 

@@ -140,4 +140,4 @@ python3 compare_crc.py crc_dual.bin crc_device.bin
 | 定义 | `MMAP_JIT_CACHE` | `ARM_ARCH` | `RISCV_ARCH` |
 | 交叉编译器路径 | — | `CROSS=/opt/arm-.../` | `CROSS=/opt/riscv32-.../` |
 
-所有架构均定义 `QEMU_HARNESS`。`TRACE=1` 附加 `-DTRACE_INSTRUCTIONS`。
+`TRACE=1` 附加 `-DTRACE_INSTRUCTIONS`。

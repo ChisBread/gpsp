@@ -420,7 +420,7 @@ static s32 trampoline_reloc_delta;
 
 extern u8 _jit_trampoline_start[];
 extern u8 _jit_trampoline_end[];
-#ifndef QEMU_HARNESS
+#ifdef JIT_TRAMPOLINE_PSRAM
 extern u8 trampoline_psram_buf[];
 #endif
 
@@ -2437,18 +2437,26 @@ void init_emitter(bool must_swap)
 {
     (void)must_swap;
 
-#ifndef QEMU_HARNESS
+#ifdef JIT_TRAMPOLINE_PSRAM
     /* Copy trampoline code from flash to PSRAM buffer, then fix up all
        AUIPC instructions so PC-relative offsets are correct at the new
        address.  This puts the trampolines within JAL range of JIT code. */
     {
         u32 tramp_size = (u32)(_jit_trampoline_end - _jit_trampoline_start);
+        if (tramp_size > 8192)
+        {
+            printf("FATAL: trampoline size %u exceeds psram buf (8192)\n", tramp_size);
+            abort();
+        }
         u32 old_base = (u32)(uintptr_t)_jit_trampoline_start;
         u32 new_base = (u32)(uintptr_t)trampoline_psram_buf;
         memcpy(trampoline_psram_buf, _jit_trampoline_start, tramp_size);
         fixup_auipc_relocations(trampoline_psram_buf, old_base, new_base, tramp_size);
         trampoline_reloc_delta = (s32)(new_base - old_base);
-        asm volatile ("fence.i" ::: "memory");
+        /* Flush D-cache → PSRAM, invalidate I-cache, then fence.i.
+           Plain fence.i is insufficient on ESP32-P4's split L1 caches. */
+        platform_cache_sync(trampoline_psram_buf,
+                            trampoline_psram_buf + tramp_size);
     }
 #else
     trampoline_reloc_delta = 0;

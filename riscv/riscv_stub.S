@@ -171,6 +171,10 @@ _##symbol:
 #define jit_disable_interrupts()
 #define jit_enable_interrupts()
 
+    .globl _jit_trampoline_start
+    .type  _jit_trampoline_start, @function
+_jit_trampoline_start:
+
 /*
  * execute_arm_translate_internal(u32 cycles, void *reg_ptr)
  *   a0 = cycles
@@ -308,10 +312,6 @@ return_from_jit:
     jit_enable_interrupts()
     addi sp, sp, FRAME_SIZE
     ret
-
-    .globl _jit_trampoline_start
-    .type  _jit_trampoline_start, @function
-_jit_trampoline_start:
 
 defsymbl(rv_update_gba)
     sw   ra, REG_SAVE(gp)
@@ -1332,7 +1332,7 @@ _jit_trampoline_end:
         .bss
         .align 6
 
-#ifdef QEMU_HARNESS
+#ifndef JIT_CACHE_PSRAM
     /* Place JIT caches early in .bss so they're within JAL range (±1MB)
        of .text trampolines, enabling 1-instr JAL instead of 2-instr
        AUIPC+JALR for generate_function_call. */
@@ -1365,18 +1365,18 @@ _jit_trampoline_end:
         .space 0x400
     defobj(palette_ram_converted)
         .space 0x400
-#ifdef QEMU_HARNESS
-        .align 6
-#else
+#ifdef JIT_CACHE_PSRAM
         .section .ext_ram.bss,"aw",@nobits
-        .align 6
 #endif
+        .align 6
     defobj(ewram)
         .space 0x80000
-#ifndef QEMU_HARNESS
+#ifdef JIT_TRAMPOLINE_PSRAM
         .align 6
     defobj(trampoline_psram_buf)
-        .space 16384
+        .space 8192
+#endif
+#ifdef JIT_CACHE_PSRAM
         .align 12
     defobj(rom_translation_cache)
         .space ROM_TRANSLATION_CACHE_SIZE
