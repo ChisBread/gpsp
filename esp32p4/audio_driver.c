@@ -34,6 +34,7 @@ static __attribute__((section(".ext_ram.bss"))) struct {
     uint32_t resample_phase_q16;
     int16_t tail_sample[2];
     bool tail_valid;
+    bool resample_enabled;
     bool initialized;
 } s_audio;
 
@@ -99,7 +100,15 @@ static size_t audio_resample_stereo(const int16_t *input, size_t in_frames,
     s_audio.tail_sample[0] = input[(in_frames - 1) * 2];
     s_audio.tail_sample[1] = input[(in_frames - 1) * 2 + 1];
     s_audio.tail_valid = true;
-    s_audio.resample_phase_q16 = phase_q16 - max_phase_q16;
+
+    /* Clamp residual phase to avoid cascading 0-output frames.
+     * If the residual exceeds one step, input was effectively dropped
+     * (intentional when DRC speeds up), but don't let it snowball. */
+    uint32_t residual = phase_q16 - max_phase_q16;
+    if (residual > s_audio.resample_step_q16) {
+        residual = residual % s_audio.resample_step_q16;
+    }
+    s_audio.resample_phase_q16 = residual;
 
     return out_frames;
 }
@@ -232,6 +241,7 @@ esp_err_t audio_driver_init(const audio_driver_config_t *config)
     s_audio.tail_sample[0] = 0;
     s_audio.tail_sample[1] = 0;
     s_audio.tail_valid = false;
+    s_audio.resample_enabled = false;   /* resample off by default */
     s_audio.resample_step_nominal_q16 = s_audio.resample_step_q16;
 
     esp_err_t err = audio_i2c_init();
@@ -267,14 +277,22 @@ esp_err_t audio_driver_write(const int16_t *samples, size_t count)
         return ESP_ERR_INVALID_ARG;
     }
 
+    size_t bytes_written = 0;
+
+    if (!s_audio.resample_enabled) {
+        /* Bypass resampler — write raw PCM directly to I2S. */
+        size_t bytes_to_write = count * 2 * sizeof(int16_t);
+        return i2s_channel_write(s_audio.tx_chan, samples, bytes_to_write,
+                                 &bytes_written, portMAX_DELAY);
+    }
+
     size_t output_frames = audio_resample_stereo(samples, count,
                                                  s_resample_buf,
                                                  AUDIO_MAX_OUTPUT_FRAMES);
     if (output_frames == 0) {
-        return ESP_ERR_INVALID_SIZE;
+        return ESP_OK;  /* phase residual consumed all input — nothing to write */
     }
 
-    size_t bytes_written = 0;
     size_t bytes_to_write = output_frames * 2 * sizeof(int16_t);
     return i2s_channel_write(s_audio.tx_chan, s_resample_buf, bytes_to_write,
                              &bytes_written, portMAX_DELAY);
@@ -294,8 +312,25 @@ esp_err_t audio_driver_set_volume(int volume_percent)
                : ESP_FAIL;
 }
 
+void audio_driver_set_resample(bool enabled)
+{
+    s_audio.resample_enabled = enabled;
+    if (!enabled) {
+        /* Reset resample state so re-enabling starts clean. */
+        s_audio.resample_phase_q16 = 0;
+        s_audio.resample_step_q16 = s_audio.resample_step_nominal_q16;
+        s_audio.tail_valid = false;
+    }
+}
+
+bool audio_driver_get_resample(void)
+{
+    return s_audio.resample_enabled;
+}
+
 void audio_driver_adjust_rate(int32_t delta_q16)
 {
+    if (!s_audio.resample_enabled) return;
     int32_t new_step = (int32_t)s_audio.resample_step_nominal_q16 + delta_q16;
     if (new_step < 1) new_step = 1;
     s_audio.resample_step_q16 = (uint32_t)new_step;

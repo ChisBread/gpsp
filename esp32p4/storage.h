@@ -73,6 +73,38 @@ esp_err_t storage_list_roms(const char *dir_path, char ***entries, size_t *count
 void storage_free_rom_list(char **entries, size_t count);
 
 /**
+ * List existing state file slots for a ROM.
+ * Scans slots 0..max_slots-1.  Writes found slot numbers into slots[],
+ * their file sizes into slot_sizes[] (if non-NULL), and total found into *count.
+ */
+esp_err_t storage_list_states(const char *rom_name, unsigned *slots, size_t *slot_sizes,
+                              size_t max_slots, size_t *count);
+
+/**
+ * Delete a state file for a ROM at the given slot.
+ */
+esp_err_t storage_delete_state(const char *rom_name, unsigned slot);
+
+/**
+ * Build the filesystem path for a state file.
+ * Returns ESP_OK if the path was written to @p path_buf.
+ */
+esp_err_t storage_get_state_path(const char *rom_name, unsigned slot,
+                                char *path_buf, size_t path_buf_size);
+
+/**
+ * Read the recent game list from storage.
+ * Returns up to max_entries paths (full paths).  Caller must free each entry and the array.
+ */
+esp_err_t storage_read_recent_list(char ***entries, size_t *count, size_t max_entries);
+
+/**
+ * Update the recent game list: push rom_path to the front, removing duplicates.
+ * Keeps at most max_entries.
+ */
+esp_err_t storage_update_recent_list(const char *rom_path, size_t max_entries);
+
+/**
  * Unmount and deinitialize storage.
  */
 void storage_deinit(void);

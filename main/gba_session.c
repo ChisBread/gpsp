@@ -900,6 +900,10 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
              (long long)save_us,
              (long long)reset_us);
     ESP_LOGI(TAG, "GBA session reset complete");
+
+    /* Update recent game list */
+    storage_update_recent_list(s_session.rom_path, 10);
+
     return ESP_OK;
 }
 
@@ -1045,6 +1049,14 @@ esp_err_t gba_session_shutdown(void)
     command.type = GBA_SESSION_CMD_SHUTDOWN;
 
     return queue_command_and_wait(&command);
+}
+
+const char *gba_session_current_rom_path(void)
+{
+    if (!s_session.has_content || !path_is_set(s_session.rom_path)) {
+        return NULL;
+    }
+    return s_session.rom_path;
 }
 
 esp_err_t gba_session_process_pending(void)

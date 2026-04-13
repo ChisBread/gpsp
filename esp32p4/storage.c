@@ -610,6 +610,19 @@ esp_err_t storage_read_state(const char *rom_name, unsigned slot,
     return ESP_OK;
 }
 
+esp_err_t storage_get_state_path(const char *rom_name, unsigned slot,
+                                char *path_buf, size_t path_buf_size)
+{
+    if (!rom_name || !path_buf || path_buf_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    build_state_path(path_buf, path_buf_size, rom_name, slot);
+    if (path_buf[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return ESP_OK;
+}
+
 esp_err_t storage_list_roms(const char *dir_path, char ***entries, size_t *count)
 {
     const char *scan_path = dir_path ? dir_path : STORAGE_MOUNT_POINT;
@@ -670,6 +683,143 @@ void storage_free_rom_list(char **entries, size_t count)
         }
         free(entries);
     }
+}
+
+esp_err_t storage_list_states(const char *rom_name, unsigned *slots, size_t *slot_sizes,
+                              size_t max_slots, size_t *count)
+{
+    char path[256];
+    struct stat st;
+    size_t found = 0;
+
+    if (!slots || !count) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    for (unsigned s = 0; s < max_slots; s++) {
+        build_state_path(path, sizeof(path), rom_name, s);
+        if (path[0] != '\0' && stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+            slots[found] = s;
+            if (slot_sizes) {
+                slot_sizes[found] = (size_t)st.st_size;
+            }
+            found++;
+        }
+    }
+
+    *count = found;
+    return ESP_OK;
+}
+
+esp_err_t storage_delete_state(const char *rom_name, unsigned slot)
+{
+    char path[256];
+    build_state_path(path, sizeof(path), rom_name, slot);
+
+    if (path[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (remove(path) != 0) {
+        ESP_LOGW(TAG, "Cannot delete state file: %s", path);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    ESP_LOGI(TAG, "State deleted: %s", path);
+    return ESP_OK;
+}
+
+#define STORAGE_RECENT_PATH  STORAGE_MOUNT_POINT "/recent.txt"
+#define STORAGE_RECENT_MAX_LINE 512
+
+esp_err_t storage_read_recent_list(char ***entries, size_t *count, size_t max_entries)
+{
+    FILE *f;
+    char line[STORAGE_RECENT_MAX_LINE];
+    char **list;
+    size_t num = 0;
+
+    if (!entries || !count) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *entries = NULL;
+    *count = 0;
+
+    f = fopen(STORAGE_RECENT_PATH, "r");
+    if (!f) {
+        return ESP_OK;  /* no recent list yet — not an error */
+    }
+
+    list = calloc(max_entries, sizeof(char *));
+    if (!list) {
+        fclose(f);
+        return ESP_ERR_NO_MEM;
+    }
+
+    while (num < max_entries && fgets(line, sizeof(line), f)) {
+        /* Strip trailing newline */
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+            line[--len] = '\0';
+        }
+        if (len == 0) continue;
+
+        list[num] = strdup(line);
+        if (!list[num]) break;
+        num++;
+    }
+    fclose(f);
+
+    *entries = list;
+    *count = num;
+    return ESP_OK;
+}
+
+esp_err_t storage_update_recent_list(const char *rom_path, size_t max_entries)
+{
+    char **old_list = NULL;
+    size_t old_count = 0;
+    FILE *f;
+
+    if (!rom_path || rom_path[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Read existing list */
+    storage_read_recent_list(&old_list, &old_count, max_entries + 1);
+
+    f = fopen(STORAGE_RECENT_PATH, "w");
+    if (!f) {
+        ESP_LOGW(TAG, "Cannot write recent list");
+        if (old_list) {
+            for (size_t i = 0; i < old_count; i++) free(old_list[i]);
+            free(old_list);
+        }
+        return ESP_FAIL;
+    }
+
+    /* Write new entry first */
+    fprintf(f, "%s\n", rom_path);
+
+    /* Write old entries, skipping duplicate of new entry, up to max */
+    size_t written = 1;
+    for (size_t i = 0; i < old_count && written < max_entries; i++) {
+        if (old_list[i] && strcmp(old_list[i], rom_path) != 0) {
+            fprintf(f, "%s\n", old_list[i]);
+            written++;
+        }
+    }
+
+    fclose(f);
+
+    if (old_list) {
+        for (size_t i = 0; i < old_count; i++) free(old_list[i]);
+        free(old_list);
+    }
+
+    ESP_LOGI(TAG, "Recent list updated: %s (%u entries)", rom_path, (unsigned)written);
+    return ESP_OK;
 }
 
 void storage_deinit(void)

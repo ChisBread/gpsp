@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -182,8 +183,31 @@ void app_main(void)
 
     snprintf(bios_path, sizeof(bios_path), "%s/gba_bios.bin", STORAGE_MOUNT_POINT);
 
+    /* Try to boot from the most recent game first, fall back to default */
+    const char *boot_rom = CONFIG_GPSP_ROM_PATH;
+    static char recent_rom_path[512];
+    {
+        char **recent_list = NULL;
+        size_t recent_count = 0;
+        storage_read_recent_list(&recent_list, &recent_count, 10);
+        if (recent_count > 0 && recent_list && recent_list[0]) {
+            struct stat st;
+            if (stat(recent_list[0], &st) == 0 && S_ISREG(st.st_mode)) {
+                strlcpy(recent_rom_path, recent_list[0], sizeof(recent_rom_path));
+                boot_rom = recent_rom_path;
+                ESP_LOGI(TAG, "Auto-boot from recent: %s", boot_rom);
+            } else {
+                ESP_LOGW(TAG, "Recent ROM not found: %s, using default", recent_list[0]);
+            }
+        }
+        if (recent_list) {
+            for (size_t i = 0; i < recent_count; i++) free(recent_list[i]);
+            free(recent_list);
+        }
+    }
+
     gba_session_boot_config_t session_config = {
-        .rom_path = CONFIG_GPSP_ROM_PATH,
+        .rom_path = boot_rom,
         .bios_path = bios_path,
     };
 

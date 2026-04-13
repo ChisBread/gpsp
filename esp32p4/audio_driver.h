@@ -7,6 +7,7 @@
 #ifndef ESP32P4_AUDIO_DRIVER_H
 #define ESP32P4_AUDIO_DRIVER_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
 
@@ -54,7 +55,20 @@ esp_err_t audio_driver_write(const int16_t *samples, size_t count);
 esp_err_t audio_driver_set_volume(int volume_percent);
 
 /**
+ * Enable or disable the software resampler.
+ * When disabled, raw PCM is written directly to I2S (no rate conversion).
+ * Default: disabled (false).
+ */
+void audio_driver_set_resample(bool enabled);
+
+/**
+ * Query whether the software resampler is enabled.
+ */
+bool audio_driver_get_resample(void);
+
+/**
  * Nudge the resample ratio for dynamic rate control.
+ * No-op when resampling is disabled.
  *
  * @param delta_q16  Signed adjustment to the Q16.16 resample step.
  *                   Positive = step larger = fewer output samples (emu slow).

@@ -39,11 +39,22 @@ static bool audio_enabled;
 #include "video.h"
 #include "video_driver.h"
 
-#define GBA_FRAME_RATE               59.7275f
 #define GBA_RENDER_FB_COUNT          2
 #define AUDIO_FRAME_SAMPLES_MAX      ((GBA_SOUND_FREQUENCY / 50) + 1)
 #define AV_TASK_STACK_SIZE           8192
 #define AV_TASK_PRIORITY             (configMAX_PRIORITIES - 2)
+
+/* Native GBA frame rate derived from emulated clock.  With OVERCLOCK_60FPS
+ * the base rate is ~17.06 MHz → native ≈ 60.727 fps.  This is the rate
+ * at which the emulator *produces* audio — one GBA frame always covers
+ * 228×1232 = 280896 CPU cycles, so per-frame production is
+ *   GBA_SOUND_FREQUENCY / GBA_NATIVE_FPS
+ * which ≈ 1079 with OVERCLOCK or ≈ 1097 without.
+ *
+ * GBA_FRAME_RATE (= display VSYNC rate) is only used for display
+ * pacing; audio calculations must use GBA_NATIVE_FPS or the ring
+ * buffer slowly drains/fills due to the rate mismatch. */
+#define GBA_NATIVE_FPS               (GBC_BASE_RATE / (228.0f * (272.0f + 960.0f)))
 
 /* Dynamic rate control.
  *
@@ -59,10 +70,11 @@ static bool audio_enabled;
  * transition — no audible pitch steps.
  *
  * Nominal: source 65536 Hz → output 64000 Hz → step = 67109 (Q16).
- * One video-frame of audio ≈ 2196 stereo samples. */
+ * One video-frame of audio ≈ 2×GBA_SOUND_FREQUENCY/GBA_NATIVE_FPS
+ * stereo samples. */
 #define DRC_WINDOW_FRAMES    64
 #define DRC_WINDOW_SHIFT     6          /* log2(64) */
-#define DRC_TARGET_LEVEL     ((int32_t)(2.0f * (float)GBA_SOUND_FREQUENCY / GBA_FRAME_RATE))
+#define DRC_TARGET_LEVEL     ((int32_t)(2.0f * (float)GBA_SOUND_FREQUENCY / GBA_NATIVE_FPS))
 #define DRC_LEVEL_GAIN_SHIFT 8          /* P-gain on water-level error → step nudge */
 #define DRC_STEP_SMOOTH_SHIFT 4         /* EMA alpha ≈ 1/16 for final step */
 
@@ -157,7 +169,9 @@ static void av_output_task(void *arg)
             uint32_t frames = collect_audio_frame(audio_buffer,
                                                   AUDIO_FRAME_SAMPLES_MAX);
             if (frames > 0) {
-                audio_dynamic_rate_control(frames);
+                if (audio_driver_get_resample()) {
+                    audio_dynamic_rate_control(frames);
+                }
 
                 esp_err_t err = audio_driver_write(audio_buffer, frames);
                 if (err != ESP_OK) {
@@ -239,39 +253,30 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
     }
 
     audio_enabled = config->audio_enabled;
-    audio_frame_samples = (float)GBA_SOUND_FREQUENCY / GBA_FRAME_RATE;
+    audio_frame_samples = (float)GBA_SOUND_FREQUENCY / GBA_NATIVE_FPS;
     audio_frame_fraction = 0.0f;
     current_render_fb = 0;
     av_frame_pending = false;
     av_caller_task = NULL;
     av_task_handle = NULL;
     drc_nominal_prod_q8 = (int32_t)((2.0f * (float)GBA_SOUND_FREQUENCY
-                                     / GBA_FRAME_RATE) * 256.0f);
+                                     / GBA_NATIVE_FPS) * 256.0f);
     drc_nominal_step_q16 = (uint32_t)(((uint64_t)GBA_SOUND_FREQUENCY << 16)
                                       / CONFIG_GPSP_AUDIO_SAMPLE_RATE);
     drc_step_q24 = (int32_t)drc_nominal_step_q16 << 8;
     drc_last_pending = 0;
-    /* Pre-seed the DRC window with production matching the actual
-     * emulator speed (~60.5 Hz) rather than the nominal GBA rate
-     * (59.7275 Hz).  This gives the DRC an initial "boost" so the
-     * resample step is already close to the real operating point,
-     * avoiding a ~1-second convergence period that causes audible
-     * buffer oscillation and FPS jitter.
-     *
-     * Factor: 60.5 / 59.7275 ≈ 1.0129 → per-frame production is
-     * inflated by ~1.3% which translates to a ~1.3% higher initial
-     * resample step.  The DRC will refine from here. */
+    /* Pre-seed the DRC window with the nominal per-frame production.
+     * Since audio_frame_samples and drc_nominal_prod_q8 are now both
+     * derived from GBA_NATIVE_FPS (the emulated clock rate), the seed
+     * matches actual production almost exactly — no artificial bias
+     * needed.  The DRC only needs to compensate for minor jitter. */
     {
-        int32_t nom = (int32_t)(2.0f * (float)GBA_SOUND_FREQUENCY / GBA_FRAME_RATE);
-        int32_t seed = (int32_t)((float)nom * (60.5f / GBA_FRAME_RATE));
+        int32_t seed = (int32_t)(2.0f * (float)GBA_SOUND_FREQUENCY / GBA_NATIVE_FPS);
         for (uint32_t i = 0; i < DRC_WINDOW_FRAMES; i++)
             drc_window[i] = seed;
         drc_window_idx = 0;
         drc_window_sum = seed * DRC_WINDOW_FRAMES;
         drc_window_count = DRC_WINDOW_FRAMES;
-        /* Also bias the EMA step so it's consistent with the window. */
-        int64_t num = (int64_t)drc_nominal_step_q16 * (seed << 8);
-        drc_step_q24 = (int32_t)((num << 8) / drc_nominal_prod_q8);
     }
 
     /* Create the unified AV output task on the service core. */

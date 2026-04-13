@@ -37,6 +37,12 @@ esp_err_t gba_session_process_pending(void);
 void gba_emulation_task(void *param);
 
 /**
+ * Return a pointer to the current ROM path, or NULL if no content is loaded.
+ * The returned pointer is valid until the next reload.
+ */
+const char *gba_session_current_rom_path(void);
+
+/**
  * Write a JSON snapshot of current rolling-window performance stats into buf.
  * Returns the number of bytes written (excluding NUL), or -1 on error.
  */

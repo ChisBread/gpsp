@@ -25,6 +25,7 @@
 #include <signal.h>
 #include "common.h"
 #include "sound.h"
+#include "savestate.h"
 
 #ifdef CHECK_PC_DELTA
 #include <ucontext.h>
@@ -74,6 +75,114 @@ u16 screen_pixels[240 * 161];
 extern u16 *gba_screen_pixels;
 
 u32 num_skipped_frames = 0;
+
+/* ── Session-format state header (matches gba_session.c) ──────── */
+#define HARNESS_STATE_MAGIC   0x53545347u  /* "GSTS" */
+#define HARNESS_STATE_VERSION 1u
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t state_size;
+    uint32_t backup_size;
+} harness_state_file_header_t;
+
+/* ── Key sequence ─────────────────────────────────────────────── */
+#define MAX_KEY_EVENTS 256
+
+typedef struct {
+    uint32_t frame;
+    uint16_t keys;   /* bitmask to OR in (press) */
+    uint16_t release; /* bitmask to AND-clear (release) */
+} key_event_t;
+
+static key_event_t s_key_events[MAX_KEY_EVENTS];
+static int s_key_event_count;
+static uint16_t s_held_keys;
+
+static uint16_t parse_button_name(const char *name, size_t len)
+{
+    if (len == 1) {
+        if (name[0] == 'A' || name[0] == 'a') return 0x01;
+        if (name[0] == 'B' || name[0] == 'b') return 0x02;
+        if (name[0] == 'R' || name[0] == 'r') return 0x100;
+        if (name[0] == 'L' || name[0] == 'l') return 0x200;
+    }
+    if (len == 2) {
+        if ((name[0]=='U'||name[0]=='u') && (name[1]=='P'||name[1]=='p')) return 0x40;
+    }
+    if (len == 4) {
+        if (strncasecmp(name, "DOWN", 4) == 0) return 0x80;
+        if (strncasecmp(name, "LEFT", 4) == 0) return 0x20;
+    }
+    if (len == 5) {
+        if (strncasecmp(name, "RIGHT",5) == 0) return 0x10;
+        if (strncasecmp(name, "START",5) == 0) return 0x08;
+    }
+    if (len == 6) {
+        if (strncasecmp(name, "SELECT",6) == 0) return 0x04;
+    }
+    return 0;
+}
+
+/* Parse "100:A+B,200:START,300:-A" → press A+B at frame 100, START at 200, release A at 300 */
+static void parse_key_sequence(const char *spec)
+{
+    const char *p = spec;
+    s_key_event_count = 0;
+
+    while (*p && s_key_event_count < MAX_KEY_EVENTS) {
+        /* Read frame number */
+        uint32_t frame = (uint32_t)strtoul(p, (char **)&p, 10);
+        if (*p != ':') break;
+        p++;
+
+        uint16_t press = 0;
+        uint16_t release = 0;
+
+        /* Read button list separated by + */
+        while (*p && *p != ',') {
+            int is_release = 0;
+            if (*p == '-') { is_release = 1; p++; }
+
+            const char *start = p;
+            while (*p && *p != '+' && *p != ',') p++;
+            size_t len = (size_t)(p - start);
+            uint16_t btn = parse_button_name(start, len);
+            if (btn) {
+                if (is_release) release |= btn;
+                else press |= btn;
+            }
+
+            if (*p == '+') p++;
+        }
+
+        s_key_events[s_key_event_count].frame = frame;
+        s_key_events[s_key_event_count].keys = press;
+        s_key_events[s_key_event_count].release = release;
+        s_key_event_count++;
+
+        if (*p == ',') p++;
+    }
+
+    printf("[harness] Parsed %d key events\n", s_key_event_count);
+    for (int i = 0; i < s_key_event_count; i++) {
+        printf("[harness]   frame %u: press=0x%03x release=0x%03x\n",
+               s_key_events[i].frame, s_key_events[i].keys, s_key_events[i].release);
+    }
+}
+
+static void apply_keys_for_frame(uint32_t frame)
+{
+    for (int i = 0; i < s_key_event_count; i++) {
+        if (s_key_events[i].frame == frame) {
+            s_held_keys |= s_key_events[i].keys;
+            s_held_keys &= ~s_key_events[i].release;
+        }
+    }
+    /* Write inverted bitmask to P1 register (GBA: 0=pressed) */
+    write_ioreg(REG_P1, (~s_held_keys) & 0x3FF);
+}
 
 /* ── state ─────────────────────────────────────────────────────────── */
 
@@ -129,6 +238,8 @@ int main(int argc, char **argv)
     const char *bios_path   = NULL;
     const char *rom_path    = NULL;
     const char *output_path = NULL;
+    const char *state_path  = NULL;
+    const char *keys_spec   = NULL;
     int frames    = 18000;   /* ~5 min */
     int use_jit   = 1;
     int show_regs = 0;
@@ -138,7 +249,9 @@ int main(int argc, char **argv)
         printf("Usage: %s [flags] [bios.bin] <rom.gba> [frames] [output.bin]\n"
                "  --interp        interpreter mode\n"
                "  --regs          print registers every 100 frames\n"
-               "  --dump-from N   dump individual frame files from frame N\n",
+               "  --dump-from N   dump individual frame files from frame N\n"
+               "  --state FILE    load savestate before running\n"
+               "  --keys SPEC     key sequence, e.g. \"100:A+B,200:START,300:-A\"\n",
                argv[0]);
         return 1;
     }
@@ -152,6 +265,10 @@ int main(int argc, char **argv)
             show_regs = 1; argi++;
         } else if (strcmp(argv[argi], "--dump-from") == 0 && argi + 1 < argc) {
             dump_from = atoi(argv[argi + 1]); argi += 2;
+        } else if (strcmp(argv[argi], "--state") == 0 && argi + 1 < argc) {
+            state_path = argv[argi + 1]; argi += 2;
+        } else if (strcmp(argv[argi], "--keys") == 0 && argi + 1 < argc) {
+            keys_spec = argv[argi + 1]; argi += 2;
         } else {
             break;
         }
@@ -197,6 +314,10 @@ int main(int argc, char **argv)
     printf("[harness] Frames: %d\n", frames);
     printf("[harness] Output: %s\n", output_path);
     printf("[harness] Engine: %s\n", use_jit ? "JIT" : "Interpreter");
+    if (state_path)
+        printf("[harness] State: %s\n", state_path);
+    if (keys_spec)
+        printf("[harness] Keys:  %s\n", keys_spec);
     fflush(stdout);
 
     /* --- Initialize emulator --- */
@@ -256,6 +377,66 @@ int main(int argc, char **argv)
     (void)use_jit;
 #endif
 
+    /* --- Load savestate if requested --- */
+    if (state_path) {
+        FILE *sf = fopen(state_path, "rb");
+        if (!sf) {
+            printf("[harness] ERROR: cannot open state file '%s'\n", state_path);
+            return 1;
+        }
+        fseek(sf, 0, SEEK_END);
+        long ssize = ftell(sf);
+        fseek(sf, 0, SEEK_SET);
+
+        uint8_t *sbuf = (uint8_t *)malloc(ssize);
+        if (!sbuf) {
+            printf("[harness] ERROR: cannot allocate %ld bytes for state\n", ssize);
+            fclose(sf);
+            return 1;
+        }
+        if ((long)fread(sbuf, 1, ssize, sf) != ssize) {
+            printf("[harness] ERROR: short read on state file\n");
+            free(sbuf);
+            fclose(sf);
+            return 1;
+        }
+        fclose(sf);
+
+        /* Detect session-format (GSTS header) vs raw BSON state */
+        harness_state_file_header_t *hdr = (harness_state_file_header_t *)sbuf;
+        const uint8_t *state_data;
+
+        if ((size_t)ssize > sizeof(*hdr) &&
+            hdr->magic == HARNESS_STATE_MAGIC &&
+            hdr->version == HARNESS_STATE_VERSION &&
+            hdr->state_size == GBA_STATE_MEM_SIZE) {
+            /* Session format: header + state + backup */
+            state_data = sbuf + sizeof(*hdr);
+            if (hdr->backup_size > 0 && hdr->backup_size <= sizeof(gamepak_backup)) {
+                memcpy(gamepak_backup, state_data + hdr->state_size, hdr->backup_size);
+            }
+            printf("[harness] State file: session format (state=%u backup=%u)\n",
+                   hdr->state_size, hdr->backup_size);
+        } else {
+            /* Raw BSON state (direct gba_save_state output) */
+            state_data = sbuf;
+            printf("[harness] State file: raw BSON format (%ld bytes)\n", ssize);
+        }
+
+        if (!gba_load_state(state_data)) {
+            printf("[harness] ERROR: gba_load_state failed\n");
+            free(sbuf);
+            return 1;
+        }
+        printf("[harness] State loaded from '%s'\n", state_path);
+        free(sbuf);
+    }
+
+    /* --- Parse key sequence --- */
+    if (keys_spec) {
+        parse_key_sequence(keys_spec);
+    }
+
     /* --- Open output files --- */
     s_dump_fp    = fopen(output_path, "wb");
     s_dump_frame = 0;
@@ -307,6 +488,12 @@ int main(int argc, char **argv)
     for (int f = 0; f < frames; f++) {
         struct timespec ts_start, ts_end;
         clock_gettime(CLOCK_MONOTONIC, &ts_start);
+
+        /* Apply key events for this frame */
+        if (s_key_event_count > 0) {
+            apply_keys_for_frame((uint32_t)f);
+        }
+
 #ifdef HAVE_DYNAREC
         if (dynarec_enable) {
             execute_arm_translate(execute_cycles);

@@ -114,6 +114,9 @@ endif()
 # RVC (Compressed) extension — always available on rv32imafc targets
 target_compile_definitions(${COMPONENT_LIB} PUBLIC HAVE_RVC)
 
+# Enable OVERCLOCK_60FPS for ESP32-P4
+target_compile_definitions(${COMPONENT_LIB} PUBLIC OVERCLOCK_60FPS)
+
 # Suppress warnings in upstream code (treated as errors by IDF default)
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error

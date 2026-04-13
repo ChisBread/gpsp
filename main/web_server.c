@@ -42,6 +42,7 @@
 #include "common.h"
 #include "cpu.h"
 #include "main.h"
+#include "savestate.h"
 
 static const char *TAG = "web_server";
 
@@ -324,6 +325,223 @@ static esp_err_t roms_load_handler(httpd_req_t *req)
     }
 }
 
+/* ---- GET /api/states → list savestate slots for current ROM ---- */
+#define STATE_MAX_SLOTS 10
+
+static esp_err_t states_get_handler(httpd_req_t *req)
+{
+    const char *rom_path = gba_session_current_rom_path();
+    if (!rom_path) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+        return httpd_resp_send(req, "{\"slots\":[]}", 12);
+    }
+
+    unsigned slots[STATE_MAX_SLOTS];
+    size_t slot_sizes[STATE_MAX_SLOTS];
+    size_t count = 0;
+
+    esp_err_t err = storage_list_states(rom_path, slots, slot_sizes, STATE_MAX_SLOTS, &count);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "state list failed");
+        return ESP_FAIL;
+    }
+
+    char buf[512];
+    char *p = buf;
+    char *end = buf + sizeof(buf) - 1;
+    int n = snprintf(p, end - p, "{\"slots\":[");
+    p += n;
+    for (size_t i = 0; i < count && p < end - 32; i++) {
+        if (i > 0) *p++ = ',';
+        n = snprintf(p, end - p, "{\"slot\":%u,\"size\":%u}", slots[i], (unsigned)slot_sizes[i]);
+        if (n > 0) p += n;
+    }
+    n = snprintf(p, end - p, "]}");
+    p += n;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, buf, (ssize_t)(p - buf));
+}
+
+/* ---- POST /api/states/save → save state to slot ---- */
+static esp_err_t states_save_handler(httpd_req_t *req)
+{
+    char body[64];
+    int received = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    char *p = strstr(body, "\"slot\"");
+    if (!p) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing slot");
+        return ESP_FAIL;
+    }
+    p = strchr(p + 6, ':');
+    if (!p) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+        return ESP_FAIL;
+    }
+    unsigned slot = (unsigned)atoi(p + 1);
+    if (slot >= STATE_MAX_SLOTS) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid slot");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = gba_session_save_state(slot);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    if (err == ESP_OK) {
+        return httpd_resp_send(req, "{\"ok\":true}", 11);
+    } else {
+        return httpd_resp_send(req, "{\"ok\":false,\"error\":\"save failed\"}", 33);
+    }
+}
+
+/* ---- POST /api/states/load → load state from slot ---- */
+static esp_err_t states_load_handler(httpd_req_t *req)
+{
+    char body[64];
+    int received = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    char *p = strstr(body, "\"slot\"");
+    if (!p) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing slot");
+        return ESP_FAIL;
+    }
+    p = strchr(p + 6, ':');
+    if (!p) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+        return ESP_FAIL;
+    }
+    unsigned slot = (unsigned)atoi(p + 1);
+    if (slot >= STATE_MAX_SLOTS) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid slot");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = gba_session_load_state(slot);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    if (err == ESP_OK) {
+        return httpd_resp_send(req, "{\"ok\":true}", 11);
+    } else {
+        return httpd_resp_send(req, "{\"ok\":false,\"error\":\"load failed\"}", 33);
+    }
+}
+
+/* ---- GET /api/states/download?slot=N → download raw state file ---- */
+static esp_err_t states_download_handler(httpd_req_t *req)
+{
+    /* Parse slot from query string */
+    char qbuf[32];
+    unsigned slot = 0;
+
+    if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) == ESP_OK) {
+        char val[8];
+        if (httpd_query_key_value(qbuf, "slot", val, sizeof(val)) == ESP_OK) {
+            slot = (unsigned)atoi(val);
+        }
+    }
+    if (slot >= STATE_MAX_SLOTS) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid slot");
+        return ESP_FAIL;
+    }
+
+    const char *rom_path = gba_session_current_rom_path();
+    if (!rom_path) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no ROM loaded");
+        return ESP_FAIL;
+    }
+
+    /* Get file path and open directly — no large allocation needed */
+    char path[256];
+    if (storage_get_state_path(rom_path, slot, path, sizeof(path)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad path");
+        return ESP_FAIL;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "state not found");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    char disp[128];
+    snprintf(disp, sizeof(disp), "attachment; filename=\"slot%u.state\"", slot);
+    httpd_resp_set_hdr(req, "Content-Disposition", disp);
+
+    /* Stream file in 4 KB chunks — no heap allocation */
+    char chunk[4096];
+    esp_err_t send_err = ESP_OK;
+    size_t n;
+    while (send_err == ESP_OK && (n = fread(chunk, 1, sizeof(chunk), f)) > 0) {
+        send_err = httpd_resp_send_chunk(req, chunk, n);
+    }
+    fclose(f);
+
+    if (send_err == ESP_OK) {
+        httpd_resp_send_chunk(req, NULL, 0);  /* finish chunked response */
+    }
+
+    return send_err;
+}
+
+/* ---- POST /api/states/delete → delete a state file ---- */
+static esp_err_t states_delete_handler(httpd_req_t *req)
+{
+    char body[64];
+    int received = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    char *p = strstr(body, "\"slot\"");
+    if (!p) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing slot");
+        return ESP_FAIL;
+    }
+    p = strchr(p + 6, ':');
+    if (!p) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+        return ESP_FAIL;
+    }
+    unsigned slot = (unsigned)atoi(p + 1);
+    if (slot >= STATE_MAX_SLOTS) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid slot");
+        return ESP_FAIL;
+    }
+
+    const char *rom_path = gba_session_current_rom_path();
+    if (!rom_path) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no ROM loaded");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = storage_delete_state(rom_path, slot);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    if (err == ESP_OK) {
+        return httpd_resp_send(req, "{\"ok\":true}", 11);
+    } else {
+        return httpd_resp_send(req, "{\"ok\":false,\"error\":\"delete failed\"}", 35);
+    }
+}
+
 /* ---- public API ---- */
 
 uint16_t web_server_input_read(void)
@@ -338,7 +556,7 @@ esp_err_t web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 16;
     config.stack_size = 8192;
 
     esp_err_t ret = httpd_start(&s_server, &config);
@@ -411,6 +629,46 @@ esp_err_t web_server_start(void)
         .handler = roms_load_handler,
     };
     httpd_register_uri_handler(s_server, &roms_load_uri);
+
+    /* State list */
+    const httpd_uri_t states_get_uri = {
+        .uri = "/api/states",
+        .method = HTTP_GET,
+        .handler = states_get_handler,
+    };
+    httpd_register_uri_handler(s_server, &states_get_uri);
+
+    /* State save */
+    const httpd_uri_t states_save_uri = {
+        .uri = "/api/states/save",
+        .method = HTTP_POST,
+        .handler = states_save_handler,
+    };
+    httpd_register_uri_handler(s_server, &states_save_uri);
+
+    /* State load */
+    const httpd_uri_t states_load_uri = {
+        .uri = "/api/states/load",
+        .method = HTTP_POST,
+        .handler = states_load_handler,
+    };
+    httpd_register_uri_handler(s_server, &states_load_uri);
+
+    /* State download */
+    const httpd_uri_t states_download_uri = {
+        .uri = "/api/states/download",
+        .method = HTTP_GET,
+        .handler = states_download_handler,
+    };
+    httpd_register_uri_handler(s_server, &states_download_uri);
+
+    /* State delete */
+    const httpd_uri_t states_delete_uri = {
+        .uri = "/api/states/delete",
+        .method = HTTP_POST,
+        .handler = states_delete_handler,
+    };
+    httpd_register_uri_handler(s_server, &states_delete_uri);
 
     ESP_LOGI(TAG, "Web server started on port %d", config.server_port);
     return ESP_OK;
