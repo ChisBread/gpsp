@@ -534,8 +534,9 @@ int main(int argc, char **argv)
             if (n > AUDIO_SPF_MAX) n = AUDIO_SPF_MAX;
 
             uint32_t got = sound_read_samples(s_audio_buf, n);
-            if (got < n)
-                memset(s_audio_buf + got * 2, 0, (n - got) * 2 * sizeof(int16_t));
+            if (got < n) {
+                memset(&s_audio_buf[got * 2], 0, (n - got) * 2 * sizeof(int16_t));
+            }
             fwrite(s_audio_buf, sizeof(int16_t), n * 2, s_audio_fp);
         }
 

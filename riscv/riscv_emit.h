@@ -141,7 +141,12 @@ u32 rv_handle_store_alert(u32 alert, int cycles)
     if (alert & CPU_ALERT_HALT) {
         return update_gba(cycles);
     }
-    return cycles;
+    /* Non-HALT path: return cycle count with bits 30-31 cleared.
+     * The asm caller uses 'blt a0,zero' to detect frame_complete (bit 31).
+     * A raw negative cycle count (overdrawn) would falsely trigger that exit,
+     * causing the JIT to return mid-frame.  Clamping to 0 is safe because
+     * the JIT will call rv_update_gba on the very next block boundary. */
+    return (cycles < 0) ? 0 : (u32)cycles;
 }
 
 void rv_bad_pc_trap(u32 bad_pc)

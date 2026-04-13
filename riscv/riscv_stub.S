@@ -267,12 +267,12 @@ defsymbl(execute_arm_translate_internal)
     j    .Llookup_pc
 
 .Lreturn_cycles_sleep:
-    /* frame_complete (bit 31) is set — clean cycle count and exit JIT */
-    slli tp, a0, 2
-    srli tp, tp, 2
+    /* frame_complete (bit 31) is set — return a0 intact to caller.
+     * tp is restored from the stack frame in .Lreturn_to_main anyway,
+     * so there is no need to strip the flag bits into tp first. */
 
 .Lreturn_cycles:
-    mv   a0, tp
+    /* a0 = return value (with frame_complete / changed_pc flags intact) */
 
 .Lreturn_to_main:
     lw   ra,   0(sp)
