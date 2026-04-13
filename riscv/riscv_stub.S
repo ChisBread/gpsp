@@ -225,6 +225,7 @@ defsymbl(execute_arm_translate_internal)
     jit_enable_interrupts()
     beqz t0, 1f
     call block_lookup_address_thumb
+    beqz a0, .Lbad_pc_abort
     jit_disable_interrupts()
     lw   gp, 64(sp)
     lw   tp, 60(sp)
@@ -232,11 +233,19 @@ defsymbl(execute_arm_translate_internal)
     jalr zero, a0, 0
 1:
     call block_lookup_address_arm
+    beqz a0, .Lbad_pc_abort
     jit_disable_interrupts()
     lw   gp, 64(sp)
     lw   tp, 60(sp)
     load_registers()
     jalr zero, a0, 0
+
+/* Common abort path: block_lookup returned NULL (bad PC).
+ * gp/tp still hold C ABI values here.  Return 0 cycles to main loop. */
+.Lbad_pc_abort:
+    jit_disable_interrupts()
+    li   a0, 0
+    j    .Lreturn_to_main
 
 .Lcpu_sleep_loop:
     sw   tp, 60(sp)
@@ -345,6 +354,7 @@ defsymbl(rv_update_gba)
     jit_enable_interrupts()
     beqz t0, 2f
     call block_lookup_address_thumb
+    beqz a0, .Lbad_pc_abort_ugba
     jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
@@ -353,12 +363,20 @@ defsymbl(rv_update_gba)
     jalr zero, a0, 0
 2:
     call block_lookup_address_arm
+    beqz a0, .Lbad_pc_abort_ugba
     jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
     extract_flags(t0)
     load_registers()
     jalr zero, a0, 0
+
+/* Bad PC during rv_update_gba — return to main via .Lreturn_to_main.
+ * s10 holds the saved tp (unused here), s11 holds saved gp (unused). */
+.Lbad_pc_abort_ugba:
+    jit_disable_interrupts()
+    li   a0, 0
+    j    .Lreturn_to_main
 1:
     mv   tp, s10
     mv   a0, s7                  /* save s7 (stored_pc) before load_registers */
@@ -505,6 +523,7 @@ defsymbl(rv_indirect_branch_arm)
     store_caller_regs()
     swap_to_c_abi()
     call  block_lookup_address_arm
+    beqz  a0, .Lbad_pc_abort_indirect
     swap_from_c_abi()
     load_caller_regs()
     jalr  zero, a0, 0
@@ -580,9 +599,21 @@ defsymbl(rv_indirect_branch_thumb)
     store_caller_regs()
     swap_to_c_abi()
     call  block_lookup_address_thumb
+    beqz  a0, .Lbad_pc_abort_indirect
     swap_from_c_abi()
     load_caller_regs()
     jalr  zero, a0, 0
+
+/* Bad PC during indirect branch slow path.
+ * C ABI gp/tp are active (swap_to_c_abi done), s11=jit_gp, s10=jit_tp. */
+.Lbad_pc_abort_indirect:
+    /* Restore JIT gp/tp, store regs, and exit with 0 cycles */
+    mv   gp, s11
+    mv   tp, s10
+    store_registers()
+    consolidate_flags(t0, t1)
+    li   a0, 0
+    j    .Lexit_jit
 
 /* ---- Dual (ARM/Thumb) indirect branch ---- */
 defsymbl(rv_indirect_branch_dual)
@@ -1183,6 +1214,7 @@ defsymbl(execute_store_cpsr)
     call execute_store_cpsr_body
     beqz a0, 4f
     call block_lookup_address_arm
+    beqz a0, .Lbad_pc_abort_cpsr
     jit_disable_interrupts()
     mv   gp, s11
     mv   tp, s10
@@ -1190,6 +1222,11 @@ defsymbl(execute_store_cpsr)
     load_registers()
     lw   ra, REG_SAVE3(gp)
     jalr zero, a0, 0
+
+.Lbad_pc_abort_cpsr:
+    jit_disable_interrupts()
+    li   a0, 0
+    j    .Lreturn_to_main
 4:
     jit_disable_interrupts()
     mv   gp, s11

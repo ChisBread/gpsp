@@ -2808,14 +2808,16 @@ u8 function_cc *block_lookup_address_arm(u32 pc)
   unsigned i;
   for (i = 0; i < 4; i++) {
     u8 *ret = block_lookup_translate_arm(pc);
-    if (ret) {
+    if (ret && ret != (u8*)(~0)) {
       translate_icache_sync();
       return ret;
     }
+    if (ret == (u8*)(~0))
+      break;   /* unmapped region — no point retrying */
   }
 
-  printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
-  fflush(stdout);
+  printf("bad jump ARM pc=%08x reg_pc=%08x cpsr=%08x\n",
+         pc, reg[REG_PC], reg[REG_CPSR]);
   return NULL;
 }
 
@@ -2824,10 +2826,12 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
   unsigned i;
   for (i = 0; i < 4; i++) {
     u8 *ret = block_lookup_translate_thumb(pc);
-    if (ret) {
+    if (ret && ret != (u8*)(~0)) {
       translate_icache_sync();
       return ret;
     }
+    if (ret == (u8*)(~0))
+      break;   /* unmapped region — no point retrying */
   }
   printf("bad jump %x (%x)\n", pc, reg[REG_PC]);
   fflush(stdout);

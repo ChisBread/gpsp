@@ -1635,9 +1635,27 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
 #define arm_access_memory_reg_pre_down()                                      \
     rv_sub(reg_a0, arm_to_rv_reg[rn], arm_to_rv_reg[rm])                      \
 
+/* When rn==PC and the shifted rm is already in a0 (rm==arm_reg_a0),          \
+   check_load_reg_pc would clobber a0 with the PC value, destroying the       \
+   shift result. Save shift to reg_temp first to avoid the clobber. */        \
+#define arm_access_memory_reg_pre_tmp_up()                                    \
+    rv_add(reg_a0, reg_a0, reg_temp)                                          \
+
+#define arm_access_memory_reg_pre_tmp_down()                                  \
+    rv_sub(reg_a0, reg_a0, reg_temp)                                          \
+
 #define arm_access_memory_reg_pre(adjust_dir)                                 \
-    check_load_reg_pc(arm_reg_a0, rn, 8);                                     \
-    arm_access_memory_reg_pre_##adjust_dir()                                  \
+    if (rm == arm_reg_a0 && rn == REG_PC)                                     \
+    {                                                                         \
+        rv_mv(reg_temp, reg_a0);                                              \
+        generate_load_pc(reg_a0, (pc + 8));                                   \
+        arm_access_memory_reg_pre_tmp_##adjust_dir();                         \
+    }                                                                         \
+    else                                                                      \
+    {                                                                         \
+        check_load_reg_pc(arm_reg_a0, rn, 8);                                \
+        arm_access_memory_reg_pre_##adjust_dir();                             \
+    }                                                                         \
 
 #define arm_access_memory_reg_pre_wb(adjust_dir)                              \
     arm_access_memory_reg_pre(adjust_dir);                                    \
@@ -1649,9 +1667,27 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
 #define arm_access_memory_reg_post_down()                                     \
     rv_sub(arm_to_rv_reg[rn], arm_to_rv_reg[rn], arm_to_rv_reg[rm])           \
 
+/* When the shifted rm is in a0 (rm==arm_reg_a0), generate_load_reg(a0, rn)  \
+   clobbers a0 with rn's value, destroying the shift result. Save to         \
+   reg_temp first, then use it for the post-update. */                        \
+#define arm_access_memory_reg_post_tmp_up()                                   \
+    rv_add(arm_to_rv_reg[rn], arm_to_rv_reg[rn], reg_temp)                    \
+
+#define arm_access_memory_reg_post_tmp_down()                                 \
+    rv_sub(arm_to_rv_reg[rn], arm_to_rv_reg[rn], reg_temp)                    \
+
 #define arm_access_memory_reg_post(adjust_dir)                                \
-    generate_load_reg(reg_a0, rn);                                            \
-    arm_access_memory_reg_post_##adjust_dir()                                 \
+    if (rm == arm_reg_a0)                                                     \
+    {                                                                         \
+        rv_mv(reg_temp, reg_a0);                                              \
+        generate_load_reg(reg_a0, rn);                                        \
+        arm_access_memory_reg_post_tmp_##adjust_dir();                        \
+    }                                                                         \
+    else                                                                      \
+    {                                                                         \
+        generate_load_reg(reg_a0, rn);                                        \
+        arm_access_memory_reg_post_##adjust_dir();                            \
+    }                                                                         \
 
 #define arm_access_memory_imm_pre_up()                                        \
     generate_add_imm(reg_a0, arm_to_rv_reg[rn], offset)                       \
