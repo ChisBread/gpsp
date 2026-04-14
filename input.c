@@ -168,7 +168,7 @@ unsigned input_write_savestate(u8 *dst)
   bson_start_document(dst, "input", wbptr1);
   bson_write_int32(dst, "prevkey", old_key);
   bson_finish_document(dst, wbptr1);
-  return (unsigned int)(dst - startp);
+  return (unsigned int)savestate_ptr_diff(dst, startp);
 }
 
 

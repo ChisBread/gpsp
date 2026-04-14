@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -35,8 +36,6 @@
 #define GBA_SESSION_STATE_MAGIC 0x53545347u
 #define GBA_SESSION_STATE_VERSION 1u
 #define GBA_SESSION_STATS_WINDOW 240
-#define GBA_SESSION_STATE_IO_BUF_SIZE \
-    (sizeof(gba_session_state_file_header_t) + GBA_STATE_MEM_SIZE + sizeof(gamepak_backup))
 
 typedef enum {
     GBA_SESSION_CMD_SOFT_RESET = 0,
@@ -410,8 +409,8 @@ static void gba_session_snapshot_cpu_prof(void)
 }
 #endif
 
-/* Pre-allocated PSRAM buffer for state/save I/O (serialized access via command queue) */
-static GPSP_EXTRAM_BSS uint8_t s_state_io_buf[GBA_SESSION_STATE_IO_BUF_SIZE] __attribute__((aligned(16)));
+/* Backup staging only; savestate serialization now streams directly to file. */
+static GPSP_EXTRAM_BSS uint8_t s_backup_io_buf[sizeof(gamepak_backup)] __attribute__((aligned(16)));
 
 /* ── Background save task ────────────────────────────────────────── */
 
@@ -428,7 +427,7 @@ static void backup_save_task(void *param)
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         esp_err_t err = storage_write_save(s_session.rom_path,
-                                           s_state_io_buf,
+                                           s_backup_io_buf,
                                            s_save_pending_size);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "Background save failed: %s", esp_err_to_name(err));
@@ -450,7 +449,7 @@ static void save_task_await(void)
 static void save_task_kick(size_t size)
 {
     xSemaphoreTake(s_save_done, portMAX_DELAY);
-    memcpy(s_state_io_buf, gamepak_backup, size);
+    memcpy(s_backup_io_buf, gamepak_backup, size);
     s_save_pending_size = size;
     xTaskNotifyGive(s_save_task_handle);
 }
@@ -459,6 +458,14 @@ static esp_err_t execute_command(gba_session_command_t *command);
 static esp_err_t execute_reload(const gba_session_command_t *command);
 static esp_err_t flush_backup_image(bool force);
 static void flush_backup_async(void);
+
+typedef struct {
+    FILE *file;
+    size_t file_base;
+} gba_state_file_sink_t;
+
+static bool state_sink_write(void *context, size_t offset, const void *data, size_t size);
+static bool state_sink_read(void *context, size_t offset, void *data, size_t size);
 
 static size_t current_backup_size(void)
 {
@@ -542,90 +549,177 @@ static esp_err_t queue_command_and_wait(gba_session_command_t *command)
 
 static esp_err_t load_state_file(unsigned slot)
 {
-    gba_session_state_file_header_t *header;
-    uint8_t *buffer;
-    uint8_t *state_data;
+    gba_session_state_file_header_t header;
+    char path[256];
+    FILE *f = NULL;
+    gba_state_file_sink_t sink;
     size_t bytes_read = 0;
     size_t expected_size;
-    esp_err_t result;
+    size_t file_size;
 
     if (!s_session.has_content || !path_is_set(s_session.rom_path)) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    buffer = s_state_io_buf;
-
-    result = storage_read_state(s_session.rom_path, slot, buffer,
-                                sizeof(*header) + GBA_STATE_MEM_SIZE + sizeof(gamepak_backup),
-                                &bytes_read);
-    if (result != ESP_OK) {
-        return result;
+    if (storage_get_state_path(s_session.rom_path, slot, path, sizeof(path)) != ESP_OK) {
+        return ESP_ERR_INVALID_ARG;
     }
 
-    if (bytes_read < sizeof(*header) + GBA_STATE_MEM_SIZE) {
+    f = fopen(path, "rb");
+    if (!f) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
         return ESP_FAIL;
     }
 
-    header = (gba_session_state_file_header_t *)buffer;
-    if (header->magic != GBA_SESSION_STATE_MAGIC ||
-        header->version != GBA_SESSION_STATE_VERSION ||
-        header->state_size != GBA_STATE_MEM_SIZE ||
-        header->backup_size > sizeof(gamepak_backup)) {
+    file_size = (size_t)ftell(f);
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
         return ESP_FAIL;
     }
 
-    expected_size = sizeof(*header) + header->state_size + header->backup_size;
+    if (fread(&header, 1, sizeof(header), f) != sizeof(header)) {
+        fclose(f);
+        return ESP_FAIL;
+    }
+
+    bytes_read = file_size;
+    if (bytes_read < sizeof(header) + GBA_STATE_MEM_SIZE) {
+        fclose(f);
+        return ESP_FAIL;
+    }
+
+    if (header.magic != GBA_SESSION_STATE_MAGIC ||
+        header.version != GBA_SESSION_STATE_VERSION ||
+        header.state_size != GBA_STATE_MEM_SIZE ||
+        header.backup_size > sizeof(gamepak_backup)) {
+        fclose(f);
+        return ESP_FAIL;
+    }
+
+    expected_size = sizeof(header) + header.state_size + header.backup_size;
     if (bytes_read != expected_size) {
+        fclose(f);
         return ESP_FAIL;
     }
 
     memset(gamepak_backup, 0xFF, sizeof(gamepak_backup));
-    state_data = buffer + sizeof(*header);
-    memcpy(gamepak_backup, state_data + header->state_size, header->backup_size);
-    clear_backup_dirty_flag();
 
-    if (!gba_load_state(state_data)) {
+    if (header.backup_size > 0) {
+        if (fseek(f, (long)(sizeof(header) + GBA_STATE_MEM_SIZE), SEEK_SET) != 0 ||
+            fread(gamepak_backup, 1, header.backup_size, f) != header.backup_size) {
+            fclose(f);
+            return ESP_FAIL;
+        }
+    }
+
+    sink.file = f;
+    sink.file_base = sizeof(header);
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
         return ESP_FAIL;
     }
 
+    clear_backup_dirty_flag();
+
+    if (!gba_load_state_from_callback(state_sink_read, &sink)) {
+        fclose(f);
+        return ESP_FAIL;
+    }
+
+    fclose(f);
     return ESP_OK;
+}
+
+static bool state_sink_write(void *context, size_t offset, const void *data, size_t size)
+{
+    gba_state_file_sink_t *sink = (gba_state_file_sink_t *)context;
+
+    if (!sink || !sink->file || !data || size == 0) {
+        return false;
+    }
+
+    if (fseek(sink->file, (long)(sink->file_base + offset), SEEK_SET) != 0) {
+        return false;
+    }
+
+    return fwrite(data, 1, size, sink->file) == size;
+}
+
+static bool state_sink_read(void *context, size_t offset, void *data, size_t size)
+{
+    gba_state_file_sink_t *sink = (gba_state_file_sink_t *)context;
+
+    if (!sink || !sink->file || !data || size == 0) {
+        return false;
+    }
+
+    if (fseek(sink->file, (long)(sink->file_base + offset), SEEK_SET) != 0) {
+        return false;
+    }
+
+    return fread(data, 1, size, sink->file) == size;
 }
 
 static esp_err_t save_state_file(unsigned slot)
 {
-    gba_session_state_file_header_t *header;
-    uint8_t *buffer;
-    uint8_t *state_data;
+    gba_session_state_file_header_t header;
+    char path[256];
+    FILE *f = NULL;
+    gba_state_file_sink_t sink;
     size_t backup_size;
-    size_t total_size;
 
     if (!s_session.has_content || !path_is_set(s_session.rom_path)) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* Ensure any in-flight async save finishes so s_state_io_buf is free.
-     * No need to flush .sav here — the state file embeds backup data. */
+    /* No need to flush .sav here — the state file embeds backup data. */
     save_task_await();
 
     backup_size = current_backup_size();
-    total_size = sizeof(*header) + GBA_STATE_MEM_SIZE + backup_size;
-    buffer = s_state_io_buf;
-
-    memset(buffer, 0, total_size);
-    header = (gba_session_state_file_header_t *)buffer;
-    header->magic = GBA_SESSION_STATE_MAGIC;
-    header->version = GBA_SESSION_STATE_VERSION;
-    header->state_size = GBA_STATE_MEM_SIZE;
-    header->backup_size = (uint32_t)backup_size;
-
-    state_data = buffer + sizeof(*header);
-    gba_save_state(state_data);
-    memcpy(state_data + GBA_STATE_MEM_SIZE, gamepak_backup, backup_size);
-
-    if (storage_write_state(s_session.rom_path, slot, buffer, total_size) != ESP_OK) {
+    if (storage_get_state_path(s_session.rom_path, slot, path, sizeof(path)) != ESP_OK) {
         return ESP_FAIL;
     }
 
+    f = fopen(path, "wb+");
+    if (!f) {
+        ESP_LOGE(TAG, "Cannot create state file: %s", path);
+        return ESP_FAIL;
+    }
+
+    header.magic = GBA_SESSION_STATE_MAGIC;
+    header.version = GBA_SESSION_STATE_VERSION;
+    header.state_size = GBA_STATE_MEM_SIZE;
+    header.backup_size = (uint32_t)backup_size;
+
+    if (fwrite(&header, 1, sizeof(header), f) != sizeof(header)) {
+        fclose(f);
+        return ESP_FAIL;
+    }
+
+    sink.file = f;
+    sink.file_base = sizeof(header);
+    if (!gba_save_state_to_callback(state_sink_write, &sink)) {
+        fclose(f);
+        return ESP_FAIL;
+    }
+
+    if (fseek(f, (long)(sizeof(header) + GBA_STATE_MEM_SIZE), SEEK_SET) != 0 ||
+        fwrite(gamepak_backup, 1, backup_size, f) != backup_size) {
+        fclose(f);
+        return ESP_FAIL;
+    }
+
+    if (fclose(f) != 0) {
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "State written: %s (%u bytes)",
+             path,
+             (unsigned)(sizeof(header) + GBA_STATE_MEM_SIZE + backup_size));
     return ESP_OK;
 }
 
@@ -836,8 +930,8 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
     }
 
     if (command->reload_rom) {
-        save_task_await();  /* ensure s_state_io_buf is free */
-        backup_snapshot = s_state_io_buf;
+        save_task_await();
+        backup_snapshot = s_backup_io_buf;
         memcpy(backup_snapshot, gamepak_backup, sizeof(gamepak_backup));
     }
 

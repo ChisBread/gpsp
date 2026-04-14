@@ -3709,7 +3709,7 @@ unsigned cpu_write_savestate(u8 *dst)
   bson_write_int32(dst, "bus-value", reg[REG_BUS_VALUE]);
 
   bson_finish_document(dst, wbptr);
-  return (unsigned int)(dst - startp);
+   return (unsigned int)savestate_ptr_diff(dst, startp);
 }
 
 

@@ -2504,7 +2504,7 @@ unsigned memory_write_savestate(u8 *dst)
   }
   bson_finish_document(dst, wbptr);
 
-  return (unsigned int)(dst - startp);
+  return (unsigned int)savestate_ptr_diff(dst, startp);
 }
 
 static s32 load_gamepak_raw(const char *name)
