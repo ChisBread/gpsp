@@ -583,6 +583,28 @@ int main(int argc, char **argv)
         printf("[harness]  TP99             : %.1f us (%.2f ms)\n", tp99_us, tp99_us / 1000.0);
         printf("[harness]  Effective FPS    : %.2f\n", frames / total_sec);
         printf("[harness] ═══════════════════════════════════════════\n\n");
+
+        /* JIT compile-time stats */
+        {
+            extern struct {
+                u64 translate_ns;
+                u64 flush_ns;
+                u32 arm_blocks;
+                u32 thumb_blocks;
+                u32 rom_flushes;
+            } jit_stats;
+            double tr_ms = jit_stats.translate_ns / 1e6;
+            double fl_ms = jit_stats.flush_ns / 1e6;
+            printf("[harness] ─── JIT COMPILE STATS ───────────────────\n");
+            printf("[harness]  Translate time : %.3f ms\n", tr_ms);
+            printf("[harness]  Flush time     : %.3f ms\n", fl_ms);
+            printf("[harness]  Total JIT time : %.3f ms (%.2f%% of wall)\n",
+                   tr_ms + fl_ms, (tr_ms + fl_ms) / (total_sec * 1000.0) * 100.0);
+            printf("[harness]  ARM blocks     : %u\n", jit_stats.arm_blocks);
+            printf("[harness]  Thumb blocks   : %u\n", jit_stats.thumb_blocks);
+            printf("[harness]  ROM flushes    : %u\n", jit_stats.rom_flushes);
+            printf("[harness] ═══════════════════════════════════════════\n\n");
+        }
     }
     free(frame_times_us);
 

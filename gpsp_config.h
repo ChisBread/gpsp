@@ -51,6 +51,14 @@
 #define ROM_BRANCH_HASH_BITS                           16
 #define ROM_BRANCH_HASH_SIZE   (1 << ROM_BRANCH_HASH_BITS)
 
+/* Generation counter encoding for rom_branch_hash entries.
+   Each entry packs: (offset & HASH_OFF_MASK) | (generation << HASH_GEN_SHIFT).
+   Upper bits = generation, lower bits = byte offset into rom_translation_cache. */
+#define HASH_OFF_BITS   24
+#define HASH_OFF_MASK   ((1u << HASH_OFF_BITS) - 1)
+#define HASH_GEN_SHIFT  HASH_OFF_BITS
+#define HASH_GEN_WRAP   (1u << (32 - HASH_OFF_BITS))  /* 256 */
+
 /* RFU Multiplayer config, do not mess around too much with it */
 #define MAX_RFU_NETPLAYERS       32
 

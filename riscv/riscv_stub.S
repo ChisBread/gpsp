@@ -478,7 +478,18 @@ defsymbl(rv_indirect_branch_arm)
     slli  t0, t0, 2              /* * sizeof(u32) */
     la    t1, rom_branch_hash
     add   t0, t0, t1
-    lw    t0, 0(t0)              /* blk_offset */
+    lw    t0, 0(t0)              /* packed entry: offset | (gen << 24) */
+    beqz  t0, .Lslow_arm
+
+    /* Check generation: upper 8 bits must match rom_hash_generation */
+    srli  t1, t0, HASH_GEN_SHIFT
+    la    a1, rom_hash_generation
+    lw    a1, 0(a1)
+    bne   t1, a1, .Lslow_arm     /* stale entry → slow path */
+
+    /* Extract offset: lower 24 bits */
+    slli  t0, t0, (32 - HASH_OFF_BITS)
+    srli  t0, t0, (32 - HASH_OFF_BITS)
     beqz  t0, .Lslow_arm
 
     la    t1, rom_translation_cache
@@ -554,7 +565,18 @@ defsymbl(rv_indirect_branch_thumb)
     slli  t0, t0, 2
     la    t1, rom_branch_hash
     add   t0, t0, t1
-    lw    t0, 0(t0)
+    lw    t0, 0(t0)              /* packed entry: offset | (gen << 24) */
+    beqz  t0, .Lslow_thumb
+
+    /* Check generation */
+    srli  t1, t0, HASH_GEN_SHIFT
+    la    a1, rom_hash_generation
+    lw    a1, 0(a1)
+    bne   t1, a1, .Lslow_thumb   /* stale → slow path */
+
+    /* Extract offset: lower 24 bits */
+    slli  t0, t0, (32 - HASH_OFF_BITS)
+    srli  t0, t0, (32 - HASH_OFF_BITS)
     beqz  t0, .Lslow_thumb
 
     la    t1, rom_translation_cache

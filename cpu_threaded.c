@@ -55,6 +55,28 @@ u8 *ram_translation_ptr = ram_translation_cache;
 #endif
 /* Note, see stub files for more cache definitions */
 
+/* Lightweight JIT compile-time stats (always enabled, negligible overhead) */
+typedef struct {
+  u64 translate_ns;       /* total nanoseconds in translate_block_arm/thumb */
+  u64 flush_ns;           /* total nanoseconds in flush_translation_cache_rom */
+  u32 arm_blocks;
+  u32 thumb_blocks;
+  u32 rom_flushes;
+} jit_compile_stats_t;
+
+jit_compile_stats_t jit_stats = {0};
+
+#if defined(__linux__) || defined(__APPLE__)
+#include <time.h>
+static inline u64 jit_clock_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (u64)ts.tv_sec * 1000000000ULL + (u64)ts.tv_nsec;
+}
+#else
+static inline u64 jit_clock_ns(void) { return 0; }
+#endif
+
 u32 iwram_code_min = ~0U;
 u32 iwram_code_max =  0U;
 u32 ewram_code_min = ~0U;
@@ -130,7 +152,36 @@ typedef struct
   u32 next_entry;
 } hashhdr_type;
 
+/* Generation counter to avoid 256KB memset on rom_branch_hash.
+   Each hash entry stores (offset | (generation << HASH_OFF_BITS)).
+   On "flush" we just bump rom_hash_generation; stale entries with
+   mismatched generation are treated as empty (offset=0).
+   Encoding constants defined in gpsp_config.h. */
+
 GPSP_EXTRAM_BSS u32 rom_branch_hash[ROM_BRANCH_HASH_SIZE];
+u32 rom_hash_generation = 1;  /* never 0 — 0 means "empty" */
+
+static inline u32 hash_entry_pack(u32 offset, u32 gen) {
+  return (offset & HASH_OFF_MASK) | (gen << HASH_GEN_SHIFT);
+}
+
+static inline u32 hash_entry_offset(u32 entry, u32 gen) {
+  /* Return offset if generation matches, else 0 (empty) */
+  if ((entry >> HASH_GEN_SHIFT) != (gen & (HASH_GEN_WRAP - 1)))
+    return 0;
+  return entry & HASH_OFF_MASK;
+}
+
+/* Invalidate all hash entries by bumping generation.
+   If generation wraps, fall back to a real memset. */
+static inline void rom_branch_hash_invalidate(void) {
+  rom_hash_generation++;
+  if ((rom_hash_generation & (HASH_GEN_WRAP - 1)) == 0) {
+    /* Wrap: generation 0 collides with "empty", so bump past it and clear */
+    rom_hash_generation++;
+    memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
+  }
+}
 
 typedef struct
 {
@@ -404,6 +455,7 @@ void translate_icache_sync() {
   }                                                                           \
 
 #define translate_arm_instruction()                                           \
+  flag_status = block_data[block_data_position].flag_data;                    \
   check_pc_region(pc);                                                        \
   opcode = address32(pc_address_block, (pc & 0x7FFF));                        \
   condition = block_data[block_data_position].condition;                      \
@@ -1864,6 +1916,94 @@ void translate_icache_sync() {
   pc += 4                                                                     \
 
 #define arm_flag_status()                                                     \
+{                                                                             \
+  u16 flag_status = 0;                                                        \
+  u32 _cond = (opcode >> 28) & 0xF;                                           \
+  /* Condition code → required flags (N=0x800,Z=0x400,C=0x200,V=0x100) */     \
+  static const u16 _cond_req[16] = {                                          \
+    0x400, 0x400, 0x200, 0x200,  /* EQ NE CS CC */                            \
+    0x800, 0x800, 0x100, 0x100,  /* MI PL VS VC */                            \
+    0x600, 0x600, 0x900, 0x900,  /* HI LS GE LT */                            \
+    0xD00, 0xD00, 0x000, 0x000   /* GT LE AL NV */                            \
+  };                                                                          \
+  flag_status |= _cond_req[_cond];                                            \
+                                                                              \
+  u32 _op20 = (opcode >> 20) & 0xFF;                                          \
+  u32 _iclass = _op20 >> 5;  /* bits [27:25] */                               \
+                                                                              \
+  if (_iclass <= 1)                                                           \
+  {                                                                           \
+    u32 _dp_op = (opcode >> 21) & 0xF;                                        \
+    u32 _s_bit = _op20 & 1;                                                   \
+                                                                              \
+    /* Multiply (class 0, bits [7:4]=1001, dp_op 0..7) */                     \
+    if (_iclass == 0 && (opcode & 0x90) == 0x90 &&                            \
+        (opcode & 0x60) == 0 && _dp_op <= 7)                                  \
+    {                                                                         \
+      if (_s_bit)                                                             \
+        flag_status |= 0xCC; /* NZ: should NZ, must NZ */                     \
+    }                                                                         \
+    /* Non-S data proc opcodes 8-11 → MSR/MRS/BX/misc: conservative */       \
+    else if (!_s_bit && _dp_op >= 8 && _dp_op <= 11)                          \
+    {                                                                         \
+      /* MSR may write CPSR flags; BX changes PC.                             \
+         Be conservative: require all flags, don't claim modification */      \
+      flag_status |= 0xF00;                                                   \
+    }                                                                         \
+    else if (_s_bit)                                                           \
+    {                                                                         \
+      /* Data processing with S=1 */                                          \
+      u32 _arith = (_dp_op >= 2 && _dp_op <= 7) ||                           \
+                   _dp_op == 10 || _dp_op == 11;                              \
+      if (_arith)                                                             \
+      {                                                                       \
+        flag_status |= 0xFF; /* NZCV: should all, must all */                 \
+        /* ADC(5), SBC(6), RSC(7) require C as input */                       \
+        if (_dp_op >= 5 && _dp_op <= 7)                                       \
+          flag_status |= 0x200;                                               \
+      }                                                                       \
+      else                                                                    \
+      {                                                                       \
+        /* Logical: AND,EOR,TST,TEQ,ORR,MOV,BIC,MVN                          \
+           Barrel shifter may or may not modify C */                          \
+        flag_status |= 0xCE; /* should NZC, must NZ */                        \
+      }                                                                       \
+    }                                                                         \
+  }                                                                           \
+  else if (_iclass == 5)                                                      \
+  {                                                                           \
+    /* B / BL — changes PC */                                                 \
+    flag_status |= 0xF00;                                                     \
+  }                                                                           \
+  else if (_iclass == 7 && (_op20 & 0x10))                                    \
+  {                                                                           \
+    /* SWI */                                                                 \
+    flag_status |= 0xF00;                                                     \
+  }                                                                           \
+                                                                              \
+  /* If instruction could write PC, require all flags */                      \
+  if (_iclass <= 1)                                                           \
+  {                                                                           \
+    u32 _dp_op2 = (opcode >> 21) & 0xF;                                       \
+    /* Data proc writes rd (except TST/TEQ/CMP/CMN which have no rd) */       \
+    if (!((_dp_op2 >= 8 && _dp_op2 <= 11) && (_op20 & 1)))                   \
+    {                                                                         \
+      if (((opcode >> 12) & 0xF) == 15) flag_status |= 0xF00;                \
+    }                                                                         \
+  }                                                                           \
+  else if ((_iclass == 2 || _iclass == 3) && (_op20 & 1))                     \
+  {                                                                           \
+    /* LDR with rd=PC */                                                      \
+    if (((opcode >> 12) & 0xF) == 15) flag_status |= 0xF00;                  \
+  }                                                                           \
+  else if (_iclass == 4 && (opcode & 0x8000) && (_op20 & 1))                  \
+  {                                                                           \
+    /* LDM loading PC */                                                      \
+    flag_status |= 0xF00;                                                     \
+  }                                                                           \
+                                                                              \
+  block_data[block_data_position].flag_data = flag_status;                    \
+}                                                                             \
 
 #define translate_thumb_instruction()                                         \
   flag_status = block_data[block_data_position].flag_data;                    \
@@ -2742,7 +2882,9 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
                                               & (ROM_BRANCH_HASH_SIZE - 1);   \
                                                                               \
       hashhdr_type *bhdr;                                                     \
-      u32 blk_offset = rom_branch_hash[hash_target];                          \
+      u32 cur_gen = rom_hash_generation;                                      \
+      u32 blk_offset = hash_entry_offset(                                     \
+                         rom_branch_hash[hash_target], cur_gen);              \
       u32 *blk_offset_addr = &rom_branch_hash[hash_target];                   \
       while(blk_offset)                                                       \
       {                                                                       \
@@ -2762,11 +2904,16 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
       { /* Not found, go ahead and translate, and backfill the hash table */  \
         u8 *blkptr;                                                           \
         bool result;                                                          \
+        u32 new_off = (u32)(rom_translation_ptr - rom_translation_cache);     \
         CPU_PROF_INC(dynarec_lookup_misses);                                     \
         bhdr = (hashhdr_type*)rom_translation_ptr;                            \
         bhdr->pc_value = key;                                                 \
         bhdr->next_entry = 0;                                                 \
-        *blk_offset_addr = (u32)(rom_translation_ptr - rom_translation_cache);\
+        /* Head pointer: pack with generation; chain pointer: raw offset */   \
+        if (blk_offset_addr == &rom_branch_hash[hash_target])                 \
+          *blk_offset_addr = hash_entry_pack(new_off, cur_gen);               \
+        else                                                                  \
+          *blk_offset_addr = new_off;                                         \
         hot_zone_record_alloc();                                              \
         rom_translation_ptr += sizeof(hashhdr_type);                          \
         blkptr = rom_translation_ptr + block_prologue_size;                   \
@@ -2937,7 +3084,18 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
 // computed.
 
 #define arm_dead_flag_eliminate()                                             \
-  flag_status = 0xF                                                           \
+{                                                                             \
+  u32 needed_mask = 0xff;                                                     \
+                                                                              \
+  while(--block_data_position >= 0)                                           \
+  {                                                                           \
+    flag_status = block_data[block_data_position].flag_data;                  \
+    block_data[block_data_position].flag_data =                               \
+     (flag_status & needed_mask);                                             \
+    needed_mask &= ~((flag_status >> 4) & 0x0F);                              \
+    needed_mask |= flag_status >> 8;                                          \
+  }                                                                           \
+}                                                                             \
 
 // The following Thumb instructions can exit:
 // b, bl, bx, swi, pop {... pc}, and mov pc, ..., the latter being a hireg
@@ -3168,6 +3326,7 @@ if (ram_region) {                                                             \
 
 bool translate_block_arm(u32 pc, bool ram_region)
 {
+  u64 _jit_t0 = jit_clock_ns();
   CPU_PROF_SCOPE_BEGIN(dynarec_translate_begin);
   u32 opcode = 0;
   u32 last_opcode;
@@ -3274,6 +3433,8 @@ bool translate_block_arm(u32 pc, bool ram_region)
         flush_translation_cache_ram();
       else
         flush_translation_cache_rom();
+      jit_stats.translate_ns += jit_clock_ns() - _jit_t0;
+      jit_stats.arm_blocks++;
       CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
       return false;
     }
@@ -3336,18 +3497,23 @@ bool translate_block_arm(u32 pc, bool ram_region)
       translation_target = block_lookup_translate_arm(branch_target);
     if (!translation_target)
     {
+      jit_stats.translate_ns += jit_clock_ns() - _jit_t0;
+      jit_stats.arm_blocks++;
       CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
       return false;
     }
     generate_branch_patch_unconditional(
       external_block_exits[i].branch_source, translation_target);
   }
+  jit_stats.translate_ns += jit_clock_ns() - _jit_t0;
+  jit_stats.arm_blocks++;
   CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
   return true;
 }
 
 bool translate_block_thumb(u32 pc, bool ram_region)
 {
+  u64 _jit_t0 = jit_clock_ns();
   CPU_PROF_SCOPE_BEGIN(dynarec_translate_begin);
   u32 opcode = 0;
   u32 last_opcode;
@@ -3451,6 +3617,8 @@ bool translate_block_thumb(u32 pc, bool ram_region)
         flush_translation_cache_ram();
       else
         flush_translation_cache_rom();
+      jit_stats.translate_ns += jit_clock_ns() - _jit_t0;
+      jit_stats.thumb_blocks++;
       CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
       return false;
     }
@@ -3507,12 +3675,16 @@ bool translate_block_thumb(u32 pc, bool ram_region)
       translation_target = block_lookup_translate_thumb(branch_target);
     if (!translation_target)
     {
+      jit_stats.translate_ns += jit_clock_ns() - _jit_t0;
+      jit_stats.thumb_blocks++;
       CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
       return false;
     }
     generate_branch_patch_unconditional(
       external_block_exits[i].branch_source, translation_target);
   }
+  jit_stats.translate_ns += jit_clock_ns() - _jit_t0;
+  jit_stats.thumb_blocks++;
   CPU_PROF_SCOPE_ACC(dynarec_translate_cycles, dynarec_translate_begin);
   return true;
 }
@@ -3568,6 +3740,8 @@ void flush_translation_cache_ram(void)
 
 void flush_translation_cache_rom(void)
 {
+  u64 _flush_t0 = jit_clock_ns();
+  jit_stats.rom_flushes++;
   CPU_PROF_INC(dynarec_flush_rom_count);
 
 #ifdef ROM_HOT_ZONE
@@ -3589,7 +3763,7 @@ void flush_translation_cache_rom(void)
         u32 key = hot_pc_ring[(hot_pc_ring_pos - 1 - i) & (ROM_HOT_PC_RING_SIZE - 1)];
         u32 ht = ((key * 2654435761U) >> (32 - ROM_BRANCH_HASH_BITS))
                  & (ROM_BRANCH_HASH_SIZE - 1);
-        u32 off = rom_branch_hash[ht];
+        u32 off = hash_entry_offset(rom_branch_hash[ht], rom_hash_generation);
         checked++;
         while (off) {
           hashhdr_type *bhdr = (hashhdr_type *)&rom_translation_cache[off];
@@ -3610,20 +3784,23 @@ void flush_translation_cache_rom(void)
     rom_translation_ptr      = &rom_translation_cache[rom_hot_watermark];
     last_rom_translation_ptr = rom_translation_ptr;
 
-    /* Wipe the hash table, then re-insert every hot-zone block header so
-       the cached code is reachable again without re-translation. */
-    memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
+    /* Invalidate hash table (fast: just bump generation), then re-insert
+       every hot-zone block header so cached code is reachable again. */
+    rom_branch_hash_invalidate();
+    u32 regen = rom_hash_generation;
     for (u32 i = 0; i < hot_dir_count; i++) {
       u32 off = hot_dir_offsets[i];
       hashhdr_type *bhdr = (hashhdr_type *)&rom_translation_cache[off];
       u32 ht = ((bhdr->pc_value * 2654435761U) >> (32 - ROM_BRANCH_HASH_BITS))
                & (ROM_BRANCH_HASH_SIZE - 1);
-      bhdr->next_entry = rom_branch_hash[ht];
-      rom_branch_hash[ht] = off;
+      /* Chain: existing head becomes next (raw offset, not packed) */
+      bhdr->next_entry = hash_entry_offset(rom_branch_hash[ht], regen);
+      rom_branch_hash[ht] = hash_entry_pack(off, regen);
     }
 #ifdef CPU_PROFILE_STATS
     cum_path_a_count++;
 #endif
+    jit_stats.flush_ns += jit_clock_ns() - _flush_t0;
     return;
   }
 
@@ -3633,7 +3810,7 @@ path_b:
          triggered by translate_block during rewarm. --- */
   last_rom_translation_ptr = &rom_translation_cache[rom_cache_watermark];
   rom_translation_ptr      = &rom_translation_cache[rom_cache_watermark];
-  memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
+  rom_branch_hash_invalidate();
 
   if (!rom_flush_in_progress) {
     rom_flush_in_progress = true;
@@ -3646,6 +3823,13 @@ path_b:
     static GPSP_EXTRAM_BSS hot_entry_t unique[ROM_HOT_PC_RING_SIZE]; /* static: too large for stack */
     u32 unique_count = 0;
 
+    /* Hash index for O(1) dedup. Stores 1-based index into unique[].
+       Size is 2x ring to keep load factor <0.5 for fast probing. */
+#define DEDUP_HASH_BITS  11  /* 2048 slots */
+#define DEDUP_HASH_SIZE  (1 << DEDUP_HASH_BITS)
+    static GPSP_EXTRAM_BSS u16 dedup_idx[DEDUP_HASH_SIZE];
+    memset(dedup_idx, 0, sizeof(dedup_idx));
+
     for (u32 i = 0; i < ring_count; i++) {
       u32 e = hot_pc_ring[i];
       u32 pc = e & ~1u;
@@ -3653,16 +3837,26 @@ path_b:
       /* Keep only ROM PCs */
       if (pcregion != 0x00 && (pcregion < 0x08 || pcregion > 0x0D))
         continue;
+      u32 h = ((e * 2654435761U) >> (32 - DEDUP_HASH_BITS))
+              & (DEDUP_HASH_SIZE - 1);
       bool found = false;
-      for (u32 j = 0; j < unique_count; j++) {
-        if (unique[j].entry == e) { unique[j].count++; found = true; break; }
+      while (dedup_idx[h]) {
+        if (unique[dedup_idx[h] - 1].entry == e) {
+          unique[dedup_idx[h] - 1].count++;
+          found = true;
+          break;
+        }
+        h = (h + 1) & (DEDUP_HASH_SIZE - 1);
       }
       if (!found && unique_count < ROM_HOT_PC_RING_SIZE) {
         unique[unique_count].entry = e;
         unique[unique_count].count = 1;
+        dedup_idx[h] = (u16)(unique_count + 1);
         unique_count++;
       }
     }
+#undef DEDUP_HASH_BITS
+#undef DEDUP_HASH_SIZE
 
     /* ---- Sort by frequency (descending) — insertion sort, small N ---- */
     for (u32 i = 1; i < unique_count; i++) {
@@ -3706,8 +3900,9 @@ path_b:
   /* Non-hot-zone path: simple full flush */
   last_rom_translation_ptr = &rom_translation_cache[rom_cache_watermark];
   rom_translation_ptr      = &rom_translation_cache[rom_cache_watermark];
-  memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
+  rom_branch_hash_invalidate();
 #endif
+  jit_stats.flush_ns += jit_clock_ns() - _flush_t0;
 }
 
 void init_dynarec_caches(void)
@@ -3715,6 +3910,7 @@ void init_dynarec_caches(void)
   /* Initialize caches so that we can start initalizing the emitter. */
   rom_translation_ptr = last_rom_translation_ptr = &rom_translation_cache[0];
   memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
+  rom_hash_generation = 1;
 
   ram_translation_ptr = last_ram_translation_ptr = &ram_translation_cache[RAM_STUB_WATERMARK];
   memset(iwram, 0, 0x8000);
