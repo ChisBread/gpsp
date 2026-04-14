@@ -1408,6 +1408,16 @@ _jit_trampoline_end:
         .align 6
     defobj(ewram)
         .space 0x80000
+#ifdef JIT_CACHE_PSRAM
+    /* Order: ram_tc → trampoline → rom_tc.  This places the 8KB
+       trampoline buffer between the two JIT caches so that:
+         - ram_tc (384KB) is always within JAL ±1MB of the trampoline
+         - rom_tc hot zone (first 256KB) is adjacent to the trampoline
+       RAM code is retranslated most often, so short calls matter more. */
+        .align 12
+    defobj(ram_translation_cache)
+        .space RAM_TRANSLATION_CACHE_SIZE
+#endif
 #ifdef JIT_TRAMPOLINE_PSRAM
         .align 6
     defobj(trampoline_psram_buf)
@@ -1417,9 +1427,6 @@ _jit_trampoline_end:
         .align 12
     defobj(rom_translation_cache)
         .space ROM_TRANSLATION_CACHE_SIZE
-        .align 12
-    defobj(ram_translation_cache)
-        .space RAM_TRANSLATION_CACHE_SIZE
 #endif
 
         .text
