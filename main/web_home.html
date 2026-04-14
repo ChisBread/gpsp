@@ -96,7 +96,7 @@ btn:hover{background:#3a4a6a}
 <div class="card full">
   <div class="hdr">
     <div><span class="fps" id="fps">--</span> <span class="sub">FPS</span></div>
-    <div class="sub">空闲内存: <span id="heap">--</span> KB | 帧同步: <span id="acq">--</span> us | 音频延迟: <span id="snd">--</span> us | 音频自适应: <span id="aspd">--</span>%</div>
+    <div class="sub">空闲内存: <span id="heap">--</span> KB | 帧同步: <span id="acq">--</span> us | 音频延迟: <span id="snd">--</span> us</div>
   </div>
   <div class="chart-wrap">
     <canvas id="chart"></canvas>
@@ -630,7 +630,6 @@ async function poll(){
     }
     $('heap').textContent = d.heap_kb ?? '--';
     $('snd').textContent = d.snd_us != null ? d.snd_us : '--';
-    $('aspd').textContent = d.audio_spd != null ? (d.audio_spd / 100).toFixed(2) : '--';
     $('acq').textContent = d.acquire && d.acquire.avg != null ? d.acquire.avg : '--';
 
     /* Synthesize cpu_only = cpu - render */

@@ -344,15 +344,9 @@ static void c6_remote_task(void *param)
     while (1) {
 #if CONFIG_GPSP_C6_CONNECT_TEST
         wifi_ap_record_t current_ap = {0};
-        if (esp_wifi_sta_get_ap_info(&current_ap) == ESP_OK) {
-            ESP_LOGI(TAG, "ESP32-C6 remote link alive, connected to '%s' RSSI %d",
-                     (const char *)current_ap.ssid,
-                     current_ap.rssi);
-        } else {
+        if (esp_wifi_sta_get_ap_info(&current_ap) != ESP_OK) {
             ESP_LOGI(TAG, "ESP32-C6 remote link alive, STA not associated");
         }
-#else
-        ESP_LOGI(TAG, "ESP32-C6 remote link alive");
 #endif
         vTaskDelay(pdMS_TO_TICKS(CONFIG_GPSP_C6_HEALTH_LOG_PERIOD_MS));
     }

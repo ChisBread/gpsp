@@ -1374,12 +1374,10 @@ int gba_session_stats_json(char *buf, size_t buf_size)
 
     { u32 pend = sound_samples_pending();
       u32 pend_us = (u32)((u64)pend * 1000000 / (GBA_SOUND_FREQUENCY * 2));
-      int32_t spd = av_pipeline_audio_speed_pcnt_x100();
-      p += snprintf(p, end - p, "\"fps_x10\":%u,\"heap_kb\":%u,\"snd_us\":%u,\"audio_spd\":%d,",
+      p += snprintf(p, end - p, "\"fps_x10\":%u,\"heap_kb\":%u,\"snd_us\":%u,",
                     (unsigned)s_fps_last_x10,
                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024),
-                    (unsigned)pend_us,
-                    (int)spd);
+                    (unsigned)pend_us);
     }
     if (p >= end) goto trunc;
 

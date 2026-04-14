@@ -15,8 +15,8 @@
  *
  * On the service core the order is:
  *   1. video_driver_submit_frame  — kick PPA DMA (async, ~300 µs setup)
- *   2. collect_audio + DRC        — while PPA hardware runs in parallel
- *   3. audio_driver_write         — resample + I2S (PPA still parallel)
+ *   2. collect_audio              — while PPA hardware runs in parallel
+ *   3. audio_driver_write         — I2S DMA write (PPA still parallel)
  *   4. video_driver_await_frame   — PPA likely done; draw_bitmap + VSYNC
  *
  * This keeps PPA DMA, audio processing, and I2S DMA overlapped,
@@ -44,39 +44,19 @@ static bool audio_enabled;
 #define AV_TASK_STACK_SIZE           8192
 #define AV_TASK_PRIORITY             (configMAX_PRIORITIES - 2)
 
-/* Native GBA frame rate derived from emulated clock.  With OVERCLOCK_60FPS
- * the base rate is ~17.06 MHz → native ≈ 60.727 fps.  This is the rate
+/* Native frame rate derived from the emulated clock.  With OVERCLOCK_60FPS
+ * the base rate is fixed so native FPS is exactly 60.000.  Without it,
+ * the clock falls back to the original ~16.78 MHz rate and native FPS is
+ * the stock GBA cadence.  This is the rate
  * at which the emulator *produces* audio — one GBA frame always covers
  * 228×1232 = 280896 CPU cycles, so per-frame production is
  *   GBA_SOUND_FREQUENCY / GBA_NATIVE_FPS
- * which ≈ 1079 with OVERCLOCK or ≈ 1097 without.
+ * which is ≈ 1092 with OVERCLOCK or ≈ 1097 without.
  *
  * GBA_FRAME_RATE (= display VSYNC rate) is only used for display
  * pacing; audio calculations must use GBA_NATIVE_FPS or the ring
  * buffer slowly drains/fills due to the rate mismatch. */
 #define GBA_NATIVE_FPS               (GBC_BASE_RATE / (228.0f * (272.0f + 960.0f)))
-
-/* Dynamic rate control.
- *
- * Two-layer approach:
- *   A) Sliding-window average of per-frame production over 64 frames
- *      (~1.07 s) gives a stable estimate of the emulator's true source
- *      rate.  From this we derive the ideal resample step.
- *   B) A small proportional correction based on the water-level error
- *      (current pending − target) nudges the step so the buffer stays
- *      near the target level.  This prevents drift and keeps latency low.
- *
- * The final step is EMA-smoothed (alpha ≈ 1/16) for a silky-smooth
- * transition — no audible pitch steps.
- *
- * Nominal: source 65536 Hz → output 64000 Hz → step = 67109 (Q16).
- * One video-frame of audio ≈ 2×GBA_SOUND_FREQUENCY/GBA_NATIVE_FPS
- * stereo samples. */
-#define DRC_WINDOW_FRAMES    64
-#define DRC_WINDOW_SHIFT     6          /* log2(64) */
-#define DRC_TARGET_LEVEL     ((int32_t)(2.0f * (float)GBA_SOUND_FREQUENCY / GBA_NATIVE_FPS))
-#define DRC_LEVEL_GAIN_SHIFT 8          /* P-gain on water-level error → step nudge */
-#define DRC_STEP_SMOOTH_SHIFT 4         /* EMA alpha ≈ 1/16 for final step */
 
 static const char *TAG = "gpsp_av";
 
@@ -92,18 +72,6 @@ static TaskHandle_t av_caller_task;            /* emu core task handle */
 static volatile const u16 *av_pending_fb;      /* framebuffer for PPA */
 static volatile bool av_pending_skip_video;
 static bool av_frame_pending;
-
-/* DRC state — owned by emulation core. */
-static uint32_t drc_nominal_step_q16;
-static int32_t  drc_nominal_prod_q8;    /* nominal per-frame production (Q8) */
-static int32_t  drc_step_q24;           /* EMA-smoothed final step (Q24) */
-
-/* Sliding window for production-rate estimation. */
-static int32_t  drc_window[DRC_WINDOW_FRAMES];
-static uint32_t drc_window_idx;
-static int32_t  drc_window_sum;
-static uint32_t drc_window_count;
-static uint32_t drc_last_pending;
 
 static uint32_t collect_audio_frame(int16_t *audio_buf, size_t audio_buf_frames)
 {
@@ -128,11 +96,20 @@ static uint32_t collect_audio_frame(int16_t *audio_buf, size_t audio_buf_frames)
 
     frames_produced = sound_read_samples(audio_buf, frames_to_read);
 
+    if (frames_produced < frames_to_read) {
+        static uint32_t underrun_count = 0;
+        underrun_count++;
+        if ((underrun_count & 63) == 1) {  /* log every 64th underrun */
+            ESP_LOGW(TAG, "Audio underrun #%lu: got %lu/%lu frames (pending %lu)",
+                     (unsigned long)underrun_count,
+                     (unsigned long)frames_produced,
+                     (unsigned long)frames_to_read,
+                     (unsigned long)sound_samples_pending());
+        }
+    }
+
     return frames_produced;
 }
-
-/* Forward declaration — defined below av_output_task. */
-static void audio_dynamic_rate_control(uint32_t frames_consumed);
 
 /* Unified AV output task: PPA + audio + VSYNC on the service core.
  *
@@ -140,11 +117,10 @@ static void audio_dynamic_rate_control(uint32_t frames_consumed);
  * PPA DMA runs in the hardware background while audio is processed:
  *   1. Kick PPA async  (hardware busy ─────────────────────────┐)
  *   2. Collect audio from ring buffer                          │
- *   3. DRC arithmetic                                          │
- *   4. Resample + I2S DMA write (blocks if DMA full)           │
- *   5. Await PPA completion  (usually instant by now) ─────────┘
- *   6. draw_bitmap + VSYNC pacing
- *   7. Signal emulation core
+ *   3. I2S DMA write (blocks if DMA full)                      │
+ *   4. Await PPA completion  (usually instant by now) ─────────┘
+ *   5. draw_bitmap + VSYNC pacing
+ *   6. Signal emulation core
  */
 static void av_output_task(void *arg)
 {
@@ -163,16 +139,12 @@ static void av_output_task(void *arg)
             }
         }
 
-        /* 2-4. Audio: collect → DRC → resample + I2S.
+        /* 2-4. Audio: collect → DRC → I2S.
          * PPA DMA runs in parallel during this entire block. */
         if (audio_enabled) {
             uint32_t frames = collect_audio_frame(audio_buffer,
                                                   AUDIO_FRAME_SAMPLES_MAX);
             if (frames > 0) {
-                if (audio_driver_get_resample()) {
-                    audio_dynamic_rate_control(frames);
-                }
-
                 esp_err_t err = audio_driver_write(audio_buffer, frames);
                 if (err != ESP_OK) {
                     ESP_LOGW(TAG, "Audio write failed: %s",
@@ -192,60 +164,6 @@ static void av_output_task(void *arg)
     }
 }
 
-/* Estimates the emulator's true source sample rate from a sliding
- * window of per-frame production and applies a water-level correction.
- * Called from the AV output task on the service core each frame. */
-static void audio_dynamic_rate_control(uint32_t frames_consumed)
-{
-    uint32_t pending = sound_samples_pending();
-
-    /* Net samples produced since last call:
-     *   produced = consumed_this_frame + delta_pending */
-    int32_t pending_delta = (int32_t)(pending - drc_last_pending);
-    int32_t produced = (int32_t)(frames_consumed * 2) + pending_delta;
-    drc_last_pending = pending;
-
-    if (produced <= 0) {
-        return;
-    }
-
-    /* ── Layer A: sliding-window average production rate ── */
-    drc_window_sum -= drc_window[drc_window_idx];
-    drc_window[drc_window_idx] = produced;
-    drc_window_sum += produced;
-    drc_window_idx = (drc_window_idx + 1) & (DRC_WINDOW_FRAMES - 1);
-    if (drc_window_count < DRC_WINDOW_FRAMES) {
-        drc_window_count++;
-    }
-
-    /* Average production per frame (Q8 for sub-sample precision). */
-    int32_t avg_prod_q8 = (drc_window_sum << 8) / (int32_t)drc_window_count;
-
-    /* Ideal step to match the measured source rate:
-     *   step = nominal_step × (avg_production / nominal_production)
-     * Computed in Q24 for smooth sub-LSB resolution. */
-    int64_t num = (int64_t)drc_nominal_step_q16 * avg_prod_q8;
-    int32_t rate_step_q24 = (int32_t)((num << 8) / drc_nominal_prod_q8);
-
-    /* ── Layer B: water-level P-correction ──
-     * Nudge the step so that the buffer converges to the target level.
-     *   level too high → increase step → fewer output samples → drain
-     *   level too low  → decrease step → more output samples → fill
-     * Correction is small (gain ≈ 1/256 of error in Q24 step units)
-     * so it never overrides the rate estimate, just trims drift. */
-    int32_t level_error = (int32_t)pending - DRC_TARGET_LEVEL;
-    int32_t level_correction_q24 = (level_error << 8) >> DRC_LEVEL_GAIN_SHIFT;
-
-    int32_t target_step_q24 = rate_step_q24 + level_correction_q24;
-
-    /* ── Smooth the final step (EMA, alpha ≈ 1/16) ── */
-    drc_step_q24 += (target_step_q24 - drc_step_q24) >> DRC_STEP_SMOOTH_SHIFT;
-
-    /* Apply Q24 → delta from nominal Q16. */
-    int32_t delta = (drc_step_q24 >> 8) - (int32_t)drc_nominal_step_q16;
-    audio_driver_adjust_rate(delta);
-}
-
 esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
 {
     if (!config) {
@@ -259,26 +177,6 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
     av_frame_pending = false;
     av_caller_task = NULL;
     av_task_handle = NULL;
-    drc_nominal_prod_q8 = (int32_t)((2.0f * (float)GBA_SOUND_FREQUENCY
-                                     / GBA_NATIVE_FPS) * 256.0f);
-    drc_nominal_step_q16 = (uint32_t)(((uint64_t)GBA_SOUND_FREQUENCY << 16)
-                                      / CONFIG_GPSP_AUDIO_SAMPLE_RATE);
-    drc_step_q24 = (int32_t)drc_nominal_step_q16 << 8;
-    drc_last_pending = 0;
-    /* Pre-seed the DRC window with the nominal per-frame production.
-     * Since audio_frame_samples and drc_nominal_prod_q8 are now both
-     * derived from GBA_NATIVE_FPS (the emulated clock rate), the seed
-     * matches actual production almost exactly — no artificial bias
-     * needed.  The DRC only needs to compensate for minor jitter. */
-    {
-        int32_t seed = (int32_t)(2.0f * (float)GBA_SOUND_FREQUENCY / GBA_NATIVE_FPS);
-        for (uint32_t i = 0; i < DRC_WINDOW_FRAMES; i++)
-            drc_window[i] = seed;
-        drc_window_idx = 0;
-        drc_window_sum = seed * DRC_WINDOW_FRAMES;
-        drc_window_count = DRC_WINDOW_FRAMES;
-    }
-
     /* Create the unified AV output task on the service core. */
     {
         BaseType_t core = (CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0;
@@ -294,11 +192,9 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
             av_task_handle = NULL;
             return ESP_FAIL;
         }
-        ESP_LOGI(TAG, "AV output task on core %d (audio %s, source %lu -> output %lu Hz)",
+        ESP_LOGI(TAG, "AV output task on core %d (audio %s)",
                  (int)core,
-                 audio_enabled ? "on" : "off",
-                 (unsigned long)GBA_SOUND_FREQUENCY,
-                 (unsigned long)CONFIG_GPSP_AUDIO_SAMPLE_RATE);
+                 audio_enabled ? "on" : "off");
     }
 
     ESP_LOGI(TAG, "AV pipeline initialised");
@@ -352,15 +248,4 @@ esp_err_t av_pipeline_submit_frame(bool skip_video)
 bool av_pipeline_audio_enabled(void)
 {
     return audio_enabled;
-}
-
-int32_t av_pipeline_audio_speed_pcnt_x100(void)
-{
-    /* Return speed relative to nominal as percent×100 (10000 = 100.00%).
-     * A higher resample step consumes more source per output sample,
-     * i.e. plays back faster.  speed = actual_step / nominal_step. */
-    if (!audio_enabled || drc_nominal_step_q16 == 0)
-        return 10000;
-    int64_t nominal_q24 = (int64_t)drc_nominal_step_q16 << 8;
-    return (int32_t)((int64_t)drc_step_q24 * 10000 / nominal_q24);
 }

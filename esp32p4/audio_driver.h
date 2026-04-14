@@ -31,8 +31,7 @@ extern "C" {
 
 /* Audio configuration */
 typedef struct {
-    uint32_t sample_rate;      /* Hardware output sample rate (e.g., 32000, 44100, 64000) */
-    uint32_t source_sample_rate; /* Incoming PCM sample rate before resampling */
+    uint32_t sample_rate;      /* Hardware output sample rate (e.g., 65536) */
 } audio_driver_config_t;
 
 /**
@@ -55,27 +54,14 @@ esp_err_t audio_driver_write(const int16_t *samples, size_t count);
 esp_err_t audio_driver_set_volume(int volume_percent);
 
 /**
- * Enable or disable the software resampler.
- * When disabled, raw PCM is written directly to I2S (no rate conversion).
- * Default: disabled (false).
+ * Get the current I2S output sample rate.
  */
-void audio_driver_set_resample(bool enabled);
+uint32_t audio_driver_get_output_rate(void);
 
 /**
- * Query whether the software resampler is enabled.
+ * Get the nominal (configured at init) output sample rate.
  */
-bool audio_driver_get_resample(void);
-
-/**
- * Nudge the resample ratio for dynamic rate control.
- * No-op when resampling is disabled.
- *
- * @param delta_q16  Signed adjustment to the Q16.16 resample step.
- *                   Positive = step larger = fewer output samples (emu slow).
- *                   Negative = step smaller = more output samples (emu fast).
- *                   Typical range: ±(nominal_step * 0.005).
- */
-void audio_driver_adjust_rate(int32_t delta_q16);
+uint32_t audio_driver_get_nominal_rate(void);
 
 /**
  * Deinitialize audio driver.

@@ -20,98 +20,27 @@ static const char *TAG = "gpsp_audio";
 #define AUDIO_DMA_DESC_NUM  8
 #define AUDIO_DMA_FRAME_NUM 1008
 #define AUDIO_MCLK_MULTIPLE 256
-#define AUDIO_MAX_INPUT_FRAMES  ((AUDIO_PCM_SOURCE_RATE / 50) + 4)
-#define AUDIO_MAX_OUTPUT_FRAMES ((((uint64_t)AUDIO_MAX_INPUT_FRAMES * 96000u) / 32000u) + 4)
+
+/* Fixed-ratio resampler: source (65536 Hz) → output (e.g. 64000 Hz).
+ * Max output frames per call: input can be up to ~1100 frames/call,
+ * and ratio ≤ 1 so output ≤ input. Add margin for rounding. */
+#define AUDIO_RESAMPLE_BUF_FRAMES  1200
 
 static __attribute__((section(".ext_ram.bss"))) struct {
     i2s_chan_handle_t tx_chan;
     i2c_master_bus_handle_t i2c_bus;
     esp_codec_dev_handle_t codec;
-    uint32_t sample_rate;
-    uint32_t source_sample_rate;
-    uint32_t resample_step_q16;
-    uint32_t resample_step_nominal_q16;
-    uint32_t resample_phase_q16;
-    int16_t tail_sample[2];
-    bool tail_valid;
-    bool resample_enabled;
-    bool initialized;
+    uint32_t sample_rate;           /* I2S output sample rate */
+    uint32_t sample_rate_nominal;
+    uint32_t resample_step_q16;     /* fixed Q16.16 step = src_rate/out_rate */
+    uint32_t resample_phase_q16;    /* accumulator across calls */
+    int16_t  prev_sample[2];        /* last input sample for interpolation */
+    bool     prev_valid;
+    bool     resample_needed;       /* true when src_rate != out_rate */
+    bool     initialized;
 } s_audio;
 
-static __attribute__((section(".ext_ram.bss"))) int16_t s_resample_buf[AUDIO_MAX_OUTPUT_FRAMES * 2];
-
-static inline int16_t audio_get_extended_sample(const int16_t *input, size_t in_frames,
-                                                size_t index, size_t channel)
-{
-    if (s_audio.tail_valid) {
-        if (index == 0) {
-            return s_audio.tail_sample[channel];
-        }
-        return input[((index - 1) * 2) + channel];
-    }
-
-    return input[(index * 2) + channel];
-}
-
-static size_t audio_resample_stereo(const int16_t *input, size_t in_frames,
-                                    int16_t *output, size_t out_capacity_frames)
-{
-    if (in_frames == 0) {
-        return 0;
-    }
-
-    if (s_audio.source_sample_rate == s_audio.sample_rate) {
-        size_t frames_to_copy = in_frames;
-        if (frames_to_copy > out_capacity_frames) {
-            frames_to_copy = out_capacity_frames;
-        }
-        memcpy(output, input, frames_to_copy * 2 * sizeof(int16_t));
-        return frames_to_copy;
-    }
-
-    size_t extended_frames = in_frames + (s_audio.tail_valid ? 1u : 0u);
-    if (extended_frames == 1) {
-        output[0] = audio_get_extended_sample(input, in_frames, 0, 0);
-        output[1] = audio_get_extended_sample(input, in_frames, 0, 1);
-        s_audio.tail_sample[0] = input[(in_frames - 1) * 2];
-        s_audio.tail_sample[1] = input[(in_frames - 1) * 2 + 1];
-        s_audio.tail_valid = true;
-        return 1;
-    }
-
-    size_t out_frames = 0;
-    uint32_t phase_q16 = s_audio.resample_phase_q16;
-    uint32_t max_phase_q16 = (uint32_t)((extended_frames - 1) << 16);
-
-    while (out_frames < out_capacity_frames && phase_q16 < max_phase_q16) {
-        size_t src_index = (size_t)(phase_q16 >> 16);
-        uint32_t frac = phase_q16 & 0xFFFFu;
-        int32_t left0 = audio_get_extended_sample(input, in_frames, src_index, 0);
-        int32_t right0 = audio_get_extended_sample(input, in_frames, src_index, 1);
-        int32_t left1 = audio_get_extended_sample(input, in_frames, src_index + 1, 0);
-        int32_t right1 = audio_get_extended_sample(input, in_frames, src_index + 1, 1);
-
-        output[out_frames * 2] = (int16_t)(left0 + (((left1 - left0) * (int32_t)frac) >> 16));
-        output[out_frames * 2 + 1] = (int16_t)(right0 + (((right1 - right0) * (int32_t)frac) >> 16));
-        out_frames++;
-        phase_q16 += s_audio.resample_step_q16;
-    }
-
-    s_audio.tail_sample[0] = input[(in_frames - 1) * 2];
-    s_audio.tail_sample[1] = input[(in_frames - 1) * 2 + 1];
-    s_audio.tail_valid = true;
-
-    /* Clamp residual phase to avoid cascading 0-output frames.
-     * If the residual exceeds one step, input was effectively dropped
-     * (intentional when DRC speeds up), but don't let it snowball. */
-    uint32_t residual = phase_q16 - max_phase_q16;
-    if (residual > s_audio.resample_step_q16) {
-        residual = residual % s_audio.resample_step_q16;
-    }
-    s_audio.resample_phase_q16 = residual;
-
-    return out_frames;
-}
+static __attribute__((section(".ext_ram.bss"))) int16_t s_resample_buf[AUDIO_RESAMPLE_BUF_FRAMES * 2];
 
 static esp_err_t audio_i2c_init(void)
 {
@@ -226,7 +155,7 @@ static esp_err_t audio_codec_init(uint32_t sample_rate)
 
 esp_err_t audio_driver_init(const audio_driver_config_t *config)
 {
-    if (config == NULL || config->sample_rate == 0 || config->source_sample_rate == 0) {
+    if (config == NULL || config->sample_rate == 0) {
         return ESP_ERR_INVALID_ARG;
     }
     if (s_audio.initialized) {
@@ -234,15 +163,25 @@ esp_err_t audio_driver_init(const audio_driver_config_t *config)
     }
 
     s_audio.sample_rate = config->sample_rate;
-    s_audio.source_sample_rate = config->source_sample_rate;
-    s_audio.resample_step_q16 = (uint32_t)(((uint64_t)config->source_sample_rate << 16) /
-                                           config->sample_rate);
+    s_audio.sample_rate_nominal = config->sample_rate;
+
+    /* Fixed resample ratio: AUDIO_PCM_SOURCE_RATE → sample_rate.
+     * Shrink step by ~0.3% so the resampler slightly over-produces,
+     * keeping I2S DMA fed and providing gentle backpressure that
+     * prevents underruns from async timing jitter. */
+    if (AUDIO_PCM_SOURCE_RATE != config->sample_rate) {
+        uint32_t nominal = (uint32_t)(((uint64_t)AUDIO_PCM_SOURCE_RATE << 16)
+                                       / config->sample_rate);
+        s_audio.resample_step_q16 = nominal;
+        s_audio.resample_needed = true;
+    } else {
+        s_audio.resample_step_q16 = (1u << 16);
+        s_audio.resample_needed = false;
+    }
     s_audio.resample_phase_q16 = 0;
-    s_audio.tail_sample[0] = 0;
-    s_audio.tail_sample[1] = 0;
-    s_audio.tail_valid = false;
-    s_audio.resample_enabled = false;   /* resample off by default */
-    s_audio.resample_step_nominal_q16 = s_audio.resample_step_q16;
+    s_audio.prev_sample[0] = 0;
+    s_audio.prev_sample[1] = 0;
+    s_audio.prev_valid = false;
 
     esp_err_t err = audio_i2c_init();
     if (err != ESP_OK) {
@@ -262,10 +201,58 @@ esp_err_t audio_driver_init(const audio_driver_config_t *config)
     }
 
     s_audio.initialized = true;
-    ESP_LOGI(TAG, "Audio driver initialized: src=%lu Hz -> out=%lu Hz stereo",
-             (unsigned long)config->source_sample_rate,
+    ESP_LOGI(TAG, "Audio driver initialized: I2S output %lu Hz stereo",
              (unsigned long)config->sample_rate);
     return ESP_OK;
+}
+
+/* Fixed-ratio linear-interpolation resampler (e.g. 65536 → 64000).
+ * Operates on interleaved stereo.  Carries phase and last sample
+ * across calls for seamless output. */
+static size_t audio_resample(const int16_t *in, size_t in_frames,
+                             int16_t *out, size_t out_cap)
+{
+    if (in_frames == 0) return 0;
+
+    uint32_t phase = s_audio.resample_phase_q16;
+    const uint32_t step = s_audio.resample_step_q16;
+    size_t out_frames = 0;
+
+    /* Extended source: index 0 = prev_sample (if valid), then input[]. */
+    const size_t ext_len = in_frames + (s_audio.prev_valid ? 1u : 0u);
+
+    #define EXT_L(i) ( (s_audio.prev_valid) \
+        ? ((i) == 0 ? s_audio.prev_sample[0] : in[((i)-1)*2])   \
+        : in[(i)*2] )
+    #define EXT_R(i) ( (s_audio.prev_valid) \
+        ? ((i) == 0 ? s_audio.prev_sample[1] : in[((i)-1)*2+1]) \
+        : in[(i)*2+1] )
+
+    const uint32_t max_phase = (uint32_t)((ext_len - 1) << 16);
+
+    while (out_frames < out_cap && phase < max_phase) {
+        size_t idx = phase >> 16;
+        uint32_t frac = (phase >> 1) & 0x7FFFu;  /* 15-bit frac to avoid int32 overflow */
+        int32_t l0 = EXT_L(idx), r0 = EXT_R(idx);
+        int32_t l1 = EXT_L(idx+1), r1 = EXT_R(idx+1);
+        out[out_frames*2]     = (int16_t)(l0 + (((l1 - l0) * (int32_t)frac) >> 15));
+        out[out_frames*2 + 1] = (int16_t)(r0 + (((r1 - r0) * (int32_t)frac) >> 15));
+        out_frames++;
+        phase += step;
+    }
+
+    #undef EXT_L
+    #undef EXT_R
+
+    /* Save tail for next call. */
+    s_audio.prev_sample[0] = in[(in_frames - 1) * 2];
+    s_audio.prev_sample[1] = in[(in_frames - 1) * 2 + 1];
+    s_audio.prev_valid = true;
+
+    /* Carry residual phase. */
+    s_audio.resample_phase_q16 = phase - max_phase;
+
+    return out_frames;
 }
 
 esp_err_t audio_driver_write(const int16_t *samples, size_t count)
@@ -279,21 +266,20 @@ esp_err_t audio_driver_write(const int16_t *samples, size_t count)
 
     size_t bytes_written = 0;
 
-    if (!s_audio.resample_enabled) {
-        /* Bypass resampler — write raw PCM directly to I2S. */
+    if (!s_audio.resample_needed) {
         size_t bytes_to_write = count * 2 * sizeof(int16_t);
         return i2s_channel_write(s_audio.tx_chan, samples, bytes_to_write,
                                  &bytes_written, portMAX_DELAY);
     }
 
-    size_t output_frames = audio_resample_stereo(samples, count,
-                                                 s_resample_buf,
-                                                 AUDIO_MAX_OUTPUT_FRAMES);
-    if (output_frames == 0) {
-        return ESP_OK;  /* phase residual consumed all input — nothing to write */
+    size_t out_frames = audio_resample(samples, count,
+                                       s_resample_buf,
+                                       AUDIO_RESAMPLE_BUF_FRAMES);
+    if (out_frames == 0) {
+        return ESP_OK;
     }
 
-    size_t bytes_to_write = output_frames * 2 * sizeof(int16_t);
+    size_t bytes_to_write = out_frames * 2 * sizeof(int16_t);
     return i2s_channel_write(s_audio.tx_chan, s_resample_buf, bytes_to_write,
                              &bytes_written, portMAX_DELAY);
 }
@@ -312,28 +298,15 @@ esp_err_t audio_driver_set_volume(int volume_percent)
                : ESP_FAIL;
 }
 
-void audio_driver_set_resample(bool enabled)
+
+uint32_t audio_driver_get_output_rate(void)
 {
-    s_audio.resample_enabled = enabled;
-    if (!enabled) {
-        /* Reset resample state so re-enabling starts clean. */
-        s_audio.resample_phase_q16 = 0;
-        s_audio.resample_step_q16 = s_audio.resample_step_nominal_q16;
-        s_audio.tail_valid = false;
-    }
+    return s_audio.sample_rate;
 }
 
-bool audio_driver_get_resample(void)
+uint32_t audio_driver_get_nominal_rate(void)
 {
-    return s_audio.resample_enabled;
-}
-
-void audio_driver_adjust_rate(int32_t delta_q16)
-{
-    if (!s_audio.resample_enabled) return;
-    int32_t new_step = (int32_t)s_audio.resample_step_nominal_q16 + delta_q16;
-    if (new_step < 1) new_step = 1;
-    s_audio.resample_step_q16 = (uint32_t)new_step;
+    return s_audio.sample_rate_nominal;
 }
 
 void audio_driver_deinit(void)
@@ -354,11 +327,12 @@ void audio_driver_deinit(void)
     }
 
     s_audio.sample_rate = 0;
-    s_audio.source_sample_rate = 0;
+    s_audio.sample_rate_nominal = 0;
     s_audio.resample_step_q16 = 0;
     s_audio.resample_phase_q16 = 0;
-    s_audio.tail_sample[0] = 0;
-    s_audio.tail_sample[1] = 0;
-    s_audio.tail_valid = false;
+    s_audio.prev_sample[0] = 0;
+    s_audio.prev_sample[1] = 0;
+    s_audio.prev_valid = false;
+    s_audio.resample_needed = false;
     s_audio.initialized = false;
 }

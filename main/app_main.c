@@ -101,9 +101,8 @@ static esp_err_t init_platform(bool *audio_ready)
     /* ---- Initialize audio (ES8311 codec via I2C + I2S) ---- */
     audio_driver_config_t audio_config = {
         .sample_rate = GPSP_AUDIO_OUTPUT_RATE,
-        .source_sample_rate = GPSP_AUDIO_SOURCE_RATE,
     };
-    ESP_LOGI(TAG, "Audio path: gpsp PCM %d Hz -> codec output %d Hz",
+    ESP_LOGI(TAG, "Audio path: gpsp PCM %d Hz -> I2S output %d Hz",
              GPSP_AUDIO_SOURCE_RATE, GPSP_AUDIO_OUTPUT_RATE);
     err = audio_driver_init(&audio_config);
     if (err != ESP_OK) {

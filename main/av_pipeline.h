@@ -27,10 +27,6 @@ void av_pipeline_wait_for_previous_frame(void);
 esp_err_t av_pipeline_submit_frame(bool skip_video);
 bool av_pipeline_audio_enabled(void);
 
-/* Returns audio playback speed relative to nominal as percent×100.
- * 10000 = 100.00%, 10050 = 100.50%, etc. */
-int32_t av_pipeline_audio_speed_pcnt_x100(void);
-
 #ifdef __cplusplus
 }
 #endif
