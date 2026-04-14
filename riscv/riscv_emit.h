@@ -76,11 +76,25 @@ cpu_alert_type function_cc execute_store_u8(u32 address, u32 source)
     cpu_alert_type alert = write_memory8(address, source);
     u8 region = address >> 24;
     if (region == 0x03) {
-        if (iwram[address & 0x7FFF])
+        u32 offset = address & 0x7FFF;
+        if (iwram[offset]) {
+#ifdef SMC_INLINE_CLEAR
+            /* Point-clear: zero only the written tag byte.  Other blocks'
+               tags on the same page are untouched → they stay cached. */
+            iwram[offset] = 0;
+#else
             alert |= CPU_ALERT_SMC;
+#endif
+        }
     } else if (region == 0x02) {
-        if (ewram[(address & 0x3FFFF) + 0x40000])
+        u32 offset = (address & 0x3FFFF) + 0x40000;
+        if (ewram[offset]) {
+#ifdef SMC_INLINE_CLEAR
+            ewram[offset] = 0;
+#else
             alert |= CPU_ALERT_SMC;
+#endif
+        }
     }
     return alert;
 }
@@ -91,12 +105,22 @@ cpu_alert_type function_cc execute_store_u16(u32 address, u32 source)
     u8 region = address >> 24;
     if (region == 0x03) {
         u32 offset = (address & 0x7FFF) & ~1;
-        if (*(u16*)(iwram + offset))
+        if (*(u16*)(iwram + offset)) {
+#ifdef SMC_INLINE_CLEAR
+            *(u16*)(iwram + offset) = 0;
+#else
             alert |= CPU_ALERT_SMC;
+#endif
+        }
     } else if (region == 0x02) {
         u32 offset = ((address & 0x3FFFF) & ~1) + 0x40000;
-        if (*(u16*)(ewram + offset))
+        if (*(u16*)(ewram + offset)) {
+#ifdef SMC_INLINE_CLEAR
+            *(u16*)(ewram + offset) = 0;
+#else
             alert |= CPU_ALERT_SMC;
+#endif
+        }
     }
     return alert;
 }
@@ -107,12 +131,22 @@ cpu_alert_type function_cc execute_store_u32(u32 address, u32 source)
     u8 region = address >> 24;
     if (region == 0x03) {
         u32 offset = (address & 0x7FFF) & ~3;
-        if (*(u32*)(iwram + offset))
+        if (*(u32*)(iwram + offset)) {
+#ifdef SMC_INLINE_CLEAR
+            *(u32*)(iwram + offset) = 0;
+#else
             alert |= CPU_ALERT_SMC;
+#endif
+        }
     } else if (region == 0x02) {
         u32 offset = ((address & 0x3FFFF) & ~3) + 0x40000;
-        if (*(u32*)(ewram + offset))
+        if (*(u32*)(ewram + offset)) {
+#ifdef SMC_INLINE_CLEAR
+            *(u32*)(ewram + offset) = 0;
+#else
             alert |= CPU_ALERT_SMC;
+#endif
+        }
     }
     return alert;
 }

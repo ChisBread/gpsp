@@ -25,6 +25,17 @@ menu "gpSP GBA Emulator"
             are re-translated into this zone so that frequently-used blocks
             survive the flush and reduce re-translation stutter.
 
+    config GPSP_SMC_INLINE_CLEAR
+        bool "SMC inline tag clearing (point-level granularity)"
+        default y
+        depends on GPSP_DYNAREC
+        help
+            When code in IWRAM/EWRAM is overwritten (self-modifying code),
+            only clear the exact tag byte(s) at the written address
+            instead of flushing the entire RAM translation cache.
+            Greatly reduces re-translation overhead for games that mix
+            code and data in the same RAM region.
+
     config GPSP_ROM_BUFFER_SIZE
         int "ROM buffer size (MB)"
         default 32
