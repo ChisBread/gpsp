@@ -41,14 +41,19 @@ typedef struct {
 
 static savestate_read_state_t s_state_reader;
 
+/* Callback-mode pointers are fake (never dereferenced).  Use a base of 1
+   so that offset 0 maps to (u8*)1, avoiding the NULL-pointer early-return
+   guards in savestate_read_u8/u32/bytes. */
+#define SAVESTATE_OFFSET_BASE 1
+
 static size_t savestate_ptr_to_offset(const u8 *p)
 {
-  return (size_t)(uintptr_t)p;
+  return (size_t)(uintptr_t)p - SAVESTATE_OFFSET_BASE;
 }
 
 static u8 *savestate_offset_to_ptr(size_t offset)
 {
-  return (u8 *)(uintptr_t)offset;
+  return (u8 *)(uintptr_t)(offset + SAVESTATE_OFFSET_BASE);
 }
 
 static void savestate_writer_begin_memory(void)
@@ -281,8 +286,10 @@ bool bson_contains_key(const u8 *srcp, const char *key, u8 keytype)
 {
   unsigned keyl = strlen(key) + 1;
   unsigned doclen = bson_read_u32(srcp);
+  size_t base = savestate_ptr_to_offset(srcp);
   const u8* p = &srcp[4];
-  while (savestate_read_u8(p) != 0 && (p - srcp) < doclen) {
+  while (savestate_read_u8(p) != 0 &&
+         (savestate_ptr_to_offset(p) - base) < doclen) {
     u8 tp = savestate_read_u8(p);
     unsigned tlen = (unsigned)savestate_read_cstring_len(&p[1]) + 1;
     if (keyl == tlen && savestate_key_equals(&p[1], key, tlen))
@@ -302,8 +309,10 @@ const u8* bson_find_key(const u8 *srcp, const char *key)
 {
   unsigned keyl = strlen(key) + 1;
   unsigned doclen = bson_read_u32(srcp);
+  size_t base = savestate_ptr_to_offset(srcp);
   const u8* p = &srcp[4];
-  while (savestate_read_u8(p) != 0 && (p - srcp) < doclen) {
+  while (savestate_read_u8(p) != 0 &&
+         (savestate_ptr_to_offset(p) - base) < doclen) {
     u8 tp = savestate_read_u8(p);
     unsigned tlen = (unsigned)savestate_read_cstring_len(&p[1]) + 1;
     if (keyl == tlen && savestate_key_equals(&p[1], key, tlen))

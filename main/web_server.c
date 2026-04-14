@@ -435,7 +435,7 @@ static esp_err_t states_load_handler(httpd_req_t *req)
     if (err == ESP_OK) {
         return httpd_resp_send(req, "{\"ok\":true}", 11);
     } else {
-        return httpd_resp_send(req, "{\"ok\":false,\"error\":\"load failed\"}", 33);
+        return httpd_resp_send(req, "{\"ok\":false,\"error\":\"load failed\"}", 34);
     }
 }
 

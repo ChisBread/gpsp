@@ -626,6 +626,7 @@ static esp_err_t load_state_file(unsigned slot)
     clear_backup_dirty_flag();
 
     if (!gba_load_state_from_callback(state_sink_read, &sink)) {
+        ESP_LOGE(TAG, "State parse failed: %s", path);
         fclose(f);
         return ESP_FAIL;
     }
