@@ -455,7 +455,6 @@ void translate_icache_sync() {
   }                                                                           \
 
 #define translate_arm_instruction()                                           \
-  flag_status = block_data[block_data_position].flag_data;                    \
   check_pc_region(pc);                                                        \
   opcode = address32(pc_address_block, (pc & 0x7FFF));                        \
   condition = block_data[block_data_position].condition;                      \
@@ -1916,107 +1915,7 @@ void translate_icache_sync() {
   pc += 4                                                                     \
 
 #define arm_flag_status()                                                     \
-{                                                                             \
-  u16 flag_status = 0;                                                        \
-  u32 _cond = (opcode >> 28) & 0xF;                                           \
-  /* Condition code → required flags (N=0x800,Z=0x400,C=0x200,V=0x100) */     \
-  static const u16 _cond_req[16] = {                                          \
-    0x400, 0x400, 0x200, 0x200,  /* EQ NE CS CC */                            \
-    0x800, 0x800, 0x100, 0x100,  /* MI PL VS VC */                            \
-    0x600, 0x600, 0x900, 0x900,  /* HI LS GE LT */                            \
-    0xD00, 0xD00, 0x000, 0x000   /* GT LE AL NV */                            \
-  };                                                                          \
-  flag_status |= _cond_req[_cond];                                            \
-                                                                              \
-  u32 _op20 = (opcode >> 20) & 0xFF;                                          \
-  u32 _iclass = _op20 >> 5;  /* bits [27:25] */                               \
-                                                                              \
-  if (_iclass <= 1)                                                           \
-  {                                                                           \
-    u32 _dp_op = (opcode >> 21) & 0xF;                                        \
-    u32 _s_bit = _op20 & 1;                                                   \
-                                                                              \
-    /* iclass 0 with bits [7]=1,[4]=1: special encodings (multiply,           \
-       halfword transfer, SWP, multiply long) — NOT data processing! */       \
-    if (_iclass == 0 && (opcode & 0x90) == 0x90)                              \
-    {                                                                         \
-      /* Multiply/multiply long: bits [6:5]=00, dp_op 0..7 */                 \
-      if ((opcode & 0x60) == 0 && _dp_op <= 7)                                \
-      {                                                                       \
-        if (_s_bit)                                                            \
-          flag_status |= 0xCC; /* NZ: should NZ, must NZ */                   \
-      }                                                                       \
-      /* All other bit[7,4] combos (LDRH, STRH, LDRSB, LDRSH, SWP,           \
-         SWPB, multiply long w/ dp_op>7) don't modify flags.                  \
-         SWP and misc: be conservative, require all flags. */                  \
-      else if ((opcode & 0x60) == 0)                                           \
-      {                                                                       \
-        /* SWP/SWPB (dp_op >= 8, bits[6:5]=00, bits[7:4]=1001) */             \
-        flag_status |= 0xF00;                                                 \
-      }                                                                       \
-      /* Halfword/signed transfers (bits[6:5]!=00): no flag changes */         \
-    }                                                                         \
-    /* Non-S data proc opcodes 8-11 → MSR/MRS/BX/misc: conservative */       \
-    else if (!_s_bit && _dp_op >= 8 && _dp_op <= 11)                          \
-    {                                                                         \
-      /* MSR may write CPSR flags; BX changes PC.                             \
-         Be conservative: require all flags, don't claim modification */      \
-      flag_status |= 0xF00;                                                   \
-    }                                                                         \
-    else if (_s_bit)                                                           \
-    {                                                                         \
-      /* Data processing with S=1 */                                          \
-      u32 _arith = (_dp_op >= 2 && _dp_op <= 7) ||                           \
-                   _dp_op == 10 || _dp_op == 11;                              \
-      if (_arith)                                                             \
-      {                                                                       \
-        flag_status |= 0xFF; /* NZCV: should all, must all */                 \
-        /* ADC(5), SBC(6), RSC(7) require C as input */                       \
-        if (_dp_op >= 5 && _dp_op <= 7)                                       \
-          flag_status |= 0x200;                                               \
-      }                                                                       \
-      else                                                                    \
-      {                                                                       \
-        /* Logical: AND,EOR,TST,TEQ,ORR,MOV,BIC,MVN                          \
-           Barrel shifter may or may not modify C */                          \
-        flag_status |= 0xCE; /* should NZC, must NZ */                        \
-      }                                                                       \
-    }                                                                         \
-  }                                                                           \
-  else if (_iclass == 5)                                                      \
-  {                                                                           \
-    /* B / BL — changes PC */                                                 \
-    flag_status |= 0xF00;                                                     \
-  }                                                                           \
-  else if (_iclass == 7 && (_op20 & 0x10))                                    \
-  {                                                                           \
-    /* SWI */                                                                 \
-    flag_status |= 0xF00;                                                     \
-  }                                                                           \
-                                                                              \
-  /* If instruction could write PC, require all flags */                      \
-  if (_iclass <= 1)                                                           \
-  {                                                                           \
-    u32 _dp_op2 = (opcode >> 21) & 0xF;                                       \
-    /* Data proc writes rd (except TST/TEQ/CMP/CMN which have no rd) */       \
-    if (!((_dp_op2 >= 8 && _dp_op2 <= 11) && (_op20 & 1)))                   \
-    {                                                                         \
-      if (((opcode >> 12) & 0xF) == 15) flag_status |= 0xF00;                \
-    }                                                                         \
-  }                                                                           \
-  else if ((_iclass == 2 || _iclass == 3) && (_op20 & 1))                     \
-  {                                                                           \
-    /* LDR with rd=PC */                                                      \
-    if (((opcode >> 12) & 0xF) == 15) flag_status |= 0xF00;                  \
-  }                                                                           \
-  else if (_iclass == 4 && (opcode & 0x8000) && (_op20 & 1))                  \
-  {                                                                           \
-    /* LDM loading PC */                                                      \
-    flag_status |= 0xF00;                                                     \
-  }                                                                           \
-                                                                              \
-  block_data[block_data_position].flag_data = flag_status;                    \
-}                                                                             \
+
 
 #define translate_thumb_instruction()                                         \
   flag_status = block_data[block_data_position].flag_data;                    \
@@ -3097,18 +2996,7 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
 // computed.
 
 #define arm_dead_flag_eliminate()                                             \
-{                                                                             \
-  u32 needed_mask = 0xff;                                                     \
-                                                                              \
-  while(--block_data_position >= 0)                                           \
-  {                                                                           \
-    flag_status = block_data[block_data_position].flag_data;                  \
-    block_data[block_data_position].flag_data =                               \
-     (flag_status & needed_mask);                                             \
-    needed_mask &= ~((flag_status >> 4) & 0x0F);                              \
-    needed_mask |= flag_status >> 8;                                          \
-  }                                                                           \
-}                                                                             \
+  flag_status = 0xF                                                           \
 
 // The following Thumb instructions can exit:
 // b, bl, bx, swi, pop {... pc}, and mov pc, ..., the latter being a hireg
