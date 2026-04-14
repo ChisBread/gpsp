@@ -96,10 +96,6 @@ if(CONFIG_GPSP_ROM_HOT_ZONE)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC ROM_HOT_ZONE)
 endif()
 
-if(CONFIG_GPSP_SMC_INLINE_CLEAR)
-    target_compile_definitions(${COMPONENT_LIB} PUBLIC SMC_INLINE_CLEAR)
-endif()
-
 if(CONFIG_GPSP_ROM_BUFFER_SIZE)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC
         ROM_BUFFER_SIZE=${CONFIG_GPSP_ROM_BUFFER_SIZE}
@@ -109,6 +105,16 @@ endif()
 # Aggressive optimization for hot emulation code
 target_compile_options(${COMPONENT_LIB} PRIVATE -O3 -fno-pic -fno-pie)
 
+# JIT compiler: optimize for size to fit in ESP32-P4 I-cache (32KB).
+# translate_block_arm is 636KB at -O3, causing severe I-cache thrashing.
+# -Os shrinks it dramatically. Generated RISC-V code quality is unaffected
+# since emit macros just write u32 values to memory.
+if(CONFIG_GPSP_DYNAREC)
+    set_source_files_properties("${GPSP_ROOT}/cpu_threaded.c"
+        PROPERTIES COMPILE_OPTIONS "-Os"
+    )
+endif()
+
 # Enable Zbb (bit-manipulation) extension
 if(CONFIG_GPSP_HAVE_ZBB)
     target_compile_options(${COMPONENT_LIB} PRIVATE -march=rv32imafc_zicsr_zifencei_zbb_xespv)
@@ -117,9 +123,6 @@ endif()
 
 # RVC (Compressed) extension — always available on rv32imafc targets
 target_compile_definitions(${COMPONENT_LIB} PUBLIC HAVE_RVC)
-
-# Enable OVERCLOCK_60FPS for ESP32-P4
-target_compile_definitions(${COMPONENT_LIB} PUBLIC OVERCLOCK_60FPS)
 
 # Suppress warnings in upstream code (treated as errors by IDF default)
 target_compile_options(${COMPONENT_LIB} PRIVATE

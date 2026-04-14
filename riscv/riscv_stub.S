@@ -895,21 +895,10 @@ defsymbl(rv_execute_aligned_load32)
     add   t0, t0, t1            /* t0 = &ewram[offset] (data ptr) */
     lui   t1, 0x40              /* t1 = 0x40000 */
     add   t1, t0, t1            /* t1 = &ewram[offset + 0x40000] (tag ptr) */
-#ifdef SMC_INLINE_CLEAR
-    /* Point-clear: if tag non-zero, zero just the written bytes.
-       a0 is spent (address already consumed); reuse as scratch. */
-    \smc_ldop a0, 0(t1)         /* a0 = tag value */
-    beqz  a0, 1f
-    \stop zero, 0(t1)           /* clear tag (same width as data store) */
-1:
-    \stop a1, 0(t0)             /* data store */
-    ret
-#else
     \smc_ldop t1, 0(t1)         /* t1 = tag value (preserve a0 for slow) */
     bnez  t1, .Lslow_\suffix
     \stop a1, 0(t0)
     ret
-#endif
 .endm
 
 /* Store IWRAM with SMC check */
@@ -920,14 +909,7 @@ defsymbl(rv_execute_aligned_load32)
     srli  t1, t1, 17            /* t1 = addr & 0x7FFF */
     add   t0, t0, t1            /* t0 = &iwram[offset] (tag ptr) */
     \smc_ldop t1, 0(t0)         /* load tag bits */
-#ifdef SMC_INLINE_CLEAR
-    /* Point-clear: zero only the written tag bytes inline. */
-    beqz  t1, 1f
-    \stop zero, 0(t0)           /* clear tag (same width as data store) */
-1:
-#else
     bnez  t1, .Lslow_\suffix
-#endif
     lui   t1, 8                 /* t1 = 0x8000 */
     add   t0, t0, t1            /* t0 = &iwram[offset + 0x8000] (shadow) */
     \stop a1, 0(t0)
