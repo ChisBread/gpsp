@@ -29,6 +29,10 @@ char gpsp_netplay_broadcast_addr[16];
 
 bool gpsp_web_server_enabled;
 
+uint32_t gpsp_frameskip_type;
+uint32_t gpsp_frameskip_interval;
+uint32_t gpsp_frameskip_threshold;
+
 static int parse_bool_value(const char *value, int *out)
 {
     if (!value || !out) {
@@ -92,6 +96,10 @@ static void gpsp_runtime_config_set_defaults(void)
             sizeof(gpsp_netplay_broadcast_addr));
 
     gpsp_web_server_enabled = true;
+
+    gpsp_frameskip_type = 0;
+    gpsp_frameskip_interval = 0;
+    gpsp_frameskip_threshold = 33;
 }
 
 static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
@@ -195,6 +203,30 @@ static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
         return;
     }
 
+    if (strcmp(key, "frameskip_interval") == 0) {
+        parsed_long = strtol(value, &endptr, 10);
+        if (endptr != value && parsed_long >= 0 && parsed_long <= 9) {
+            gpsp_frameskip_interval = (uint32_t)parsed_long;
+        }
+        return;
+    }
+
+    if (strcmp(key, "frameskip_type") == 0) {
+        parsed_long = strtol(value, &endptr, 10);
+        if (endptr != value && parsed_long >= 0 && parsed_long <= 3) {
+            gpsp_frameskip_type = (uint32_t)parsed_long;
+        }
+        return;
+    }
+
+    if (strcmp(key, "frameskip_threshold") == 0) {
+        parsed_long = strtol(value, &endptr, 10);
+        if (endptr != value && parsed_long >= 0 && parsed_long <= 100) {
+            gpsp_frameskip_threshold = (uint32_t)parsed_long;
+        }
+        return;
+    }
+
     ESP_LOGW(TAG, "Ignoring unknown or invalid config entry: %s=%s", key, value);
 }
 
@@ -218,7 +250,10 @@ esp_err_t gpsp_runtime_config_save(void)
             "netplay_broadcast_addr=%s\n"
             "netplay_peer_timeout_ms=%u\n"
             "netplay_hello_interval_ms=%u\n"
-            "netplay_local_client_id=%d\n",
+            "netplay_local_client_id=%d\n"
+            "frameskip_interval=%u\n"
+            "frameskip_type=%u\n"
+            "frameskip_threshold=%u\n",
             dynarec_enable ? 1 : 0,
             sprite_limit ? 1 : 0,
             selected_boot_mode == boot_bios ? 1 : 0,
@@ -228,7 +263,10 @@ esp_err_t gpsp_runtime_config_save(void)
             gpsp_netplay_broadcast_addr,
             (unsigned)gpsp_netplay_peer_timeout_ms,
             (unsigned)gpsp_netplay_hello_interval_ms,
-            gpsp_netplay_local_client_id_override);
+            gpsp_netplay_local_client_id_override,
+            (unsigned)gpsp_frameskip_interval,
+            (unsigned)gpsp_frameskip_type,
+            (unsigned)gpsp_frameskip_threshold);
     fclose(config_file);
     return ESP_OK;
 }

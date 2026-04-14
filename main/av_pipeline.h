@@ -26,6 +26,7 @@ u16 *av_pipeline_video_buffer(void);
 void av_pipeline_wait_for_previous_frame(void);
 esp_err_t av_pipeline_submit_frame(bool skip_video);
 bool av_pipeline_audio_enabled(void);
+void av_pipeline_audio_buffered(uint32_t *out_queued, uint32_t *out_total);
 
 #ifdef __cplusplus
 }

@@ -249,3 +249,13 @@ bool av_pipeline_audio_enabled(void)
 {
     return audio_enabled;
 }
+
+void av_pipeline_audio_buffered(uint32_t *out_queued, uint32_t *out_total)
+{
+    if (!audio_enabled) {
+        if (out_queued) *out_queued = 0;
+        if (out_total)  *out_total  = 0;
+        return;
+    }
+    audio_driver_dma_buffered(out_queued, out_total);
+}

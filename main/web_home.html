@@ -96,7 +96,7 @@ btn:hover{background:#3a4a6a}
 <div class="card full">
   <div class="hdr">
     <div><span class="fps" id="fps">--</span> <span class="sub">FPS</span></div>
-    <div class="sub">空闲内存: <span id="heap">--</span> KB | 帧同步: <span id="acq">--</span> us | 音频延迟: <span id="snd">--</span> us</div>
+    <div class="sub">空闲内存: <span id="heap">--</span> KB | 帧同步: <span id="acq">--</span> us | 音频产出(GBA侧): <span id="snd">--</span> us | 音频消费(I2S): <span id="i2s_buf">--</span></div>
   </div>
   <div class="chart-wrap">
     <canvas id="chart"></canvas>
@@ -132,6 +132,42 @@ btn:hover{background:#3a4a6a}
     <select id="cfg_boot">
       <option value="game">直接进入游戏</option>
       <option value="bios">BIOS 动画</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>跳帧模式</label>
+    <select id="cfg_frameskip">
+      <option value="0">关闭</option>
+      <option value="1">自动</option>
+      <option value="2">自动 (阈值)</option>
+      <option value="3">固定间隔</option>
+    </select>
+  </div>
+  <div class="row" id="row_fs_threshold" style="display:none">
+    <label>跳帧阈值 (%)</label>
+    <select id="cfg_fs_threshold">
+      <option value="15">15%</option>
+      <option value="20">20%</option>
+      <option value="25">25%</option>
+      <option value="30">30%</option>
+      <option value="33">33%</option>
+      <option value="40">40%</option>
+      <option value="50">50%</option>
+      <option value="60">60%</option>
+      <option value="75">75%</option>
+      <option value="80">80%</option>
+      <option value="90">90%</option>
+      <option value="95">95%</option>
+    </select>
+  </div>
+  <div class="row" id="row_fs_interval" style="display:none">
+    <label>跳帧间隔</label>
+    <select id="cfg_fs_interval">
+      <option value="1">1</option>
+      <option value="2">2</option>
+      <option value="3">3</option>
+      <option value="4">4</option>
+      <option value="5">5</option>
     </select>
   </div>
   <div class="msg" id="msg"></div>
@@ -630,6 +666,9 @@ async function poll(){
     }
     $('heap').textContent = d.heap_kb ?? '--';
     $('snd').textContent = d.snd_us != null ? d.snd_us : '--';
+    $('i2s_buf').textContent = (d.i2s_queued != null && d.i2s_total != null)
+      ? d.i2s_queued + '/' + d.i2s_total
+      : '--';
     $('acq').textContent = d.acquire && d.acquire.avg != null ? d.acquire.avg : '--';
 
     /* Synthesize cpu_only = cpu - render */
@@ -672,6 +711,10 @@ async function loadSettings(){
     $('cfg_dynarec').checked = !!j.dynarec_enable;
     $('cfg_sprite').checked = !!j.sprite_limit;
     $('cfg_boot').value = j.boot_mode || 'game';
+    $('cfg_frameskip').value = String(j.frameskip_type || 0);
+    $('cfg_fs_threshold').value = String(j.frameskip_threshold || 33);
+    $('cfg_fs_interval').value = String(j.frameskip_interval || 1);
+    updateFrameskipUI();
   } catch(e){}
 }
 loadSettings();
@@ -680,7 +723,10 @@ async function saveSettings(){
   const body = {
     dynarec_enable: $('cfg_dynarec').checked ? 1 : 0,
     sprite_limit: $('cfg_sprite').checked ? 1 : 0,
-    boot_mode: $('cfg_boot').value
+    boot_mode: $('cfg_boot').value,
+    frameskip_type: parseInt($('cfg_frameskip').value, 10) || 0,
+    frameskip_interval: parseInt($('cfg_fs_interval').value, 10) || 1,
+    frameskip_threshold: parseInt($('cfg_fs_threshold').value, 10) || 33
   };
   try {
     const r = await fetch('/api/settings', {
@@ -698,6 +744,15 @@ async function saveSettings(){
 $('cfg_dynarec').addEventListener('change', saveSettings);
 $('cfg_sprite').addEventListener('change', saveSettings);
 $('cfg_boot').addEventListener('change', saveSettings);
+$('cfg_frameskip').addEventListener('change', function(){ updateFrameskipUI(); saveSettings(); });
+$('cfg_fs_threshold').addEventListener('change', saveSettings);
+$('cfg_fs_interval').addEventListener('change', saveSettings);
+
+function updateFrameskipUI(){
+  var t = parseInt($('cfg_frameskip').value, 10);
+  $('row_fs_threshold').style.display = (t === 2) ? '' : 'none';
+  $('row_fs_interval').style.display = (t === 3) ? '' : 'none';
+}
 
 /* ── ROM picker ────────────────────────────────────── */
 async function loadRomList(){

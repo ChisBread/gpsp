@@ -25,6 +25,10 @@ extern char gpsp_netplay_broadcast_addr[16];
 
 extern bool gpsp_web_server_enabled;
 
+extern uint32_t gpsp_frameskip_type;
+extern uint32_t gpsp_frameskip_interval;
+extern uint32_t gpsp_frameskip_threshold;
+
 esp_err_t gpsp_runtime_config_init(void);
 esp_err_t gpsp_runtime_config_save(void);
 

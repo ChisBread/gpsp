@@ -10,6 +10,7 @@ set(ESP32P4_SRCS
 idf_component_register(
     SRCS ${ESP32P4_SRCS}
     INCLUDE_DIRS "${HAL_DIR}"
+    PRIV_INCLUDE_DIRS "${IDF_PATH}/components/esp_driver_i2s"
     REQUIRES
         driver
         esp_codec_dev

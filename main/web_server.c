@@ -167,12 +167,16 @@ static esp_err_t stats_get_handler(httpd_req_t *req)
 /* ---- GET /api/settings → current settings JSON ---- */
 static esp_err_t settings_get_handler(httpd_req_t *req)
 {
-    char buf[256];
+    char buf[384];
     int len = snprintf(buf, sizeof(buf),
-        "{\"dynarec_enable\":%d,\"sprite_limit\":%d,\"boot_mode\":\"%s\"}",
+        "{\"dynarec_enable\":%d,\"sprite_limit\":%d,\"boot_mode\":\"%s\""
+        ",\"frameskip_type\":%u,\"frameskip_interval\":%u,\"frameskip_threshold\":%u}",
         dynarec_enable ? 1 : 0,
         sprite_limit ? 1 : 0,
-        selected_boot_mode == boot_bios ? "bios" : "game");
+        selected_boot_mode == boot_bios ? "bios" : "game",
+        (unsigned)gpsp_frameskip_type,
+        (unsigned)gpsp_frameskip_interval,
+        (unsigned)gpsp_frameskip_threshold);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -222,6 +226,36 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
             selected_boot_mode = boot_bios;
         else
             selected_boot_mode = boot_game;
+    }
+
+    p = strstr(body, "\"frameskip_type\"");
+    if (p) {
+        p = strchr(p + 16, ':');
+        if (p) {
+            int v = atoi(p + 1);
+            if (v >= 0 && v <= 3)
+                gpsp_frameskip_type = (uint32_t)v;
+        }
+    }
+
+    p = strstr(body, "\"frameskip_interval\"");
+    if (p) {
+        p = strchr(p + 20, ':');
+        if (p) {
+            int v = atoi(p + 1);
+            if (v >= 0 && v <= 9)
+                gpsp_frameskip_interval = (uint32_t)v;
+        }
+    }
+
+    p = strstr(body, "\"frameskip_threshold\"");
+    if (p) {
+        p = strchr(p + 21, ':');
+        if (p) {
+            int v = atoi(p + 1);
+            if (v >= 0 && v <= 100)
+                gpsp_frameskip_threshold = (uint32_t)v;
+        }
     }
 
     gpsp_runtime_config_save();

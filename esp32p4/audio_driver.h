@@ -64,6 +64,13 @@ uint32_t audio_driver_get_output_rate(void);
 uint32_t audio_driver_get_nominal_rate(void);
 
 /**
+ * Query I2S DMA buffer occupancy.
+ * @param out_queued  Number of DMA descriptors still queued for playback
+ * @param out_total   Total number of DMA descriptors
+ */
+void audio_driver_dma_buffered(uint32_t *out_queued, uint32_t *out_total);
+
+/**
  * Deinitialize audio driver.
  */
 void audio_driver_deinit(void);

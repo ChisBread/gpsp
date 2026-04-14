@@ -7,6 +7,7 @@
 
 #include "driver/i2c_master.h"
 #include "driver/i2s_std.h"
+#include "i2s_private.h"
 #include "esp_check.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
@@ -307,6 +308,24 @@ uint32_t audio_driver_get_output_rate(void)
 uint32_t audio_driver_get_nominal_rate(void)
 {
     return s_audio.sample_rate_nominal;
+}
+
+void audio_driver_dma_buffered(uint32_t *out_queued, uint32_t *out_total)
+{
+    if (!s_audio.initialized || !s_audio.tx_chan) {
+        if (out_queued) *out_queued = 0;
+        if (out_total)  *out_total  = 0;
+        return;
+    }
+    /* msg_queue holds descriptors that the DMA has finished playing
+     * and are now free for software to refill.  So:
+     *   total  = dma.desc_num
+     *   free   = uxQueueMessagesWaiting(msg_queue)
+     *   queued = total - free   (still being played / waiting to play) */
+    uint32_t total = s_audio.tx_chan->dma.desc_num;
+    uint32_t free_descs = (uint32_t)uxQueueMessagesWaiting(s_audio.tx_chan->msg_queue);
+    if (out_queued) *out_queued = (free_descs <= total) ? (total - free_descs) : 0;
+    if (out_total)  *out_total  = total;
 }
 
 void audio_driver_deinit(void)

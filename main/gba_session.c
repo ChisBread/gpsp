@@ -186,6 +186,10 @@ static int64_t s_frame_start_us;
 static uint32_t s_fps_counter;
 static uint32_t s_fps_last_x10;   /* FPS × 10, e.g. 597 = 59.7 */
 static int64_t s_fps_timer_us;
+static uint32_t s_frameskip_counter;
+
+/* Maximum consecutive frames that can be skipped in auto modes */
+#define FRAMESKIP_MAX 30
 static GPSP_EXTRAM_BSS gba_session_perf_stats_t s_perf_stats;
 
 static int compare_int64_ascending(const void *lhs, const void *rhs)
@@ -1251,6 +1255,67 @@ void gba_emulation_task(void *param)
         }
         skip_next_frame = 0;
 
+        /* Frameskip logic — mirrors libretro implementation.
+         * auto mode checks real I2S DMA buffer occupancy: when queued
+         * descriptors drop to 1 or fewer, audio is about to starve.
+         * auto_threshold uses measured FPS vs configured threshold.
+         * fixed_interval skips N frames then renders 1. */
+        if (gpsp_frameskip_type != no_frameskip) {
+            switch ((frameskip_type)gpsp_frameskip_type) {
+            case auto_frameskip: {
+                /* Query real I2S DMA buffer level from hardware */
+                uint32_t dma_queued = 0, dma_total = 0;
+                av_pipeline_audio_buffered(&dma_queued, &dma_total);
+                /* Skip when DMA has at most 1 descriptor of audio left;
+                 * if audio is disabled, never skip based on DMA. */
+                bool audio_low = av_pipeline_audio_enabled() && (dma_queued <= 1);
+                skip_next_frame = audio_low ? 1 : 0;
+
+                if (!skip_next_frame ||
+                    (s_frameskip_counter >= FRAMESKIP_MAX)) {
+                    skip_next_frame = 0;
+                    s_frameskip_counter = 0;
+                } else {
+                    s_frameskip_counter++;
+                }
+                break;
+            }
+
+            case auto_threshold_frameskip: {
+                /* Skip if FPS drops below threshold % of target 60 FPS.
+                 * s_fps_last_x10 is FPS×10, target ~597. */
+                uint32_t target_x10 = 597;
+                uint32_t threshold_x10 = target_x10 * gpsp_frameskip_threshold / 100;
+                skip_next_frame = (s_fps_last_x10 > 0 &&
+                                   s_fps_last_x10 < threshold_x10) ? 1 : 0;
+
+                if (!skip_next_frame ||
+                    (s_frameskip_counter >= FRAMESKIP_MAX)) {
+                    skip_next_frame = 0;
+                    s_frameskip_counter = 0;
+                } else {
+                    s_frameskip_counter++;
+                }
+                break;
+            }
+
+            case fixed_interval_frameskip:
+                if (gpsp_frameskip_interval > 0) {
+                    if (s_frameskip_counter < gpsp_frameskip_interval) {
+                        skip_next_frame = 1;
+                        s_frameskip_counter++;
+                    } else {
+                        skip_next_frame = 0;
+                        s_frameskip_counter = 0;
+                    }
+                }
+                break;
+
+            default:
+                break;
+            }
+        }
+
 #ifdef CPU_PROFILE_STATS
         u32 scanline_cyc_before = cpu_prof.scanline_cycles;
 #endif
@@ -1374,10 +1439,18 @@ int gba_session_stats_json(char *buf, size_t buf_size)
 
     { u32 pend = sound_samples_pending();
       u32 pend_us = (u32)((u64)pend * 1000000 / (GBA_SOUND_FREQUENCY * 2));
-      p += snprintf(p, end - p, "\"fps_x10\":%u,\"heap_kb\":%u,\"snd_us\":%u,",
+      u32 dma_q = 0, dma_t = 0;
+      uint32_t dma_q32, dma_t32;
+      av_pipeline_audio_buffered(&dma_q32, &dma_t32);
+      dma_q = (u32)dma_q32; dma_t = (u32)dma_t32;
+      p += snprintf(p, end - p,
+                    "\"fps_x10\":%u,\"heap_kb\":%u,\"snd_us\":%u,"
+                    "\"i2s_queued\":%u,\"i2s_total\":%u,",
                     (unsigned)s_fps_last_x10,
                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024),
-                    (unsigned)pend_us);
+                    (unsigned)pend_us,
+                    (unsigned)dma_q,
+                    (unsigned)dma_t);
     }
     if (p >= end) goto trunc;
 
