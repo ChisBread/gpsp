@@ -1936,12 +1936,25 @@ void translate_icache_sync() {
     u32 _dp_op = (opcode >> 21) & 0xF;                                        \
     u32 _s_bit = _op20 & 1;                                                   \
                                                                               \
-    /* Multiply (class 0, bits [7:4]=1001, dp_op 0..7) */                     \
-    if (_iclass == 0 && (opcode & 0x90) == 0x90 &&                            \
-        (opcode & 0x60) == 0 && _dp_op <= 7)                                  \
+    /* iclass 0 with bits [7]=1,[4]=1: special encodings (multiply,           \
+       halfword transfer, SWP, multiply long) — NOT data processing! */       \
+    if (_iclass == 0 && (opcode & 0x90) == 0x90)                              \
     {                                                                         \
-      if (_s_bit)                                                             \
-        flag_status |= 0xCC; /* NZ: should NZ, must NZ */                     \
+      /* Multiply/multiply long: bits [6:5]=00, dp_op 0..7 */                 \
+      if ((opcode & 0x60) == 0 && _dp_op <= 7)                                \
+      {                                                                       \
+        if (_s_bit)                                                            \
+          flag_status |= 0xCC; /* NZ: should NZ, must NZ */                   \
+      }                                                                       \
+      /* All other bit[7,4] combos (LDRH, STRH, LDRSB, LDRSH, SWP,           \
+         SWPB, multiply long w/ dp_op>7) don't modify flags.                  \
+         SWP and misc: be conservative, require all flags. */                  \
+      else if ((opcode & 0x60) == 0)                                           \
+      {                                                                       \
+        /* SWP/SWPB (dp_op >= 8, bits[6:5]=00, bits[7:4]=1001) */             \
+        flag_status |= 0xF00;                                                 \
+      }                                                                       \
+      /* Halfword/signed transfers (bits[6:5]!=00): no flag changes */         \
     }                                                                         \
     /* Non-S data proc opcodes 8-11 → MSR/MRS/BX/misc: conservative */       \
     else if (!_s_bit && _dp_op >= 8 && _dp_op <= 11)                          \
