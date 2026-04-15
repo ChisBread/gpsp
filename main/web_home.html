@@ -1343,9 +1343,14 @@ function onStreamMessage(evt) {
     }
 
     /* Steady state: schedule at the exact next position on the
-     * audio timeline.  streamAudioTime advances at a fixed rate
-     * (sampleCount / 65536 per chunk) regardless of arrival jitter.
-     * WebAudio plays immediately if the scheduled time is in the past. */
+     * audio timeline.  If we fall behind (underrun), re-anchor to
+     * slightly ahead of "now" so WebAudio always has a small
+     * scheduling cushion.  This may produce a brief silence gap
+     * but is inaudible and keeps the stream gapless going forward. */
+    const ahead = streamAudioTime - audioCtx.currentTime;
+    if (ahead < -0.02) {
+      streamAudioTime = audioCtx.currentTime + 0.04; /* 40ms cushion */
+    }
     const src = audioCtx.createBufferSource();
     src.buffer = buf;
     src.connect(audioCtx.destination);
