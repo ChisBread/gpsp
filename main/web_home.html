@@ -93,6 +93,9 @@ btn:hover{background:#3a4a6a}
 .ctrl-toolbar .tbtn:hover{background:#3a4a6a}
 .ctrl-toolbar .tbtn.on{background:#2a5a2a;color:#afa;border-color:#4a6}
 .ctrl-toolbar .tbtn.rec{background:#5a2a2a;color:#f88;border-color:#a44}
+.vol-wrap{display:flex;align-items:center;gap:4px;font-size:.78em;color:#ccc}
+.vol-wrap input[type=range]{width:80px;accent-color:#8af;cursor:pointer}
+.vol-wrap .vol-val{width:28px;text-align:right;font-family:monospace;color:#afa;font-size:.82em}
 /* ── GBA-style gamepad layout ── */
 .gba-shell{background:#1a1830;border:2px solid #2a2848;border-radius:12px;padding:10px 12px 14px;margin:8px auto 0;user-select:none;-webkit-user-select:none;touch-action:manipulation}
 /* Row: L / R */
@@ -140,6 +143,7 @@ btn:hover{background:#3a4a6a}
       <button class="tbtn" id="stream_btn" data-i18n-title="start_stop_stream" title="开始/停止推流"><span data-i18n="stream_start">▶ 推流</span></button>
       <button class="tbtn" id="frame_once" data-i18n-title="capture_title" title="抓取一帧">📷 <span data-i18n="capture">截帧</span></button>
       <button class="tbtn" id="rec_btn" data-i18n-title="record_title" title="录制"><span data-i18n="record">⏺ 录制</span></button>
+      <span class="vol-wrap">🔊 <span data-i18n="volume">音量</span><input type="range" id="vol_slider" min="0" max="100" value="100"><span class="vol-val" id="vol_val">100</span></span>
       <span style="color:#666;font-size:.72em" id="stream_info" data-i18n="not_connected">未连接</span>
       <span class="ws-status" id="ws_status">WS: --</span>
     </div>
@@ -373,6 +377,7 @@ zh:{
   cum_ram_flush:'RAM重置',cum_ram_flush_tip:'累计RAM缓存重置次数',
   cum_ic_sync:'I-Cache同步',cum_ic_sync_tip:'累计I-Cache同步次数',
   prof_hit:'块查找命中率',prof_hit_tip:'JIT哈希表查找命中 / 总查找次数。命中=直接执行已编译代码，未中=需要新编译',
+  volume:'音量',
   start_stop_stream:'开始/停止推流',capture_title:'抓取一帧',record_title:'录制',
 },
 en:{
@@ -459,6 +464,7 @@ en:{
   cum_ram_flush:'RAM Flush',cum_ram_flush_tip:'Total RAM cache resets',
   cum_ic_sync:'I$ Sync',cum_ic_sync_tip:'Total I-Cache syncs',
   prof_hit:'Block Hit Rate',prof_hit_tip:'JIT hash hit / total. Hit = run compiled, Miss = compile new',
+  volume:'Vol',
   start_stop_stream:'Start/Stop stream',capture_title:'Capture frame',record_title:'Record',
 }};
 function t(k){return (I18N[curLang]&&I18N[curLang][k])||I18N.zh[k]||k;}
@@ -1307,9 +1313,14 @@ let streamAudioTime = 0;
 let streamAudioQueue = [];       /* buffered AudioBuffers before playback starts */
 let streamAudioPrimed = false;   /* true once initial buffer is drained */
 
+/* Audio bus — all BufferSources connect here, then to destination.
+ * Recording taps this node via MediaStreamDestination. */
+let audioGain = null;
+
 /* Recording state */
 let mediaRecorder = null;
 let recordChunks = [];
+let recAudioDest = null;  /* MediaStreamDestinationNode while recording */
 
 const BROADWAY_CDN = 'https://cdn.jsdelivr.net/npm/broadway-player@0.1.1/Player';
 let broadwayLoaded = false;
@@ -1364,6 +1375,8 @@ function streamStart() {
    * OS audio stack handles the final 65536→hardware rate conversion. */
   if (!audioCtx) {
     audioCtx = new AudioContext({ sampleRate: 65536 });
+    audioGain = audioCtx.createGain();
+    audioGain.connect(audioCtx.destination);
   }
   if (audioCtx.state === 'suspended') audioCtx.resume();
 
@@ -1539,7 +1552,7 @@ function onStreamMessage(evt) {
       for (const qbuf of streamAudioQueue) {
         const src = audioCtx.createBufferSource();
         src.buffer = qbuf;
-        src.connect(audioCtx.destination);
+        src.connect(audioGain);
         src.start(streamAudioTime);
         streamAudioTime += qbuf.length / 65536;
       }
@@ -1558,7 +1571,7 @@ function onStreamMessage(evt) {
     }
     const src = audioCtx.createBufferSource();
     src.buffer = buf;
-    src.connect(audioCtx.destination);
+    src.connect(audioGain);
     src.start(streamAudioTime);
     streamAudioTime += sampleCount / 65536;
   }
@@ -1573,6 +1586,24 @@ $('stream_btn').addEventListener('click', () => {
   if (streamActive) streamStop(); else streamStart();
 });
 
+/* ── Volume control ── */
+(function(){
+  const slider = $('vol_slider'), valEl = $('vol_val');
+  const saved = localStorage.getItem('gpsp_vol');
+  if (saved !== null) { slider.value = saved; valEl.textContent = saved; }
+  slider.addEventListener('input', function(){
+    valEl.textContent = this.value;
+    localStorage.setItem('gpsp_vol', this.value);
+    if (audioGain) audioGain.gain.value = this.value / 100;
+  });
+  /* Apply saved volume when audioGain is first created */
+  const origStart = streamStart;
+  streamStart = function(){
+    origStart();
+    if (audioGain) audioGain.gain.value = slider.value / 100;
+  };
+})();
+
 /* ── Recording via MediaRecorder (canvas capture) ── */
 $('rec_btn').addEventListener('click', function() {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
@@ -1583,20 +1614,24 @@ $('rec_btn').addEventListener('click', function() {
   /* Capture canvas as media stream */
   const stream = frameCvs.captureStream(30);
 
-  /* Add audio if available */
-  if (audioCtx && audioCtx.state === 'running') {
+  /* Add audio track from the gain bus */
+  if (audioCtx && audioGain && audioCtx.state === 'running') {
     try {
-      const dest = audioCtx.createMediaStreamDestination();
-      /* We can't easily tap into existing audio nodes retroactively,
-       * so recording will capture video only for now.
-       * Audio recording would require restructuring the audio graph. */
-    } catch(e) {}
+      recAudioDest = audioCtx.createMediaStreamDestination();
+      audioGain.connect(recAudioDest);
+      for (const track of recAudioDest.stream.getAudioTracks()) {
+        stream.addTrack(track);
+      }
+    } catch(e) { recAudioDest = null; }
   }
 
-  const opts = { mimeType: 'video/webm;codecs=vp9' };
-  if (!MediaRecorder.isTypeSupported(opts.mimeType)) {
-    opts.mimeType = 'video/webm';
+  /* Prefer vp9+opus when audio track is present */
+  let mimeType = 'video/webm;codecs=vp9,opus';
+  if (!MediaRecorder.isTypeSupported(mimeType)) {
+    mimeType = 'video/webm;codecs=vp9';
+    if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
   }
+  const opts = { mimeType };
 
   recordChunks = [];
   try {
@@ -1610,6 +1645,11 @@ $('rec_btn').addEventListener('click', function() {
     if (e.data.size > 0) recordChunks.push(e.data);
   };
   mediaRecorder.onstop = () => {
+    /* Disconnect audio tap */
+    if (recAudioDest) {
+      try { audioGain.disconnect(recAudioDest); } catch(e) {}
+      recAudioDest = null;
+    }
     $('rec_btn').querySelector('[data-i18n]') && ($('rec_btn').querySelector('[data-i18n]').textContent = t('record'));
     $('rec_btn').classList.remove('rec');
     /* Download the recorded file */
