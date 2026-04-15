@@ -33,6 +33,7 @@ static bool audio_enabled;
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/stream_buffer.h"
 
 #include "audio_driver.h"
 #include "sound.h"
@@ -81,6 +82,11 @@ static bool av_frame_pending;
 static volatile uint8_t *s_snap_dst;
 static volatile size_t   s_snap_size;
 static SemaphoreHandle_t s_snap_sem;
+
+/* Stream audio tee: when active, the AV task writes collected audio
+ * into this FreeRTOS StreamBuffer.  The streaming web task reads from it.
+ * Lock-free for single-producer/single-consumer. */
+static StreamBufferHandle_t s_stream_audio_sb;
 
 static uint32_t collect_audio_frame(int16_t *audio_buf, size_t audio_buf_frames)
 {
@@ -158,6 +164,15 @@ static void av_output_task(void *arg)
                 if (err != ESP_OK) {
                     ESP_LOGW(TAG, "Audio write failed: %s",
                              esp_err_to_name(err));
+                }
+                /* Tee audio to stream buffer (all-or-nothing to avoid
+                 * partial writes that corrupt sample boundaries) */
+                if (s_stream_audio_sb) {
+                    size_t nbytes = frames * 2 * sizeof(int16_t);
+                    if (xStreamBufferSpacesAvailable(s_stream_audio_sb) >= nbytes) {
+                        xStreamBufferSend(s_stream_audio_sb, audio_buffer,
+                                          nbytes, 0);
+                    }
                 }
             }
         }
@@ -301,4 +316,39 @@ void av_pipeline_audio_buffered(uint32_t *out_queued, uint32_t *out_total)
         return;
     }
     audio_driver_dma_buffered(out_queued, out_total);
+}
+
+/* ── Stream audio tee ──
+ * A PSRAM-backed StreamBuffer (~8 KB, holds ~2 frames of stereo s16).
+ * Created on-demand when streaming starts; destroyed when it stops.
+ * Audio from the AV task is tee'd here without affecting I2S playback.
+ */
+#define STREAM_AUDIO_SB_SIZE  (4400 * 2 * sizeof(int16_t) * 2)  /* ~35.2 KB */
+
+esp_err_t av_pipeline_stream_audio_start(void)
+{
+    if (s_stream_audio_sb) return ESP_OK;
+    s_stream_audio_sb = xStreamBufferCreateWithCaps(
+        STREAM_AUDIO_SB_SIZE, 1, MALLOC_CAP_SPIRAM);
+    if (!s_stream_audio_sb) {
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "Stream audio tee enabled (%u bytes)", STREAM_AUDIO_SB_SIZE);
+    return ESP_OK;
+}
+
+void av_pipeline_stream_audio_stop(void)
+{
+    StreamBufferHandle_t sb = s_stream_audio_sb;
+    s_stream_audio_sb = NULL;
+    if (sb) {
+        vStreamBufferDelete(sb);
+        ESP_LOGI(TAG, "Stream audio tee disabled");
+    }
+}
+
+size_t av_pipeline_stream_audio_read(int16_t *out, size_t max_bytes)
+{
+    if (!s_stream_audio_sb) return 0;
+    return xStreamBufferReceive(s_stream_audio_sb, out, max_bytes, 0);
 }

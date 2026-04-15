@@ -4085,6 +4085,15 @@ CONFIG_CODEC_TAS5805M_SUPPORT=y
 # CONFIG_CODEC_DATA_ADC_SUPPORT is not set
 # end of Audio Codec Device Configuration
 
+#
+# ESP H264 Configuration
+#
+# default:
+CONFIG_ESP_H264_DECODER_IRAM=y
+# default:
+# CONFIG_ESP_H264_DUAL_TASK is not set
+# end of ESP H264 Configuration
+
 CONFIG_ESP_HOSTED_ENABLED=y
 
 #

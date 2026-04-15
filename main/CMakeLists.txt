@@ -15,6 +15,7 @@ idf_component_register(
         esp_psram
         lwip
         esp_http_server
+        esp_driver_ppa
     EMBED_FILES
         "web_server.html"
         "web_home.html"

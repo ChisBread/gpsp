@@ -84,29 +84,39 @@ btn:hover{background:#3a4a6a}
 .cnt-grid [data-tip]:hover::before{bottom:auto;top:calc(100% + 2px);border-top-color:transparent;border-bottom-color:#446}
 /* Gamepad + Video panel */
 .ctrl-panel{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start}
-.ctrl-video{flex:1;min-width:240px;text-align:center}
-.ctrl-video img{max-width:100%;image-rendering:pixelated;border:1px solid #334;border-radius:4px;background:#000;display:block;margin:0 auto}
+.ctrl-video{text-align:center}
+.ctrl-video canvas{image-rendering:pixelated;border:1px solid #334;border-radius:4px;background:#000;display:block;margin:0 auto}
 .ctrl-pad{flex:0 0 auto}
 .ctrl-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:.78em}
 .ctrl-toolbar label{color:#ccc}
 .ctrl-toolbar .tbtn{background:#2a3a5a;color:#8af;border:1px solid #446;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:.78em}
 .ctrl-toolbar .tbtn:hover{background:#3a4a6a}
 .ctrl-toolbar .tbtn.on{background:#2a5a2a;color:#afa;border-color:#4a6}
-/* Compact D-pad and buttons */
-.c-dpad{display:grid;grid-template:repeat(3,40px)/repeat(3,40px);gap:2px}
-.c-dpad .b{background:#2a2a4a;border:2px solid #444;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:1em;color:#aaa;transition:background 0.05s;-webkit-user-select:none;user-select:none}
+.ctrl-toolbar .tbtn.rec{background:#5a2a2a;color:#f88;border-color:#a44}
+/* ── GBA-style gamepad layout ── */
+.gba-shell{background:#1a1830;border:2px solid #2a2848;border-radius:12px;padding:10px 12px 14px;margin:8px auto 0;user-select:none;-webkit-user-select:none;touch-action:manipulation}
+/* Row: L / R */
+.gba-row{display:flex;justify-content:center;align-items:center;gap:10px}
+.gba-row.top{justify-content:space-between;margin-bottom:8px;padding:0 8px}
+.gba-row.mid{margin-bottom:8px}
+.gba-row.bot{margin-top:8px}
+.gba-sh .b{width:56px;height:26px;border-radius:4px 4px 8px 8px;background:#2a3a2a;border:2px solid #464;font-size:.72em;font-weight:bold;color:#afa;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background .05s}
+.gba-sh .b.active{background:#3a6a3a;border-color:#8f8;color:#fff}
+/* D-pad */
+.c-dpad{display:grid;grid-template:repeat(3,38px)/repeat(3,38px);gap:2px;flex-shrink:0}
+.c-dpad .b{background:#2a2a4a;border:2px solid #444;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:.9em;color:#aaa;transition:background .05s;cursor:pointer}
 .c-dpad .b.active{background:#4a4a8a;border-color:#88f;color:#fff}
 .c-dpad .e{visibility:hidden}
-.c-ab{display:flex;gap:8px;align-items:center}
-.c-ab .b{width:48px;height:48px;border-radius:50%;background:#4a2a2a;border:2px solid #644;font-size:1.1em;font-weight:bold;color:#faa;display:flex;align-items:center;justify-content:center;-webkit-user-select:none;user-select:none}
-.c-ab .b.active{background:#8a3a3a;border-color:#f88;color:#fff}
-.c-sh{display:flex;gap:30px;margin:4px 0}
-.c-sh .b{width:56px;height:28px;border-radius:6px 6px 3px 3px;background:#2a3a2a;border:2px solid #464;font-size:.75em;color:#afa;display:flex;align-items:center;justify-content:center;-webkit-user-select:none;user-select:none}
-.c-sh .b.active{background:#3a6a3a;border-color:#8f8;color:#fff}
-.c-meta{display:flex;gap:14px;margin:4px 0}
-.c-meta .b{width:50px;height:22px;border-radius:11px;background:#333;border:2px solid #555;font-size:.62em;color:#ccc;display:flex;align-items:center;justify-content:center;-webkit-user-select:none;user-select:none}
-.c-meta .b.active{background:#555;border-color:#aaa;color:#fff}
-.c-pad-wrap{display:flex;justify-content:space-between;align-items:center;gap:12px}
+/* A / B */
+.c-ab{display:flex;gap:10px;align-items:center;flex-shrink:0}
+.c-ab .b{width:46px;height:46px;border-radius:50%;background:#5a2040;border:2px solid #844;font-size:1.05em;font-weight:bold;color:#fcc;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background .05s}
+.c-ab .b.active{background:#a03050;border-color:#f88;color:#fff}
+/* Select / Start */
+.gba-meta .b{width:56px;height:22px;border-radius:11px;background:#333;border:2px solid #555;font-size:.62em;font-weight:bold;color:#bbb;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background .05s}
+.gba-meta .b.active{background:#555;border-color:#aaa;color:#fff}
+/* Screen — takes remaining space, bounded */
+.gba-screen{flex:1;min-width:0;text-align:center;padding:0 10px}
+.gba-screen canvas{image-rendering:pixelated;background:#000;border:2px solid #333;border-radius:4px;display:block;margin:0 auto;width:100%;max-width:480px;aspect-ratio:3/2}
 .ws-status{font-size:.72em;padding:2px 8px;border-radius:10px;background:#333;display:inline-block;margin-top:4px}
 .ws-status.ok{background:#1a4a1a;color:#6f6}
 .ws-status.err{background:#4a1a1a;color:#f66}
@@ -120,54 +130,49 @@ btn:hover{background:#3a4a6a}
 <!-- Gamepad + Video panel -->
 <div class="card full" id="ctrl_card">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-    <h2 style="margin:0">手柄 &amp; 画面</h2>
+    <h2 style="margin:0">实时推流</h2>
     <label class="toggle"><input type="checkbox" id="ctrl_enable"><span class="sl"></span></label>
   </div>
   <div id="ctrl_body" style="display:none">
     <div class="ctrl-toolbar">
+      <button class="tbtn" id="stream_btn" title="开始/停止推流">▶ 推流</button>
       <button class="tbtn" id="frame_once" title="抓取一帧">📷 截帧</button>
-      <button class="tbtn" id="frame_auto" title="自动刷新">▶ 自动刷新</button>
-      <label>间隔</label>
-      <select id="frame_interval" style="background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:2px 6px;font-size:.8em">
-        <option value="100">100ms</option>
-        <option value="200" selected>200ms</option>
-        <option value="500">500ms</option>
-        <option value="1000">1s</option>
-        <option value="2000">2s</option>
-      </select>
+      <button class="tbtn" id="rec_btn" title="录制">⏺ 录制</button>
+      <span style="color:#666;font-size:.72em" id="stream_info">未连接</span>
       <span class="ws-status" id="ws_status">WS: --</span>
     </div>
-    <div class="ctrl-panel">
-      <div class="ctrl-video">
-        <canvas id="frame_cvs" width="240" height="160" style="max-width:100%;image-rendering:pixelated;border:1px solid #334;border-radius:4px;background:#000;display:block;margin:0 auto"></canvas>
-        <div style="font-size:.7em;color:#666;margin-top:2px" id="frame_info">等待截帧...</div>
+    <div class="gba-shell" id="gba_shell">
+      <!-- L / R -->
+      <div class="gba-row top">
+        <div class="gba-sh"><div class="b" data-key="9" id="ck9">L</div></div>
+        <div class="gba-sh"><div class="b" data-key="8" id="ck8">R</div></div>
       </div>
-      <div class="ctrl-pad">
-        <div class="c-sh">
-          <div class="b" data-key="9" id="ck9">L</div>
-          <div class="b" data-key="8" id="ck8">R</div>
+      <!-- D-pad | Screen | A B -->
+      <div class="gba-row mid">
+        <div class="c-dpad">
+          <div class="e"></div>
+          <div class="b" data-key="6" id="ck6">▲</div>
+          <div class="e"></div>
+          <div class="b" data-key="5" id="ck5">◀</div>
+          <div class="e"></div>
+          <div class="b" data-key="4" id="ck4">▶</div>
+          <div class="e"></div>
+          <div class="b" data-key="7" id="ck7">▼</div>
+          <div class="e"></div>
         </div>
-        <div class="c-pad-wrap">
-          <div class="c-dpad">
-            <div class="e"></div>
-            <div class="b" data-key="6" id="ck6">▲</div>
-            <div class="e"></div>
-            <div class="b" data-key="5" id="ck5">◀</div>
-            <div class="e"></div>
-            <div class="b" data-key="4" id="ck4">▶</div>
-            <div class="e"></div>
-            <div class="b" data-key="7" id="ck7">▼</div>
-            <div class="e"></div>
-          </div>
-          <div class="c-ab">
-            <div class="b" data-key="1" id="ck1">B</div>
-            <div class="b" data-key="0" id="ck0">A</div>
-          </div>
+        <div class="gba-screen">
+          <canvas id="frame_cvs" width="240" height="160"></canvas>
+          <div style="font-size:.65em;color:#666;margin-top:2px" id="frame_info">等待推流...</div>
         </div>
-        <div class="c-meta">
-          <div class="b" data-key="2" id="ck2">SEL</div>
-          <div class="b" data-key="3" id="ck3">START</div>
+        <div class="c-ab">
+          <div class="b" data-key="1" id="ck1">B</div>
+          <div class="b" data-key="0" id="ck0">A</div>
         </div>
+      </div>
+      <!-- Select / Start -->
+      <div class="gba-row bot">
+        <div class="gba-meta"><div class="b" data-key="2" id="ck2">SELECT</div></div>
+        <div class="gba-meta"><div class="b" data-key="3" id="ck3">START</div></div>
       </div>
     </div>
   </div>
@@ -958,9 +963,8 @@ const CTRL_KEY_MAP = {
   'KeyA':'8','KeyS':'9','KeyJ':'0','KeyK':'1'
 };
 let ctrlWs = null, ctrlKeys = 0, ctrlPingTimer = null;
-let frameAutoTimer = null, frameAutoOn = false, frameBusy = false;
 
-/* Toggle panel */
+/* ── Toggle panel ── */
 $('ctrl_enable').addEventListener('change', function(){
   const body = $('ctrl_body');
   if (this.checked) {
@@ -969,10 +973,11 @@ $('ctrl_enable').addEventListener('change', function(){
   } else {
     body.style.display = 'none';
     ctrlWsDisconnect();
-    stopAutoFrame();
+    streamStop();
   }
 });
 
+/* ── Gamepad WS (input control) ── */
 function ctrlWsConnect(){
   if (ctrlWs) return;
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -991,7 +996,7 @@ function ctrlWsConnect(){
     if ($('ctrl_enable').checked) setTimeout(ctrlWsConnect, 2000);
   };
   ctrlWs.onerror = () => { if(ctrlWs) ctrlWs.close(); };
-  ctrlWs.onmessage = () => {}; /* ACKs ignored on console page */
+  ctrlWs.onmessage = () => {};
 }
 
 function ctrlWsDisconnect(){
@@ -1052,19 +1057,20 @@ document.addEventListener('keyup', e => {
   if (bit !== undefined){ e.preventDefault(); ctrlSetKey(parseInt(bit), false); }
 });
 
-/* Frame capture — handles both JPEG and raw RGB565 responses */
+/* ── Single frame capture (fallback / snapshot) ── */
 const frameCvs = $('frame_cvs');
 const frameCtx = frameCvs.getContext('2d');
 const frameImgData = frameCtx.createImageData(240, 160);
+let frameBusy = false;
 
 function renderRGB565(buf) {
   const src = new Uint16Array(buf);
   const dst = frameImgData.data;
   for (let i = 0, j = 0; i < src.length; i++, j += 4) {
     const px = src[i];
-    dst[j]     = (px >> 8) & 0xF8;  /* R */
-    dst[j + 1] = (px >> 3) & 0xFC;  /* G */
-    dst[j + 2] = (px << 3) & 0xF8;  /* B */
+    dst[j]     = (px >> 8) & 0xF8;
+    dst[j + 1] = (px >> 3) & 0xFC;
+    dst[j + 2] = (px << 3) & 0xF8;
     dst[j + 3] = 255;
   }
   frameCtx.putImageData(frameImgData, 0, 0);
@@ -1091,38 +1097,327 @@ async function captureFrame(){
     frameBusy = false;
   }
 }
-
 $('frame_once').addEventListener('click', captureFrame);
 
-$('frame_auto').addEventListener('click', function(){
-  if (frameAutoOn) { stopAutoFrame(); } else { startAutoFrame(); }
+/* ── H.264 Stream via WebSocket (WebCodecs / Broadway.js) ── */
+let streamWs = null;
+let videoDecoder = null;   /* WebCodecs VideoDecoder (secure ctx only) */
+let broadwayPlayer = null; /* Broadway.js fallback */
+let useBroadway = false;
+let audioCtx = null;
+let streamActive = false;
+let streamFrames = 0;
+let streamStartTime = 0;
+let streamVidMsgs = 0;
+let streamAudMsgs = 0;
+let streamDecErr = '';
+let streamAudioTime = 0;
+let streamAudioQueue = [];       /* buffered AudioBuffers before playback starts */
+let streamAudioPrimed = false;   /* true once initial buffer is drained */
+
+/* Recording state */
+let mediaRecorder = null;
+let recordChunks = [];
+
+const BROADWAY_CDN = 'https://cdn.jsdelivr.net/npm/broadway-player@0.1.1/Player';
+let broadwayLoaded = false;
+
+function loadScript(url) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = url;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('加载失败: ' + url));
+    document.head.appendChild(s);
+  });
+}
+
+async function initBroadway() {
+  if (!broadwayLoaded) {
+    await loadScript(BROADWAY_CDN + '/Decoder.js');
+    await loadScript(BROADWAY_CDN + '/YUVCanvas.js');
+    await loadScript(BROADWAY_CDN + '/Player.js');
+    broadwayLoaded = true;
+  }
+  broadwayPlayer = new Player({
+    useWorker: false,
+    webgl: 'auto',
+    size: { width: 240, height: 160 }
+  });
+  /* Copy decoded frames to our canvas (keeps recording working) */
+  broadwayPlayer.onRenderFrameComplete = function() {
+    frameCtx.drawImage(broadwayPlayer.canvas, 0, 0, 240, 160);
+  };
+}
+
+function streamStart() {
+  if (streamActive) return;
+  streamActive = true;
+  streamFrames = 0;
+  streamVidMsgs = 0;
+  streamAudMsgs = 0;
+  streamDecErr = '';
+  streamAudioTime = 0;
+  streamAudioQueue = [];
+  streamAudioPrimed = false;
+  useBroadway = false;
+  streamStartTime = performance.now();
+  $('stream_btn').textContent = '⏸ 停止';
+  $('stream_btn').classList.add('on');
+  $('stream_info').textContent = '连接中...';
+  $('frame_info').textContent = '初始化解码器...';
+
+  /* Init video decoder: prefer WebCodecs, fallback to Broadway.js */
+  if ('VideoDecoder' in window) {
+    videoDecoder = new VideoDecoder({
+      output: onVideoFrame,
+      error: e => {
+        console.error('VideoDecoder error:', e);
+        streamDecErr = '' + e;
+        $('frame_info').textContent = '解码器错误: ' + e.message;
+      },
+    });
+    videoDecoder.configure({
+      codec: 'avc3.42001e', /* Baseline profile, level 3.0, inline SPS/PPS */
+      codedWidth: 240,
+      codedHeight: 160,
+      optimizeForLatency: true,
+    });
+    $('frame_info').textContent = 'WebCodecs 就绪, 等待首帧...';
+  } else {
+    /* No WebCodecs — load Broadway.js from CDN */
+    $('frame_info').textContent = '加载 Broadway.js 解码器...';
+    initBroadway().then(() => {
+      useBroadway = true;
+      $('frame_info').textContent = 'Broadway 就绪, 等待首帧...';
+    }).catch(e => {
+      $('frame_info').textContent = 'Broadway 加载失败: ' + e.message;
+      console.error('Broadway init failed:', e);
+    });
+  }
+
+  /* Init AudioContext — use default rate (hardware native, usually 48000).
+   * createBuffer(65536) will let the browser resample automatically.
+   * This avoids clock drift from non-native sample rates. */
+  if (!audioCtx) {
+    audioCtx = new AudioContext();
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+
+  /* Connect to stream WS */
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  streamWs = new WebSocket(proto + '//' + location.host + '/ws/stream');
+  streamWs.binaryType = 'arraybuffer';
+  streamWs.onopen = () => {
+    $('stream_info').textContent = '推流中';
+  };
+  streamWs.onclose = () => {
+    $('stream_info').textContent = '已断开';
+    streamStop();
+  };
+  streamWs.onerror = () => {
+    if (streamWs) streamWs.close();
+  };
+  streamWs.onmessage = onStreamMessage;
+}
+
+function streamStop() {
+  streamActive = false;
+  $('stream_btn').textContent = '▶ 推流';
+  $('stream_btn').classList.remove('on');
+
+  if (streamWs) {
+    /* Send stop command */
+    try {
+      const stop = new Uint8Array([0x10]);
+      streamWs.send(stop.buffer);
+    } catch(e) {}
+    streamWs.onclose = null;
+    streamWs.close();
+    streamWs = null;
+  }
+
+  if (videoDecoder && videoDecoder.state !== 'closed') {
+    try { videoDecoder.close(); } catch(e) {}
+    videoDecoder = null;
+  }
+
+  if (broadwayPlayer) {
+    broadwayPlayer = null;
+    useBroadway = false;
+  }
+
+  /* Stop recording if active */
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+}
+
+function onStreamMessage(evt) {
+  const data = new Uint8Array(evt.data);
+  if (data.length < 2) return;
+
+  const msgType = data[0];
+
+  if (msgType === 0x01) {
+    /* Video: [0]=0x01 [1]=frame_type [2..5]=pts [6..]=NAL */
+    streamVidMsgs++;
+    const frameType = data[1]; /* 0=IDR, 2=P */
+    const nalData = data.slice(6);
+    const isKey = frameType <= 1;
+
+    if (videoDecoder && videoDecoder.state !== 'closed') {
+      /* ── WebCodecs path ── */
+      try {
+        const chunk = new EncodedVideoChunk({
+          type: isKey ? 'key' : 'delta',
+          timestamp: streamFrames * (1000000 / 30), /* µs */
+          data: nalData,
+        });
+        videoDecoder.decode(chunk);
+        streamFrames++;
+      } catch(e) {
+        console.warn('VideoDecoder decode error:', e);
+        $('frame_info').textContent = '解码异常: ' + e.message;
+      }
+    } else if (broadwayPlayer && useBroadway) {
+      /* ── Broadway.js path ── */
+      try {
+        broadwayPlayer.decode(nalData);
+        streamFrames++;
+      } catch(e) {
+        console.warn('Broadway decode error:', e);
+        $('frame_info').textContent = 'Broadway 解码异常: ' + e.message;
+      }
+    } else {
+      $('frame_info').textContent = '解码器初始化中...';
+      return;
+    }
+
+    /* Update info every 10 frames */
+    const elapsed = (performance.now() - streamStartTime) / 1000;
+    if (elapsed > 0 && (streamFrames % 10 === 0)) {
+      const fps = (streamFrames / elapsed).toFixed(1);
+      const kbps = ((nalData.length * 8 * 30) / 1000).toFixed(0);
+      $('stream_info').textContent = fps + ' fps | ' + kbps + ' kbps';
+    }
+    if (streamFrames % 10 === 0) {
+      $('frame_info').textContent = nalData.length + 'B ' + (isKey ? 'IDR' : 'P') +
+        (useBroadway ? ' [Broadway]' : ' [WebCodecs]');
+    }
+  } else if (msgType === 0x02 && audioCtx) {
+    /* Audio: [0]=0x02 [1]=pad [2..5]=pts [6..9]=sample_count [10..]=s16 stereo */
+    streamAudMsgs++;
+    if (data.length < 11) return;
+    const dv = new DataView(evt.data);
+    const sampleCount = dv.getUint32(6, true);
+    if (sampleCount === 0 || data.length < 10 + sampleCount * 4) return;
+
+    /* Convert s16 stereo to float32 AudioBuffer, schedule gaplessly */
+    const buf = audioCtx.createBuffer(2, sampleCount, 65536);
+    const chL = buf.getChannelData(0);
+    const chR = buf.getChannelData(1);
+    const pcm = new Int16Array(evt.data, 10, sampleCount * 2);
+    for (let i = 0; i < sampleCount; i++) {
+      chL[i] = pcm[i * 2]     / 32768.0;
+      chR[i] = pcm[i * 2 + 1] / 32768.0;
+    }
+
+    /* Buffer 3 chunks (~100ms at 30 audio/sec) before starting playback.
+     * This absorbs network jitter without adding excessive latency. */
+    if (!streamAudioPrimed) {
+      streamAudioQueue.push(buf);
+      if (streamAudioQueue.length < 3) return;
+      /* Prime: schedule all queued chunks starting from now */
+      streamAudioPrimed = true;
+      streamAudioTime = audioCtx.currentTime;
+      for (const qbuf of streamAudioQueue) {
+        const src = audioCtx.createBufferSource();
+        src.buffer = qbuf;
+        src.connect(audioCtx.destination);
+        src.start(streamAudioTime);
+        streamAudioTime += qbuf.length / 65536;
+      }
+      streamAudioQueue = [];
+      return;
+    }
+
+    /* Steady state: schedule at the exact next position on the
+     * audio timeline.  streamAudioTime advances at a fixed rate
+     * (sampleCount / 65536 per chunk) regardless of arrival jitter.
+     * WebAudio plays immediately if the scheduled time is in the past. */
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(audioCtx.destination);
+    src.start(streamAudioTime);
+    streamAudioTime += sampleCount / 65536;
+  }
+}
+
+function onVideoFrame(frame) {
+  /* Draw decoded video frame onto canvas */
+  frameCtx.drawImage(frame, 0, 0, 240, 160);
+  frame.close();
+}
+
+$('stream_btn').addEventListener('click', () => {
+  if (streamActive) streamStop(); else streamStart();
 });
 
-function startAutoFrame(){
-  frameAutoOn = true;
-  $('frame_auto').textContent = '⏸ 停止刷新';
-  $('frame_auto').classList.add('on');
-  scheduleAutoFrame();
-}
+/* ── Recording via MediaRecorder (canvas capture) ── */
+$('rec_btn').addEventListener('click', function() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    return;
+  }
 
-function stopAutoFrame(){
-  frameAutoOn = false;
-  clearTimeout(frameAutoTimer);
-  $('frame_auto').textContent = '▶ 自动刷新';
-  $('frame_auto').classList.remove('on');
-}
+  /* Capture canvas as media stream */
+  const stream = frameCvs.captureStream(30);
 
-function scheduleAutoFrame(){
-  if (!frameAutoOn) return;
-  const interval = parseInt($('frame_interval').value) || 200;
-  frameAutoTimer = setTimeout(async () => {
-    await captureFrame();
-    scheduleAutoFrame();
-  }, interval);
-}
+  /* Add audio if available */
+  if (audioCtx && audioCtx.state === 'running') {
+    try {
+      const dest = audioCtx.createMediaStreamDestination();
+      /* We can't easily tap into existing audio nodes retroactively,
+       * so recording will capture video only for now.
+       * Audio recording would require restructuring the audio graph. */
+    } catch(e) {}
+  }
 
-$('frame_interval').addEventListener('change', function(){
-  if (frameAutoOn) { clearTimeout(frameAutoTimer); scheduleAutoFrame(); }
+  const opts = { mimeType: 'video/webm;codecs=vp9' };
+  if (!MediaRecorder.isTypeSupported(opts.mimeType)) {
+    opts.mimeType = 'video/webm';
+  }
+
+  recordChunks = [];
+  try {
+    mediaRecorder = new MediaRecorder(stream, opts);
+  } catch(e) {
+    $('frame_info').textContent = '录制不可用';
+    return;
+  }
+
+  mediaRecorder.ondataavailable = e => {
+    if (e.data.size > 0) recordChunks.push(e.data);
+  };
+  mediaRecorder.onstop = () => {
+    $('rec_btn').textContent = '⏺ 录制';
+    $('rec_btn').classList.remove('rec');
+    /* Download the recorded file */
+    const blob = new Blob(recordChunks, { type: opts.mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'gpsp_' + new Date().toISOString().slice(0,19).replace(/[:-]/g,'') + '.webm';
+    a.click();
+    URL.revokeObjectURL(url);
+    recordChunks = [];
+    mediaRecorder = null;
+  };
+
+  mediaRecorder.start(1000); /* 1s timeslice */
+  $('rec_btn').textContent = '⏹ 停止录制';
+  $('rec_btn').classList.add('rec');
 });
 
 })();

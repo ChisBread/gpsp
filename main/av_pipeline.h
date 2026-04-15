@@ -39,6 +39,25 @@ void av_pipeline_audio_buffered(uint32_t *out_queued, uint32_t *out_total);
  */
 esp_err_t av_pipeline_snapshot_frame(uint8_t *dst, size_t dst_size);
 
+/**
+ * Start tee-ing collected audio into a StreamBuffer for the streaming task.
+ * Call once when streaming starts. Does nothing if already enabled.
+ */
+esp_err_t av_pipeline_stream_audio_start(void);
+
+/**
+ * Stop tee-ing audio to the stream buffer and free resources.
+ */
+void av_pipeline_stream_audio_stop(void);
+
+/**
+ * Read accumulated audio from the stream tee (non-blocking).
+ * @param out       Output buffer for s16 interleaved stereo samples
+ * @param max_bytes Maximum bytes to read
+ * @return          Actual bytes read (0 if nothing available)
+ */
+size_t av_pipeline_stream_audio_read(int16_t *out, size_t max_bytes);
+
 #ifdef __cplusplus
 }
 #endif
