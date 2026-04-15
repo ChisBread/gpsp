@@ -66,10 +66,10 @@ static SemaphoreHandle_t s_frame_mutex;
 
 /* ---- H.264 live streaming state ---- */
 #define STREAM_FPS          30    /* target stream FPS (every other GBA frame) */
-#define STREAM_BITRATE      256000
+#define STREAM_BITRATE      512000
 #define STREAM_GOP          30
-#define STREAM_QP_MIN       20
-#define STREAM_QP_MAX       40
+#define STREAM_QP_MIN       18
+#define STREAM_QP_MAX       36
 #define STREAM_AUDIO_SAMPLES_MAX  4400  /* drain buffer may hold up to ~4 GBA frames */
 #define STREAM_YUV_SIZE     (GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * 3 / 2)  /* 57600 */
 
@@ -928,16 +928,22 @@ static esp_err_t ws_stream_handler(httpd_req_t *req)
         int fd = httpd_req_to_sockfd(req);
         ESP_LOGI(TAG, "Stream WS client connected, fd=%d", fd);
 
-        /* Only one streaming client at a time */
+        /* Tear down any previous session (active task or leftover buffers) */
         if (s_stream.active) {
-            ESP_LOGW(TAG, "Rejecting stream client — already streaming");
-            return ESP_OK;
+            s_stream.ws_fd = -1;
+            s_stream.active = false;
+            vTaskDelay(pdMS_TO_TICKS(50));
+            stream_reap_task();
+        } else {
+            stream_reap_task();
+            /* Free leftover buffers from a connect that never got 0x20 */
+            stream_free_buffers();
         }
 
-        /* Reap previous task if it finished (frees WithCaps stack) */
-        stream_reap_task();
-
-        /* Allocate buffers (freed each session) and ensure encoder (persistent) */
+        /* Allocate buffers and ensure encoder are ready, but do NOT
+         * start the streaming task yet.  The client must send 0x20
+         * (reset) after its decoder is initialised; only then do we
+         * reset the encoder (→ IDR) and launch the task. */
         if (!stream_alloc_buffers()) {
             return ESP_OK;
         }
@@ -945,17 +951,74 @@ static esp_err_t ws_stream_handler(httpd_req_t *req)
             stream_free_buffers();
             return ESP_OK;
         }
-        /* Reset encoder state so the first frame is IDR (key frame).
-         * close+open only touches interrupt/semaphore — no alloc leak. */
+
+        s_stream.ws_fd = fd;
+        /* active stays false until reset command arrives */
+        return ESP_OK;
+    }
+
+    /* Handle incoming WS messages (e.g. client disconnect detection) */
+    httpd_ws_frame_t ws_pkt = {0};
+    uint8_t buf[8];
+    ws_pkt.payload = buf;
+    ws_pkt.type = HTTPD_WS_TYPE_BINARY;
+
+    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, sizeof(buf));
+    if (ret != ESP_OK) {
+        int fd = httpd_req_to_sockfd(req);
+        ESP_LOGI(TAG, "Stream WS recv failed on fd=%d", fd);
+        /* Only tear down if this fd is still the active stream fd.
+         * A newer connection may have already replaced us. */
+        if (s_stream.ws_fd == fd) {
+            bool was_active = s_stream.active;
+            s_stream.ws_fd = -1;
+            s_stream.active = false;
+            if (was_active) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+                stream_reap_task();
+            } else {
+                stream_free_buffers();
+            }
+        }
+        return ESP_FAIL;
+    }
+
+    /* 0x10 = stop streaming command from client */
+    if (ws_pkt.len >= 1 && buf[0] == 0x10) {
+        int fd = httpd_req_to_sockfd(req);
+        if (s_stream.ws_fd == fd) {
+            ESP_LOGI(TAG, "Stream stop requested by client");
+            s_stream.ws_fd = -1;
+            s_stream.active = false;
+            vTaskDelay(pdMS_TO_TICKS(50));
+            stream_reap_task();
+        }
+    }
+
+    /* 0x20 = reset/start command from client (decoder ready) */
+    if (ws_pkt.len >= 1 && buf[0] == 0x20) {
+        int fd = httpd_req_to_sockfd(req);
+        if (s_stream.ws_fd != fd) {
+            ESP_LOGW(TAG, "Ignoring reset from stale fd=%d (current=%d)", fd, s_stream.ws_fd);
+            return ESP_OK;
+        }
+        ESP_LOGI(TAG, "Stream reset requested by client");
+
+        /* If already streaming, tear down the old task first */
+        if (s_stream.active) {
+            s_stream.active = false;
+            vTaskDelay(pdMS_TO_TICKS(50));
+            stream_reap_task();
+        }
+
+        /* Reset encoder → first frame will be IDR */
         esp_h264_enc_close(s_stream.enc);
         if (esp_h264_enc_open(s_stream.enc) != ESP_H264_ERR_OK) {
             ESP_LOGE(TAG, "H264 encoder reopen failed");
-            stream_free_buffers();
             return ESP_OK;
         }
         av_pipeline_stream_audio_start();
 
-        s_stream.ws_fd = fd;
         s_stream.active = true;
         s_stream.frame_count = 0;
 
@@ -971,37 +1034,8 @@ static esp_err_t ws_stream_handler(httpd_req_t *req)
         if (ret != pdPASS) {
             ESP_LOGE(TAG, "Stream task creation failed");
             av_pipeline_stream_audio_stop();
-            stream_free_buffers();
             s_stream.active = false;
-            s_stream.ws_fd = -1;
         }
-        return ESP_OK;
-    }
-
-    /* Handle incoming WS messages (e.g. client disconnect detection) */
-    httpd_ws_frame_t ws_pkt = {0};
-    uint8_t buf[8];
-    ws_pkt.payload = buf;
-    ws_pkt.type = HTTPD_WS_TYPE_BINARY;
-
-    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, sizeof(buf));
-    if (ret != ESP_OK) {
-        /* Client disconnected — return error so httpd closes the socket */
-        ESP_LOGI(TAG, "Stream WS client disconnected");
-        s_stream.ws_fd = -1;
-        s_stream.active = false;
-        vTaskDelay(pdMS_TO_TICKS(50));
-        stream_reap_task();
-        return ESP_FAIL;
-    }
-
-    /* 0x10 = stop streaming command from client */
-    if (ws_pkt.len >= 1 && buf[0] == 0x10) {
-        ESP_LOGI(TAG, "Stream stop requested by client");
-        s_stream.ws_fd = -1;
-        s_stream.active = false;
-        vTaskDelay(pdMS_TO_TICKS(50));
-        stream_reap_task();
     }
 
     return ESP_OK;

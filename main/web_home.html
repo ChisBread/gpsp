@@ -1045,16 +1045,21 @@ document.querySelectorAll('#ctrl_card [data-key]').forEach(el => {
   el.addEventListener('mouseleave', e => { ctrlSetKey(bit, false); });
 });
 
-/* Keyboard */
-document.addEventListener('keydown', e => {
+/* Keyboard — only active when ctrl_card has focus (click/tab into it) */
+const ctrlCard = $('ctrl_card');
+ctrlCard.setAttribute('tabindex', '0');
+ctrlCard.addEventListener('keydown', e => {
   if (!$('ctrl_enable').checked || e.repeat) return;
   const bit = CTRL_KEY_MAP[e.code];
   if (bit !== undefined){ e.preventDefault(); ctrlSetKey(parseInt(bit), true); }
+  /* Prevent arrow keys / space from scrolling */
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
 });
-document.addEventListener('keyup', e => {
+ctrlCard.addEventListener('keyup', e => {
   if (!$('ctrl_enable').checked) return;
   const bit = CTRL_KEY_MAP[e.code];
   if (bit !== undefined){ e.preventDefault(); ctrlSetKey(parseInt(bit), false); }
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
 });
 
 /* ── Single frame capture (fallback / snapshot) ── */
@@ -1144,7 +1149,6 @@ async function initBroadway() {
     webgl: 'auto',
     size: { width: 240, height: 160 }
   });
-  /* Copy decoded frames to our canvas (keeps recording working) */
   broadwayPlayer.onRenderFrameComplete = function() {
     frameCtx.drawImage(broadwayPlayer.canvas, 0, 0, 240, 160);
   };
@@ -1167,35 +1171,6 @@ function streamStart() {
   $('stream_info').textContent = '连接中...';
   $('frame_info').textContent = '初始化解码器...';
 
-  /* Init video decoder: prefer WebCodecs, fallback to Broadway.js */
-  if ('VideoDecoder' in window) {
-    videoDecoder = new VideoDecoder({
-      output: onVideoFrame,
-      error: e => {
-        console.error('VideoDecoder error:', e);
-        streamDecErr = '' + e;
-        $('frame_info').textContent = '解码器错误: ' + e.message;
-      },
-    });
-    videoDecoder.configure({
-      codec: 'avc3.42001e', /* Baseline profile, level 3.0, inline SPS/PPS */
-      codedWidth: 240,
-      codedHeight: 160,
-      optimizeForLatency: true,
-    });
-    $('frame_info').textContent = 'WebCodecs 就绪, 等待首帧...';
-  } else {
-    /* No WebCodecs — load Broadway.js from CDN */
-    $('frame_info').textContent = '加载 Broadway.js 解码器...';
-    initBroadway().then(() => {
-      useBroadway = true;
-      $('frame_info').textContent = 'Broadway 就绪, 等待首帧...';
-    }).catch(e => {
-      $('frame_info').textContent = 'Broadway 加载失败: ' + e.message;
-      console.error('Broadway init failed:', e);
-    });
-  }
-
   /* Init AudioContext at GBA's native 65536 Hz.  This matches the
    * createBuffer sample rate exactly — zero resampling in WebAudio.
    * OS audio stack handles the final 65536→hardware rate conversion. */
@@ -1204,12 +1179,53 @@ function streamStart() {
   }
   if (audioCtx.state === 'suspended') audioCtx.resume();
 
-  /* Connect to stream WS */
+  /* Connect to stream WS first, then init decoder, then send reset.
+   * This guarantees the backend receives 0x20 only after the frontend
+   * decoder is fully ready to consume the first IDR frame. */
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   streamWs = new WebSocket(proto + '//' + location.host + '/ws/stream');
   streamWs.binaryType = 'arraybuffer';
-  streamWs.onopen = () => {
-    $('stream_info').textContent = '推流中';
+  streamWs.onopen = async () => {
+    $('stream_info').textContent = '初始化解码器...';
+
+    /* Init video decoder */
+    let decoderOk = false;
+    if ('VideoDecoder' in window) {
+      videoDecoder = new VideoDecoder({
+        output: onVideoFrame,
+        error: e => {
+          console.error('VideoDecoder error:', e);
+          streamDecErr = '' + e;
+          $('frame_info').textContent = '解码器错误: ' + e.message;
+        },
+      });
+      videoDecoder.configure({
+        codec: 'avc3.42001e',
+        codedWidth: 240,
+        codedHeight: 160,
+        optimizeForLatency: true,
+      });
+      decoderOk = true;
+      $('frame_info').textContent = 'WebCodecs 就绪';
+    } else {
+      $('frame_info').textContent = '加载 Broadway.js 解码器...';
+      try {
+        await initBroadway();
+        useBroadway = true;
+        decoderOk = true;
+        $('frame_info').textContent = 'Broadway 就绪';
+      } catch(e) {
+        $('frame_info').textContent = 'Broadway 加载失败: ' + e.message;
+        console.error('Broadway init failed:', e);
+      }
+    }
+
+    if (decoderOk && streamWs && streamWs.readyState === 1) {
+      /* Send reset command (0x20) — backend will reset encoder
+       * to produce IDR as first frame and start streaming task */
+      streamWs.send(new Uint8Array([0x20]).buffer);
+      $('stream_info').textContent = '推流中';
+    }
   };
   streamWs.onclose = () => {
     $('stream_info').textContent = '已断开';
@@ -1360,7 +1376,6 @@ function onStreamMessage(evt) {
 }
 
 function onVideoFrame(frame) {
-  /* Draw decoded video frame onto canvas */
   frameCtx.drawImage(frame, 0, 0, 240, 160);
   frame.close();
 }
