@@ -18,8 +18,8 @@
 
 static const char *TAG = "gpsp_audio";
 
-#define AUDIO_DMA_DESC_NUM  8
-#define AUDIO_DMA_FRAME_NUM 1008
+#define AUDIO_DMA_DESC_NUM  4
+#define AUDIO_DMA_FRAME_NUM 804
 #define AUDIO_MCLK_MULTIPLE 256
 
 /* Fixed-ratio resampler: source (65536 Hz) → output (e.g. 64000 Hz).

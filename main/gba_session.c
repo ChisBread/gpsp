@@ -1268,7 +1268,7 @@ void gba_emulation_task(void *param)
                 av_pipeline_audio_buffered(&dma_queued, &dma_total);
                 /* Skip when DMA has at most 1 descriptor of audio left;
                  * if audio is disabled, never skip based on DMA. */
-                bool audio_low = av_pipeline_audio_enabled() && (dma_queued <= 1);
+                bool audio_low = av_pipeline_audio_enabled() && (dma_queued <= 3);
                 skip_next_frame = audio_low ? 1 : 0;
 
                 if (!skip_next_frame ||
