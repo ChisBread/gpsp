@@ -903,37 +903,13 @@ pfe |= (ovf_rb - (ovf_rb >> 5)) | (ovf_g - (ovf_g >> 6));
 
 ---
 
-### OPT-DFE: ARM 死标志位消除 (Dead Flag Elimination)
+### ~~OPT-DFE: ARM 死标志位消除 (Dead Flag Elimination)~~ [已回退]
 
-**变更**: 实现 ARM 模式的 dead flag analysis，与 Thumb 模式对齐。之前 `arm_dead_flag_eliminate()` 是空操作（`flag_status = 0xF`，所有标志位始终活跃），导致每条 ARM S-bit 指令都生成全部 4 个标志位（N/Z/C/V）的 RISC-V 代码，即使后续无指令使用。
+**变更**: 实现 ARM 模式的 dead flag analysis，与 Thumb 模式对齐。
 
-**原理**:
-1. 新增 `arm_flag_status()` 宏：根据 ARM 指令类型（数据处理、乘法、分支、LDM/LDR 等）设置 flag_data 的 should-generate / must-generate / requires 位
-2. 将 `arm_dead_flag_eliminate()` 从 `flag_status = 0xF` 改为与 Thumb 相同的反向活跃度分析算法
-3. `translate_arm_instruction()` 开头读取 `block_data[].flag_data` 到 `flag_status`
-4. 已有的 `check_generate_n_flag` / `check_generate_z_flag` 等宏自动跳过死标志位代码生成
+**回退原因**: Golden Sun 在 `0x8021e50` 处产生 bad jump (`0xc0022780`)。ARM 指令集编码复杂（半字加载、SWP、乘法长指令等在 iclass 0 中与数据处理共享编码空间），`arm_flag_status()` 的分类逻辑存在遗漏，导致 DFE 错误地消除了被后续指令依赖的标志位计算。修复半字加载/SWP 编码后仍未解决。在缺乏全面 ARM 指令覆盖测试的情况下，回退至原始安全的 `flag_status = 0xF`（所有标志位始终活跃）。
 
-**flag_data 编码** (12-bit，与 Thumb 共用格式):
-- bits 3:0 — should-generate mask (仅在后续需要时实际生成)
-- bits 7:4 — must-generate mask (指令必定修改的标志位)
-- bits 11:8 — requires mask (指令执行所需的标志位，如 ADC 需要 C)
-
-**覆盖的指令类别**:
-- 数据处理 S=1: 算术(ADD/SUB/RSB/ADC/SBC/RSC/CMP/CMN) → 修改 NZCV；逻辑(AND/EOR/TST/TEQ/ORR/MOV/BIC/MVN) → 修改 NZ + 可能修改 C
-- 乘法 S=1: 修改 NZ
-- 分支 B/BL、SWI、写 PC 的 LDR/LDM: requires all flags
-- MSR/MRS/BX (非 S 的 opcode 8-11): requires all (保守)
-- ADC/SBC/RSC: 额外 requires C
-
-**文件**: `cpu_threaded.c`
-**MD5**: `19cbcf89e2f1b62cc880570e4f4c90e4` ✅ 一致 (game.gba, game2.gba, game3.gba 三款 ROM 全部验证通过)
-
-| 指标 | OPT-GEN (5次) | OPT-DFE (5次) | 变化 |
-|------|---------------|---------------|------|
-| Total (median) | ~3.70 s | ~3.56 s | -3.8% |
-| 5次测量 | 3.697, 3.778, 3.896, 3.673, 3.663 | 3.660, 3.522, 3.592, 3.559, 3.539 | — |
-
-**结论**: QEMU 上 -3.8% 改善（ARM 块的生成代码更紧凑）。真实 ESP32-P4 上收益更大：更少的 flag 计算指令 → 更小的 JIT code footprint → 更少的 I-cache miss → 更快执行。尤其对 ARM 模式为主的 ROM（如 game3.gba）效果显著。保留。
+**教训**: ARM DFE 需要对全部 ARM 编码空间（包括 iclass 0 的特殊编码、协处理器、未定义指令等）逐一验证，不能只覆盖常见指令。建议后续用 fuzzing 或指令级对比测试验证。
 
 ---
 
@@ -963,7 +939,9 @@ pfe |= (ovf_rb - (ovf_rb >> 5)) | (ovf_g - (ovf_g >> 6));
 | PPU-1～PPU-3 | ~4.21 s | -54.3% |
 | OPT-P (trampoline重定位) | ~4.30 s | QEMU噪声 |
 | OPT-GEN (generation counter) | ~3.70 s | -59.9% |
-| OPT-DFE (ARM dead flag elim) | ~3.56 s | -61.4% |
-| OPT-DEDUP (hash Path B dedup) | ~3.56 s | -61.4% |
+| ~~OPT-DFE (ARM dead flag elim)~~ | ~~~3.56 s~~ | ~~-61.4%~~ **已回退** |
+| OPT-DEDUP (hash Path B dedup) | ~3.70 s | -59.9% |
 
-**最终**: 9.219s → 3.56s = **-61.4% 总改善** (2.59x 加速)
+**最终**: 9.219s → 3.70s = **-59.9% 总改善** (2.49x 加速)
+
+> 注: OPT-DFE 因 Golden Sun 崩溃已回退，OPT-DEDUP 在 QEMU 上无可见收益（无 flush 触发），实际 ESP32-P4 上可能有改善。
