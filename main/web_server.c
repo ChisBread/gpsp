@@ -38,7 +38,9 @@
 #include <esp_http_server.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 
+#include "av_pipeline.h"
 #include "common.h"
 #include "cpu.h"
 #include "main.h"
@@ -52,6 +54,9 @@ static volatile uint16_t s_web_keys_held;     /* last WS state */
 static volatile uint16_t s_web_keys_pressed;  /* OR-accumulated presses since last emu read */
 static volatile int64_t  s_last_recv_us;      /* timestamp of last WS recv */
 static volatile int64_t  s_last_emu_read_us;  /* timestamp of last emu read */
+
+/* ---- frame capture mutex (serialises /api/frame requests) ---- */
+static SemaphoreHandle_t s_frame_mutex;
 
 /* ---- embedded HTML ---- */
 extern const char web_home_html_start[] asm("_binary_web_home_html_start");
@@ -533,6 +538,53 @@ static esp_err_t states_download_handler(httpd_req_t *req)
     return send_err;
 }
 
+/* ---- GET /api/frame → GBA screen capture (raw RGB565) ---- */
+
+#define FRAME_RAW_SIZE  (GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * 2)  /* 76800 bytes */
+
+static esp_err_t frame_get_handler(httpd_req_t *req)
+{
+    if (!s_frame_mutex) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "not ready");
+        return ESP_FAIL;
+    }
+    if (xSemaphoreTake(s_frame_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "busy");
+        return ESP_FAIL;
+    }
+
+    /* Allocate PSRAM copy buffer (64-byte aligned for cache ops). */
+    uint8_t *fb_copy = heap_caps_aligned_alloc(64, FRAME_RAW_SIZE,
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!fb_copy) {
+        xSemaphoreGive(s_frame_mutex);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_FAIL;
+    }
+
+    /* Block until the AV task copies a completed frame into fb_copy. */
+    esp_err_t snap = av_pipeline_snapshot_frame(fb_copy, FRAME_RAW_SIZE);
+    if (snap != ESP_OK) {
+        free(fb_copy);
+        xSemaphoreGive(s_frame_mutex);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no frame");
+        return ESP_FAIL;
+    }
+
+    /* Send raw RGB565 with metadata headers. */
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Frame-Format", "rgb565");
+    httpd_resp_set_hdr(req, "X-Frame-Width", "240");
+    httpd_resp_set_hdr(req, "X-Frame-Height", "160");
+    esp_err_t ret = httpd_resp_send(req, (const char *)fb_copy, FRAME_RAW_SIZE);
+
+    free(fb_copy);
+    xSemaphoreGive(s_frame_mutex);
+    return ret;
+}
+
 /* ---- POST /api/states/delete → delete a state file ---- */
 static esp_err_t states_delete_handler(httpd_req_t *req)
 {
@@ -590,8 +642,13 @@ esp_err_t web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 16;
+    config.max_uri_handlers = 20;
     config.stack_size = 8192;
+
+    /* Init frame capture mutex once */
+    if (!s_frame_mutex) {
+        s_frame_mutex = xSemaphoreCreateMutex();
+    }
 
     esp_err_t ret = httpd_start(&s_server, &config);
     if (ret != ESP_OK) {
@@ -703,6 +760,14 @@ esp_err_t web_server_start(void)
         .handler = states_delete_handler,
     };
     httpd_register_uri_handler(s_server, &states_delete_uri);
+
+    /* Frame capture */
+    const httpd_uri_t frame_get_uri = {
+        .uri = "/api/frame",
+        .method = HTTP_GET,
+        .handler = frame_get_handler,
+    };
+    httpd_register_uri_handler(s_server, &frame_get_uri);
 
     ESP_LOGI(TAG, "Web server started on port %d", config.server_port);
     return ESP_OK;

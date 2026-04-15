@@ -73,6 +73,15 @@ static volatile const u16 *av_pending_fb;      /* framebuffer for PPA */
 static volatile bool av_pending_skip_video;
 static bool av_frame_pending;
 
+/* Frame snapshot: web server arms a request (sets s_snap_dst) and
+ * blocks on s_snap_sem.  The copy executes in the AV task after VSYNC,
+ * on the SERVICE core — same core that later sends via HTTP.
+ * This avoids cross-core L1 DCache coherency issues.
+ * Cost: ~300 µs memcpy per request, only when web is watching. */
+static volatile uint8_t *s_snap_dst;
+static volatile size_t   s_snap_size;
+static SemaphoreHandle_t s_snap_sem;
+
 static uint32_t collect_audio_frame(int16_t *audio_buf, size_t audio_buf_frames)
 {
     uint32_t frames_to_read;
@@ -153,6 +162,16 @@ static void av_output_task(void *arg)
             }
         }
 
+
+        /* Snapshot: copy the display buffer for the web server.
+         * This avoids cross-core L1 DCache coherency issues.
+         * Cost: ~300 µs memcpy per request, only when web is watching. */
+        if (s_snap_dst) {
+            memcpy((void *)s_snap_dst, (const void *)av_pending_fb, s_snap_size);
+            s_snap_dst = NULL;
+            xSemaphoreGive(s_snap_sem);
+        }
+        
         /* 5-6. Await PPA + VSYNC.  PPA is almost certainly finished
          * by now, so this is mainly the VSYNC wait. */
         if (!skip_video) {
@@ -177,6 +196,11 @@ esp_err_t av_pipeline_init(const av_pipeline_config_t *config)
     av_frame_pending = false;
     av_caller_task = NULL;
     av_task_handle = NULL;
+
+    s_snap_dst = NULL;
+    if (!s_snap_sem) {
+        s_snap_sem = xSemaphoreCreateBinary();
+    }
     /* Create the unified AV output task on the service core. */
     {
         BaseType_t core = (CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0;
@@ -248,6 +272,25 @@ esp_err_t av_pipeline_submit_frame(bool skip_video)
 bool av_pipeline_audio_enabled(void)
 {
     return audio_enabled;
+}
+
+esp_err_t av_pipeline_snapshot_frame(uint8_t *dst, size_t dst_size)
+{
+    if (!dst || dst_size == 0 || !s_snap_sem) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    size_t frame_bytes = GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * 2;
+    s_snap_size = (dst_size < frame_bytes) ? dst_size : frame_bytes;
+    __sync_synchronize();          /* size visible before arming */
+    s_snap_dst = dst;              /* arm — submit_frame checks this */
+
+    /* Block until submit_frame() copies the next completed frame. */
+    if (xSemaphoreTake(s_snap_sem, pdMS_TO_TICKS(100)) != pdTRUE) {
+        s_snap_dst = NULL;         /* cancel stale request */
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
 }
 
 void av_pipeline_audio_buffered(uint32_t *out_queued, uint32_t *out_total)

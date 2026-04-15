@@ -82,16 +82,96 @@ btn:hover{background:#3a4a6a}
 [data-tip]:hover::before{content:'';position:absolute;left:12px;bottom:calc(100% + 2px);border:4px solid transparent;border-top-color:#446;z-index:101;pointer-events:none}
 .cnt-grid [data-tip]:hover::after{bottom:auto;top:calc(100% + 6px)}
 .cnt-grid [data-tip]:hover::before{bottom:auto;top:calc(100% + 2px);border-top-color:transparent;border-bottom-color:#446}
+/* Gamepad + Video panel */
+.ctrl-panel{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start}
+.ctrl-video{flex:1;min-width:240px;text-align:center}
+.ctrl-video img{max-width:100%;image-rendering:pixelated;border:1px solid #334;border-radius:4px;background:#000;display:block;margin:0 auto}
+.ctrl-pad{flex:0 0 auto}
+.ctrl-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:.78em}
+.ctrl-toolbar label{color:#ccc}
+.ctrl-toolbar .tbtn{background:#2a3a5a;color:#8af;border:1px solid #446;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:.78em}
+.ctrl-toolbar .tbtn:hover{background:#3a4a6a}
+.ctrl-toolbar .tbtn.on{background:#2a5a2a;color:#afa;border-color:#4a6}
+/* Compact D-pad and buttons */
+.c-dpad{display:grid;grid-template:repeat(3,40px)/repeat(3,40px);gap:2px}
+.c-dpad .b{background:#2a2a4a;border:2px solid #444;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:1em;color:#aaa;transition:background 0.05s;-webkit-user-select:none;user-select:none}
+.c-dpad .b.active{background:#4a4a8a;border-color:#88f;color:#fff}
+.c-dpad .e{visibility:hidden}
+.c-ab{display:flex;gap:8px;align-items:center}
+.c-ab .b{width:48px;height:48px;border-radius:50%;background:#4a2a2a;border:2px solid #644;font-size:1.1em;font-weight:bold;color:#faa;display:flex;align-items:center;justify-content:center;-webkit-user-select:none;user-select:none}
+.c-ab .b.active{background:#8a3a3a;border-color:#f88;color:#fff}
+.c-sh{display:flex;gap:30px;margin:4px 0}
+.c-sh .b{width:56px;height:28px;border-radius:6px 6px 3px 3px;background:#2a3a2a;border:2px solid #464;font-size:.75em;color:#afa;display:flex;align-items:center;justify-content:center;-webkit-user-select:none;user-select:none}
+.c-sh .b.active{background:#3a6a3a;border-color:#8f8;color:#fff}
+.c-meta{display:flex;gap:14px;margin:4px 0}
+.c-meta .b{width:50px;height:22px;border-radius:11px;background:#333;border:2px solid #555;font-size:.62em;color:#ccc;display:flex;align-items:center;justify-content:center;-webkit-user-select:none;user-select:none}
+.c-meta .b.active{background:#555;border-color:#aaa;color:#fff}
+.c-pad-wrap{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.ws-status{font-size:.72em;padding:2px 8px;border-radius:10px;background:#333;display:inline-block;margin-top:4px}
+.ws-status.ok{background:#1a4a1a;color:#6f6}
+.ws-status.err{background:#4a1a1a;color:#f66}
 </style>
 </head>
 <body>
 <h1>gpsp Console</h1>
-<nav>
-  <a href="/" class="active">主页</a>
-  <a href="/input">手柄</a>
-</nav>
 
 <div class="grid">
+
+<!-- Gamepad + Video panel -->
+<div class="card full" id="ctrl_card">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <h2 style="margin:0">手柄 &amp; 画面</h2>
+    <label class="toggle"><input type="checkbox" id="ctrl_enable"><span class="sl"></span></label>
+  </div>
+  <div id="ctrl_body" style="display:none">
+    <div class="ctrl-toolbar">
+      <button class="tbtn" id="frame_once" title="抓取一帧">📷 截帧</button>
+      <button class="tbtn" id="frame_auto" title="自动刷新">▶ 自动刷新</button>
+      <label>间隔</label>
+      <select id="frame_interval" style="background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:2px 6px;font-size:.8em">
+        <option value="100">100ms</option>
+        <option value="200" selected>200ms</option>
+        <option value="500">500ms</option>
+        <option value="1000">1s</option>
+        <option value="2000">2s</option>
+      </select>
+      <span class="ws-status" id="ws_status">WS: --</span>
+    </div>
+    <div class="ctrl-panel">
+      <div class="ctrl-video">
+        <canvas id="frame_cvs" width="240" height="160" style="max-width:100%;image-rendering:pixelated;border:1px solid #334;border-radius:4px;background:#000;display:block;margin:0 auto"></canvas>
+        <div style="font-size:.7em;color:#666;margin-top:2px" id="frame_info">等待截帧...</div>
+      </div>
+      <div class="ctrl-pad">
+        <div class="c-sh">
+          <div class="b" data-key="9" id="ck9">L</div>
+          <div class="b" data-key="8" id="ck8">R</div>
+        </div>
+        <div class="c-pad-wrap">
+          <div class="c-dpad">
+            <div class="e"></div>
+            <div class="b" data-key="6" id="ck6">▲</div>
+            <div class="e"></div>
+            <div class="b" data-key="5" id="ck5">◀</div>
+            <div class="e"></div>
+            <div class="b" data-key="4" id="ck4">▶</div>
+            <div class="e"></div>
+            <div class="b" data-key="7" id="ck7">▼</div>
+            <div class="e"></div>
+          </div>
+          <div class="c-ab">
+            <div class="b" data-key="1" id="ck1">B</div>
+            <div class="b" data-key="0" id="ck0">A</div>
+          </div>
+        </div>
+        <div class="c-meta">
+          <div class="b" data-key="2" id="ck2">SEL</div>
+          <div class="b" data-key="3" id="ck3">START</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div class="card full">
   <div class="hdr">
@@ -870,6 +950,181 @@ async function stDelete(slot){
 $('st_save_btn').addEventListener('click', stSave);
 $('st_load_btn').addEventListener('click', stLoad);
 stRefresh();
+
+/* ── Gamepad + Video Panel ─────────────────────────── */
+const CTRL_KEY_MAP = {
+  'KeyZ':'0','KeyX':'1','Backspace':'2','Enter':'3',
+  'ArrowRight':'4','ArrowLeft':'5','ArrowUp':'6','ArrowDown':'7',
+  'KeyA':'8','KeyS':'9','KeyJ':'0','KeyK':'1'
+};
+let ctrlWs = null, ctrlKeys = 0, ctrlPingTimer = null;
+let frameAutoTimer = null, frameAutoOn = false, frameBusy = false;
+
+/* Toggle panel */
+$('ctrl_enable').addEventListener('change', function(){
+  const body = $('ctrl_body');
+  if (this.checked) {
+    body.style.display = '';
+    ctrlWsConnect();
+  } else {
+    body.style.display = 'none';
+    ctrlWsDisconnect();
+    stopAutoFrame();
+  }
+});
+
+function ctrlWsConnect(){
+  if (ctrlWs) return;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ctrlWs = new WebSocket(proto + '//' + location.host + '/ws');
+  ctrlWs.binaryType = 'arraybuffer';
+  ctrlWs.onopen = () => {
+    $('ws_status').textContent = 'WS: 已连接';
+    $('ws_status').className = 'ws-status ok';
+    ctrlPingTimer = setInterval(ctrlSendPing, 2000);
+  };
+  ctrlWs.onclose = () => {
+    $('ws_status').textContent = 'WS: 断开';
+    $('ws_status').className = 'ws-status err';
+    clearInterval(ctrlPingTimer);
+    ctrlWs = null;
+    if ($('ctrl_enable').checked) setTimeout(ctrlWsConnect, 2000);
+  };
+  ctrlWs.onerror = () => { if(ctrlWs) ctrlWs.close(); };
+  ctrlWs.onmessage = () => {}; /* ACKs ignored on console page */
+}
+
+function ctrlWsDisconnect(){
+  clearInterval(ctrlPingTimer);
+  if (ctrlWs) { ctrlWs.onclose = null; ctrlWs.close(); ctrlWs = null; }
+  $('ws_status').textContent = 'WS: --';
+  $('ws_status').className = 'ws-status';
+}
+
+function ctrlSendKeys(){
+  if (!ctrlWs || ctrlWs.readyState !== 1) return;
+  const buf = new Uint8Array(7);
+  buf[0] = 0x01;
+  buf[1] = ctrlKeys & 0xFF;
+  buf[2] = (ctrlKeys >> 8) & 0xFF;
+  const ts = performance.now() & 0xFFFFFFFF;
+  buf[3] = ts & 0xFF; buf[4] = (ts>>8)&0xFF; buf[5] = (ts>>16)&0xFF; buf[6] = (ts>>24)&0xFF;
+  ctrlWs.send(buf.buffer);
+}
+
+function ctrlSendPing(){
+  if (!ctrlWs || ctrlWs.readyState !== 1) return;
+  const buf = new Uint8Array(5);
+  buf[0] = 0x02;
+  const ts = performance.now() & 0xFFFFFFFF;
+  buf[1] = ts & 0xFF; buf[2] = (ts>>8)&0xFF; buf[3] = (ts>>16)&0xFF; buf[4] = (ts>>24)&0xFF;
+  ctrlWs.send(buf.buffer);
+}
+
+function ctrlSetKey(bit, pressed){
+  const prev = ctrlKeys;
+  if (pressed) ctrlKeys |= (1 << bit); else ctrlKeys &= ~(1 << bit);
+  const el = $('ck'+bit);
+  if (el) el.classList.toggle('active', !!(ctrlKeys & (1<<bit)));
+  if (ctrlKeys !== prev) ctrlSendKeys();
+}
+
+/* Touch / mouse for gamepad buttons */
+document.querySelectorAll('#ctrl_card [data-key]').forEach(el => {
+  const bit = parseInt(el.dataset.key);
+  el.addEventListener('touchstart', e => { e.preventDefault(); ctrlSetKey(bit, true); });
+  el.addEventListener('touchend', e => { e.preventDefault(); ctrlSetKey(bit, false); });
+  el.addEventListener('touchcancel', e => { e.preventDefault(); ctrlSetKey(bit, false); });
+  el.addEventListener('mousedown', e => { e.preventDefault(); ctrlSetKey(bit, true); });
+  el.addEventListener('mouseup', e => { e.preventDefault(); ctrlSetKey(bit, false); });
+  el.addEventListener('mouseleave', e => { ctrlSetKey(bit, false); });
+});
+
+/* Keyboard */
+document.addEventListener('keydown', e => {
+  if (!$('ctrl_enable').checked || e.repeat) return;
+  const bit = CTRL_KEY_MAP[e.code];
+  if (bit !== undefined){ e.preventDefault(); ctrlSetKey(parseInt(bit), true); }
+});
+document.addEventListener('keyup', e => {
+  if (!$('ctrl_enable').checked) return;
+  const bit = CTRL_KEY_MAP[e.code];
+  if (bit !== undefined){ e.preventDefault(); ctrlSetKey(parseInt(bit), false); }
+});
+
+/* Frame capture — handles both JPEG and raw RGB565 responses */
+const frameCvs = $('frame_cvs');
+const frameCtx = frameCvs.getContext('2d');
+const frameImgData = frameCtx.createImageData(240, 160);
+
+function renderRGB565(buf) {
+  const src = new Uint16Array(buf);
+  const dst = frameImgData.data;
+  for (let i = 0, j = 0; i < src.length; i++, j += 4) {
+    const px = src[i];
+    dst[j]     = (px >> 8) & 0xF8;  /* R */
+    dst[j + 1] = (px >> 3) & 0xFC;  /* G */
+    dst[j + 2] = (px << 3) & 0xF8;  /* B */
+    dst[j + 3] = 255;
+  }
+  frameCtx.putImageData(frameImgData, 0, 0);
+}
+
+async function captureFrame(){
+  if (frameBusy) return;
+  frameBusy = true;
+  const t0 = performance.now();
+  try {
+    const r = await fetch('/api/frame');
+    if (!r.ok) { $('frame_info').textContent = '截帧失败: ' + r.status; return; }
+    const abuf = await r.arrayBuffer();
+    if (abuf.byteLength !== 240 * 160 * 2) {
+      $('frame_info').textContent = '帧大小异常: ' + abuf.byteLength;
+      return;
+    }
+    renderRGB565(abuf);
+    const ms = (performance.now() - t0).toFixed(0);
+    $('frame_info').textContent = (abuf.byteLength / 1024).toFixed(1) + ' KB | ' + ms + ' ms';
+  } catch(e){
+    $('frame_info').textContent = '网络错误';
+  } finally {
+    frameBusy = false;
+  }
+}
+
+$('frame_once').addEventListener('click', captureFrame);
+
+$('frame_auto').addEventListener('click', function(){
+  if (frameAutoOn) { stopAutoFrame(); } else { startAutoFrame(); }
+});
+
+function startAutoFrame(){
+  frameAutoOn = true;
+  $('frame_auto').textContent = '⏸ 停止刷新';
+  $('frame_auto').classList.add('on');
+  scheduleAutoFrame();
+}
+
+function stopAutoFrame(){
+  frameAutoOn = false;
+  clearTimeout(frameAutoTimer);
+  $('frame_auto').textContent = '▶ 自动刷新';
+  $('frame_auto').classList.remove('on');
+}
+
+function scheduleAutoFrame(){
+  if (!frameAutoOn) return;
+  const interval = parseInt($('frame_interval').value) || 200;
+  frameAutoTimer = setTimeout(async () => {
+    await captureFrame();
+    scheduleAutoFrame();
+  }, interval);
+}
+
+$('frame_interval').addEventListener('change', function(){
+  if (frameAutoOn) { clearTimeout(frameAutoTimer); scheduleAutoFrame(); }
+});
+
 })();
 </script>
 </body>
