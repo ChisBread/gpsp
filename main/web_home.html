@@ -1196,11 +1196,11 @@ function streamStart() {
     });
   }
 
-  /* Init AudioContext — use default rate (hardware native, usually 48000).
-   * createBuffer(65536) will let the browser resample automatically.
-   * This avoids clock drift from non-native sample rates. */
+  /* Init AudioContext at GBA's native 65536 Hz.  This matches the
+   * createBuffer sample rate exactly — zero resampling in WebAudio.
+   * OS audio stack handles the final 65536→hardware rate conversion. */
   if (!audioCtx) {
-    audioCtx = new AudioContext();
+    audioCtx = new AudioContext({ sampleRate: 65536 });
   }
   if (audioCtx.state === 'suspended') audioCtx.resume();
 
