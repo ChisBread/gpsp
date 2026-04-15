@@ -869,7 +869,7 @@ async function loadRom(filename){
       body: JSON.stringify({file: filename})
     });
     const j = await r.json();
-    if (j.ok) { m.textContent='已切换'; m.className='msg ok'; }
+    if (j.ok) { m.textContent='已切换'; m.className='msg ok'; stRefresh(); }
     else { m.textContent=j.error||'切换失败'; m.className='msg err'; }
   } catch(e){ m.textContent='网络错误'; m.className='msg err'; }
   setTimeout(()=>{ m.textContent=''; }, 3000);
