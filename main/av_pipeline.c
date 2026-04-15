@@ -342,7 +342,7 @@ void av_pipeline_stream_audio_stop(void)
     StreamBufferHandle_t sb = s_stream_audio_sb;
     s_stream_audio_sb = NULL;
     if (sb) {
-        vStreamBufferDelete(sb);
+        vStreamBufferDeleteWithCaps(sb);
         ESP_LOGI(TAG, "Stream audio tee disabled");
     }
 }

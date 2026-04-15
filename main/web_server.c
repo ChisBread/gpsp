@@ -75,6 +75,7 @@ static SemaphoreHandle_t s_frame_mutex;
 
 static struct {
     volatile bool        active;       /* streaming loop running? */
+    volatile bool        task_done;    /* task finished, awaiting reap */
     volatile int         ws_fd;        /* stream WS client socket FD (-1 = none) */
     TaskHandle_t         task;         /* streaming task handle */
     /* PPA for RGB565→YUV420 color conversion */
@@ -720,65 +721,47 @@ static bool stream_alloc_buffers(void)
     return true;
 }
 
-static esp_err_t stream_init_encoder(void)
+/* Lazily create PPA client + H264 encoder (persistent, never freed).
+ * These leak a few KB on destroy, so we keep them alive forever. */
+static esp_err_t stream_ensure_encoder(void)
 {
-    /* PPA SRM client for RGB565 → YUV420 color conversion */
-    ppa_client_config_t ppa_cfg = {
-        .oper_type = PPA_OPERATION_SRM,
-    };
-    esp_err_t err = ppa_register_client(&ppa_cfg, &s_stream.ppa_client);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "PPA client register failed: %s", esp_err_to_name(err));
-        return err;
+    if (!s_stream.ppa_client) {
+        ppa_client_config_t ppa_cfg = {
+            .oper_type = PPA_OPERATION_SRM,
+        };
+        esp_err_t err = ppa_register_client(&ppa_cfg, &s_stream.ppa_client);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "PPA client register failed: %s", esp_err_to_name(err));
+            return err;
+        }
     }
 
-    /* H.264 HW encoder */
-    esp_h264_enc_cfg_hw_t enc_cfg = {
-        .pic_type = ESP_H264_RAW_FMT_O_UYY_E_VYY,
-        .gop      = STREAM_GOP,
-        .fps      = STREAM_FPS,
-        .res      = { .width = GBA_SCREEN_WIDTH, .height = GBA_SCREEN_HEIGHT },
-        .rc       = { .bitrate = STREAM_BITRATE, .qp_min = STREAM_QP_MIN, .qp_max = STREAM_QP_MAX },
-    };
-    esp_h264_err_t h264_ret = esp_h264_enc_hw_new(&enc_cfg, &s_stream.enc);
-    if (h264_ret != ESP_H264_ERR_OK) {
-        ESP_LOGE(TAG, "H264 encoder create failed: %d", h264_ret);
-        ppa_unregister_client(s_stream.ppa_client);
-        s_stream.ppa_client = NULL;
-        return ESP_FAIL;
+    if (!s_stream.enc) {
+        esp_h264_enc_cfg_hw_t enc_cfg = {
+            .pic_type = ESP_H264_RAW_FMT_O_UYY_E_VYY,
+            .gop      = STREAM_GOP,
+            .fps      = STREAM_FPS,
+            .res      = { .width = GBA_SCREEN_WIDTH, .height = GBA_SCREEN_HEIGHT },
+            .rc       = { .bitrate = STREAM_BITRATE, .qp_min = STREAM_QP_MIN, .qp_max = STREAM_QP_MAX },
+        };
+        esp_h264_err_t h264_ret = esp_h264_enc_hw_new(&enc_cfg, &s_stream.enc);
+        if (h264_ret != ESP_H264_ERR_OK) {
+            ESP_LOGE(TAG, "H264 encoder create failed: %d", h264_ret);
+            return ESP_FAIL;
+        }
+
+        h264_ret = esp_h264_enc_open(s_stream.enc);
+        if (h264_ret != ESP_H264_ERR_OK) {
+            ESP_LOGE(TAG, "H264 encoder open failed: %d", h264_ret);
+            esp_h264_enc_del(s_stream.enc);
+            s_stream.enc = NULL;
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "H264 HW encoder ready (%ux%u, %ubps, GOP=%u)",
+                 GBA_SCREEN_WIDTH, GBA_SCREEN_HEIGHT, STREAM_BITRATE, STREAM_GOP);
     }
-
-    h264_ret = esp_h264_enc_open(s_stream.enc);
-    if (h264_ret != ESP_H264_ERR_OK) {
-        ESP_LOGE(TAG, "H264 encoder open failed: %d", h264_ret);
-        esp_h264_enc_del(s_stream.enc);
-        s_stream.enc = NULL;
-        ppa_unregister_client(s_stream.ppa_client);
-        s_stream.ppa_client = NULL;
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "H264 HW encoder ready (%ux%u, %ubps, GOP=%u)",
-             GBA_SCREEN_WIDTH, GBA_SCREEN_HEIGHT, STREAM_BITRATE, STREAM_GOP);
-
-    /* Enable audio stream tee from AV pipeline */
-    av_pipeline_stream_audio_start();
 
     return ESP_OK;
-}
-
-static void stream_deinit_encoder(void)
-{
-    av_pipeline_stream_audio_stop();
-    if (s_stream.enc) {
-        esp_h264_enc_close(s_stream.enc);
-        esp_h264_enc_del(s_stream.enc);
-        s_stream.enc = NULL;
-    }
-    if (s_stream.ppa_client) {
-        ppa_unregister_client(s_stream.ppa_client);
-        s_stream.ppa_client = NULL;
-    }
 }
 
 /* WS async send completion callback — signal stream to stop on error. */
@@ -915,12 +898,26 @@ static void stream_task(void *arg)
         s_stream.frame_count++;
     }
 
-    ESP_LOGI(TAG, "Stream task ending, cleaning up");
-    stream_deinit_encoder();
+    ESP_LOGI(TAG, "Stream task ending, freeing buffers");
+    av_pipeline_stream_audio_stop();
     stream_free_buffers();
     s_stream.active = false;
-    s_stream.task = NULL;
-    vTaskDelete(NULL);
+    /* Do NOT use vTaskDelete(NULL) — task was created with
+     * xTaskCreatePinnedToCoreWithCaps so the stack would leak.
+     * Suspend self and let the handler reap us. */
+    s_stream.task_done = true;
+    vTaskSuspend(NULL);
+}
+
+/* Reap a finished stream task (free its WithCaps stack+TCB). */
+static void stream_reap_task(void)
+{
+    if (s_stream.task && s_stream.task_done) {
+        vTaskDeleteWithCaps(s_stream.task);
+        s_stream.task = NULL;
+        s_stream.task_done = false;
+        ESP_LOGI(TAG, "Reaped stream task");
+    }
 }
 
 /* WebSocket handler for /ws/stream */
@@ -934,20 +931,29 @@ static esp_err_t ws_stream_handler(httpd_req_t *req)
         /* Only one streaming client at a time */
         if (s_stream.active) {
             ESP_LOGW(TAG, "Rejecting stream client — already streaming");
-            /* Close with 1013 (try again later) would be ideal, but
-             * esp_http_server doesn't allow rejecting WS upgrades.
-             * Just accept but don't start a new task. */
             return ESP_OK;
         }
 
-        /* Allocate buffers and init encoder lazily */
+        /* Reap previous task if it finished (frees WithCaps stack) */
+        stream_reap_task();
+
+        /* Allocate buffers (freed each session) and ensure encoder (persistent) */
         if (!stream_alloc_buffers()) {
             return ESP_OK;
         }
-        if (stream_init_encoder() != ESP_OK) {
+        if (stream_ensure_encoder() != ESP_OK) {
             stream_free_buffers();
             return ESP_OK;
         }
+        /* Reset encoder state so the first frame is IDR (key frame).
+         * close+open only touches interrupt/semaphore — no alloc leak. */
+        esp_h264_enc_close(s_stream.enc);
+        if (esp_h264_enc_open(s_stream.enc) != ESP_H264_ERR_OK) {
+            ESP_LOGE(TAG, "H264 encoder reopen failed");
+            stream_free_buffers();
+            return ESP_OK;
+        }
+        av_pipeline_stream_audio_start();
 
         s_stream.ws_fd = fd;
         s_stream.active = true;
@@ -964,7 +970,7 @@ static esp_err_t ws_stream_handler(httpd_req_t *req)
             MALLOC_CAP_SPIRAM);
         if (ret != pdPASS) {
             ESP_LOGE(TAG, "Stream task creation failed");
-            stream_deinit_encoder();
+            av_pipeline_stream_audio_stop();
             stream_free_buffers();
             s_stream.active = false;
             s_stream.ws_fd = -1;
@@ -984,6 +990,8 @@ static esp_err_t ws_stream_handler(httpd_req_t *req)
         ESP_LOGI(TAG, "Stream WS client disconnected");
         s_stream.ws_fd = -1;
         s_stream.active = false;
+        vTaskDelay(pdMS_TO_TICKS(50));
+        stream_reap_task();
         return ESP_FAIL;
     }
 
@@ -992,6 +1000,8 @@ static esp_err_t ws_stream_handler(httpd_req_t *req)
         ESP_LOGI(TAG, "Stream stop requested by client");
         s_stream.ws_fd = -1;
         s_stream.active = false;
+        vTaskDelay(pdMS_TO_TICKS(50));
+        stream_reap_task();
     }
 
     return ESP_OK;
