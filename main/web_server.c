@@ -924,36 +924,12 @@ static void stream_reap_task(void)
 static esp_err_t ws_stream_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
-        /* New stream client connected */
+        /* New stream client connected — just record the fd.
+         * All heavy work (alloc, encoder, task) deferred to 0x20
+         * to avoid blocking the httpd socket-accept path. */
         int fd = httpd_req_to_sockfd(req);
         ESP_LOGI(TAG, "Stream WS client connected, fd=%d", fd);
-
-        /* Tear down any previous session (active task or leftover buffers) */
-        if (s_stream.active) {
-            s_stream.ws_fd = -1;
-            s_stream.active = false;
-            vTaskDelay(pdMS_TO_TICKS(50));
-            stream_reap_task();
-        } else {
-            stream_reap_task();
-            /* Free leftover buffers from a connect that never got 0x20 */
-            stream_free_buffers();
-        }
-
-        /* Allocate buffers and ensure encoder are ready, but do NOT
-         * start the streaming task yet.  The client must send 0x20
-         * (reset) after its decoder is initialised; only then do we
-         * reset the encoder (→ IDR) and launch the task. */
-        if (!stream_alloc_buffers()) {
-            return ESP_OK;
-        }
-        if (stream_ensure_encoder() != ESP_OK) {
-            stream_free_buffers();
-            return ESP_OK;
-        }
-
         s_stream.ws_fd = fd;
-        /* active stays false until reset command arrives */
         return ESP_OK;
     }
 
@@ -976,9 +952,8 @@ static esp_err_t ws_stream_handler(httpd_req_t *req)
             if (was_active) {
                 vTaskDelay(pdMS_TO_TICKS(50));
                 stream_reap_task();
-            } else {
-                stream_free_buffers();
             }
+            stream_free_buffers();
         }
         return ESP_FAIL;
     }
@@ -992,29 +967,45 @@ static esp_err_t ws_stream_handler(httpd_req_t *req)
             s_stream.active = false;
             vTaskDelay(pdMS_TO_TICKS(50));
             stream_reap_task();
+            stream_free_buffers();
         }
     }
 
-    /* 0x20 = reset/start command from client (decoder ready) */
+    /* 0x20 = reset/start command from client (decoder ready).
+     * All resource allocation happens here, NOT in the GET handler,
+     * to avoid blocking the httpd socket-accept path. */
     if (ws_pkt.len >= 1 && buf[0] == 0x20) {
         int fd = httpd_req_to_sockfd(req);
         if (s_stream.ws_fd != fd) {
             ESP_LOGW(TAG, "Ignoring reset from stale fd=%d (current=%d)", fd, s_stream.ws_fd);
             return ESP_OK;
         }
-        ESP_LOGI(TAG, "Stream reset requested by client");
+        ESP_LOGI(TAG, "Stream reset requested by client (fd=%d)", fd);
 
-        /* If already streaming, tear down the old task first */
+        /* Tear down any previous session */
         if (s_stream.active) {
             s_stream.active = false;
             vTaskDelay(pdMS_TO_TICKS(50));
             stream_reap_task();
+        } else {
+            stream_reap_task();
+        }
+        stream_free_buffers();
+
+        /* Allocate buffers + ensure encoder */
+        if (!stream_alloc_buffers()) {
+            return ESP_OK;
+        }
+        if (stream_ensure_encoder() != ESP_OK) {
+            stream_free_buffers();
+            return ESP_OK;
         }
 
         /* Reset encoder → first frame will be IDR */
         esp_h264_enc_close(s_stream.enc);
         if (esp_h264_enc_open(s_stream.enc) != ESP_H264_ERR_OK) {
             ESP_LOGE(TAG, "H264 encoder reopen failed");
+            stream_free_buffers();
             return ESP_OK;
         }
         av_pipeline_stream_audio_start();
@@ -1024,16 +1015,17 @@ static esp_err_t ws_stream_handler(httpd_req_t *req)
 
         /* Start streaming task on service core */
         BaseType_t core = (CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0;
-        BaseType_t ret = xTaskCreatePinnedToCoreWithCaps(
+        BaseType_t xret = xTaskCreatePinnedToCoreWithCaps(
             stream_task, "av_stream",
             6144, NULL,
             tskIDLE_PRIORITY + 3,
             &s_stream.task,
             core,
             MALLOC_CAP_SPIRAM);
-        if (ret != pdPASS) {
+        if (xret != pdPASS) {
             ESP_LOGE(TAG, "Stream task creation failed");
             av_pipeline_stream_audio_stop();
+            stream_free_buffers();
             s_stream.active = false;
         }
     }

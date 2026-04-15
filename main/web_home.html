@@ -120,25 +120,27 @@ btn:hover{background:#3a4a6a}
 .ws-status{font-size:.72em;padding:2px 8px;border-radius:10px;background:#333;display:inline-block;margin-top:4px}
 .ws-status.ok{background:#1a4a1a;color:#6f6}
 .ws-status.err{background:#4a1a1a;color:#f66}
+.lang-btn{background:none;border:1px solid #446;border-radius:3px;color:#8af;padding:1px 6px;cursor:pointer;font-size:.7em;margin:0 2px;vertical-align:middle}
+.lang-btn.active{background:#2a2a4a;color:#fff;border-color:#88f}
 </style>
 </head>
 <body>
-<h1>gpsp Console</h1>
+<h1>gpsp Console <span style="font-size:.6em;margin-left:12px"><button class="lang-btn" data-lang="zh" onclick="setLang('zh')">中文</button><button class="lang-btn" data-lang="en" onclick="setLang('en')">EN</button></span></h1>
 
 <div class="grid">
 
 <!-- Gamepad + Video panel -->
 <div class="card full" id="ctrl_card">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-    <h2 style="margin:0">实时推流</h2>
+    <h2 style="margin:0" data-i18n="live_stream">实时推流</h2>
     <label class="toggle"><input type="checkbox" id="ctrl_enable"><span class="sl"></span></label>
   </div>
   <div id="ctrl_body" style="display:none">
     <div class="ctrl-toolbar">
-      <button class="tbtn" id="stream_btn" title="开始/停止推流">▶ 推流</button>
-      <button class="tbtn" id="frame_once" title="抓取一帧">📷 截帧</button>
-      <button class="tbtn" id="rec_btn" title="录制">⏺ 录制</button>
-      <span style="color:#666;font-size:.72em" id="stream_info">未连接</span>
+      <button class="tbtn" id="stream_btn" data-i18n-title="start_stop_stream" title="开始/停止推流"><span data-i18n="stream_start">▶ 推流</span></button>
+      <button class="tbtn" id="frame_once" data-i18n-title="capture_title" title="抓取一帧">📷 <span data-i18n="capture">截帧</span></button>
+      <button class="tbtn" id="rec_btn" data-i18n-title="record_title" title="录制"><span data-i18n="record">⏺ 录制</span></button>
+      <span style="color:#666;font-size:.72em" id="stream_info" data-i18n="not_connected">未连接</span>
       <span class="ws-status" id="ws_status">WS: --</span>
     </div>
     <div class="gba-shell" id="gba_shell">
@@ -162,7 +164,7 @@ btn:hover{background:#3a4a6a}
         </div>
         <div class="gba-screen">
           <canvas id="frame_cvs" width="240" height="160"></canvas>
-          <div style="font-size:.65em;color:#666;margin-top:2px" id="frame_info">等待推流...</div>
+          <div style="font-size:.65em;color:#666;margin-top:2px" id="frame_info" data-i18n="await_stream">等待推流...</div>
         </div>
         <div class="c-ab">
           <div class="b" data-key="1" id="ck1">B</div>
@@ -181,7 +183,7 @@ btn:hover{background:#3a4a6a}
 <div class="card full">
   <div class="hdr">
     <div><span class="fps" id="fps">--</span> <span class="sub">FPS</span></div>
-    <div class="sub">空闲内存: <span id="heap">--</span> KB | 帧同步: <span id="acq">--</span> us | 音频产出(GBA侧): <span id="snd">--</span> us | 音频消费(I2S): <span id="i2s_buf">--</span></div>
+    <div class="sub"><span data-i18n="free_mem">空闲内存</span>: <span id="heap">--</span> KB | <span data-i18n="frame_sync">帧同步</span>: <span id="acq">--</span> us | <span data-i18n="audio_prod">音频产出(GBA侧)</span>: <span id="snd">--</span> us | <span data-i18n="audio_cons">音频消费(I2S)</span>: <span id="i2s_buf">--</span></div>
   </div>
   <div class="chart-wrap">
     <canvas id="chart"></canvas>
@@ -191,45 +193,45 @@ btn:hover{background:#3a4a6a}
 </div>
 
 <div class="card" id="prof_card" style="display:none">
-  <h2><span data-tip="每帧CPU时间在各模块中的分配比例。点击任一指标可展开时间序列图">CPU 剖析 (cycles/frame)</span></h2>
+  <h2><span data-i18n="cpu_prof_title" data-i18n-tip="cpu_prof_tip" data-tip="每帧CPU时间在各模块中的分配比例。点击任一指标可展开时间序列图">CPU 剖析 (cycles/frame)</span></h2>
   <div class="prof-wrap" id="prof_bars"></div>
   <table class="st" id="prof_tbl"></table>
 </div>
 
 <div class="card" id="jit_card" style="display:none">
-  <h2><span data-tip="JIT动态重编译缓存的使用状态。GBA代码先编译为RISC-V本地代码存入缓存，之后可直接执行">JIT 缓存</span></h2>
+  <h2><span data-i18n="jit_title" data-i18n-tip="jit_tip" data-tip="JIT动态重编译缓存的使用状态。GBA代码先编译为RISC-V本地代码存入缓存，之后可直接执行">JIT 缓存</span></h2>
   <div id="jit_cache_bars"></div>
   <div class="cnt-grid" id="jit_counts"></div>
 </div>
 
 <div class="card">
-  <h2>设置</h2>
+  <h2 data-i18n="settings">设置</h2>
   <div class="row">
-    <label>动态重编译 (JIT)</label>
+    <label data-i18n="dynarec">动态重编译 (JIT)</label>
     <label class="toggle"><input type="checkbox" id="cfg_dynarec"><span class="sl"></span></label>
   </div>
   <div class="row">
-    <label>精灵数量限制</label>
+    <label data-i18n="sprite_limit">精灵数量限制</label>
     <label class="toggle"><input type="checkbox" id="cfg_sprite"><span class="sl"></span></label>
   </div>
   <div class="row">
-    <label>启动模式</label>
+    <label data-i18n="boot_mode">启动模式</label>
     <select id="cfg_boot">
-      <option value="game">直接进入游戏</option>
-      <option value="bios">BIOS 动画</option>
+      <option value="game" data-i18n="boot_game">直接进入游戏</option>
+      <option value="bios" data-i18n="boot_bios">BIOS 动画</option>
     </select>
   </div>
   <div class="row">
-    <label>跳帧模式</label>
+    <label data-i18n="frameskip">跳帧模式</label>
     <select id="cfg_frameskip">
-      <option value="0">关闭</option>
-      <option value="1">自动</option>
-      <option value="2">自动 (阈值)</option>
-      <option value="3">固定间隔</option>
+      <option value="0" data-i18n="fs_off">关闭</option>
+      <option value="1" data-i18n="fs_auto">自动</option>
+      <option value="2" data-i18n="fs_auto_thr">自动 (阈值)</option>
+      <option value="3" data-i18n="fs_fixed">固定间隔</option>
     </select>
   </div>
   <div class="row" id="row_fs_threshold" style="display:none">
-    <label>跳帧阈值 (%)</label>
+    <label data-i18n="fs_threshold">跳帧阈值 (%)</label>
     <select id="cfg_fs_threshold">
       <option value="15">15%</option>
       <option value="20">20%</option>
@@ -246,7 +248,7 @@ btn:hover{background:#3a4a6a}
     </select>
   </div>
   <div class="row" id="row_fs_interval" style="display:none">
-    <label>跳帧间隔</label>
+    <label data-i18n="fs_interval">跳帧间隔</label>
     <select id="cfg_fs_interval">
       <option value="1">1</option>
       <option value="2">2</option>
@@ -259,23 +261,23 @@ btn:hover{background:#3a4a6a}
 </div>
 
 <div class="card">
-  <h2>游戏</h2>
-  <div id="rom_list" class="rom-list"><div class="rom-loading">加载中...</div></div>
+  <h2 data-i18n="games">游戏</h2>
+  <div id="rom_list" class="rom-list"><div class="rom-loading" data-i18n="rom_loading">加载中...</div></div>
   <div class="msg" id="rom_msg"></div>
 </div>
 
 <div class="card">
-  <h2>即时存档</h2>
+  <h2 data-i18n="savestates">即时存档</h2>
   <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
-    <label style="font-size:.82em;color:#ccc">存档槽:</label>
+    <label style="font-size:.82em;color:#ccc" data-i18n="save_slot">存档槽:</label>
     <select id="st_slot" style="background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:3px 8px;font-size:.82em">
       <option value="0">Slot 0</option><option value="1">Slot 1</option><option value="2">Slot 2</option>
       <option value="3">Slot 3</option><option value="4">Slot 4</option><option value="5">Slot 5</option>
       <option value="6">Slot 6</option><option value="7">Slot 7</option><option value="8">Slot 8</option>
       <option value="9">Slot 9</option>
     </select>
-    <button id="st_save_btn" style="background:#2a5a2a;color:#afa;border:1px solid #4a6;border-radius:4px;padding:4px 12px;font-size:.78em;cursor:pointer">保存</button>
-    <button id="st_load_btn" style="background:#2a3a5a;color:#8af;border:1px solid #446;border-radius:4px;padding:4px 12px;font-size:.78em;cursor:pointer">读取</button>
+    <button id="st_save_btn" style="background:#2a5a2a;color:#afa;border:1px solid #4a6;border-radius:4px;padding:4px 12px;font-size:.78em;cursor:pointer" data-i18n="save_btn">保存</button>
+    <button id="st_load_btn" style="background:#2a3a5a;color:#8af;border:1px solid #446;border-radius:4px;padding:4px 12px;font-size:.78em;cursor:pointer" data-i18n="load_btn">读取</button>
   </div>
   <div id="st_list" class="rom-list" style="max-height:180px"></div>
   <div class="msg" id="st_msg"></div>
@@ -284,6 +286,191 @@ btn:hover{background:#3a4a6a}
 </div><!-- /grid -->
 
 <script>
+/* ── i18n ──────────────────────────────────────────── */
+let curLang = localStorage.getItem('gpsp_lang') || 'zh';
+const I18N = {
+zh:{
+  live_stream:'实时推流',stream_start:'▶ 推流',stream_stop:'⏸ 停止',
+  capture:'截帧',record:'⏺ 录制',record_stop:'⏹ 停止录制',record_unavail:'录制不可用',
+  not_connected:'未连接',await_stream:'等待推流...',
+  free_mem:'空闲内存',frame_sync:'帧同步',audio_prod:'音频产出(GBA侧)',audio_cons:'音频消费(I2S)',
+  settings:'设置',dynarec:'动态重编译 (JIT)',sprite_limit:'精灵数量限制',
+  boot_mode:'启动模式',boot_game:'直接进入游戏',boot_bios:'BIOS 动画',
+  frameskip:'跳帧模式',fs_off:'关闭',fs_auto:'自动',fs_auto_thr:'自动 (阈值)',fs_fixed:'固定间隔',
+  fs_threshold:'跳帧阈值 (%)',fs_interval:'跳帧间隔',
+  games:'游戏',rom_loading:'加载中...',rom_load_fail:'读取失败',rom_empty:'SD卡未找到 .gba 文件',
+  rom_switching:'加载中: ',rom_switched:'已切换',rom_switch_fail:'切换失败',
+  savestates:'即时存档',save_slot:'存档槽:',save_btn:'保存',load_btn:'读取',
+  saving:'保存中...',saved:'已保存',save_fail:'保存失败',
+  loading_state:'读取中...',loaded:'已读取',load_state_fail:'读取失败',
+  no_saves:'暂无存档',deleted:'已删除',delete_fail:'删除失败',
+  dl_title:'下载',del_title:'删除',
+  net_error:'网络错误',failed:'失败',
+  connecting:'连接中...',init_decoder:'初始化解码器...',streaming:'推流中',disconnected:'已断开',
+  webcodecs_ready:'WebCodecs 就绪',loading_broadway:'加载 Broadway.js 解码器...',
+  broadway_ready:'Broadway 就绪',broadway_fail:'Broadway 加载失败: ',
+  decode_err:'解码异常: ',broadway_decode_err:'Broadway 解码异常: ',
+  decoder_init:'解码器初始化中...',decoder_error:'解码器错误: ',
+  capture_fail:'截帧失败: ',frame_size_err:'帧大小异常: ',script_load_fail:'加载失败: ',
+  ws_connected:'WS: 已连接',ws_disconnected:'WS: 断开',
+  s_cpu_only:'CPU(不含渲染)',s_render:'渲染',frame_total:'帧总计',
+  cpu_prof_title:'CPU 剖析 (cycles/frame)',
+  cpu_prof_tip:'每帧CPU时间在各模块中的分配比例。点击任一指标可展开时间序列图',
+  jit_title:'JIT 缓存',jit_tip:'JIT动态重编译缓存的使用状态。GBA代码先编译为RISC-V本地代码存入缓存，之后可直接执行',
+  p_exec:'执行',p_exec_tip:'CPU执行JIT生成的本地代码的时间（包含查找+编译+同步）',
+  p_lookup:'查找',p_lookup_tip:'在哈希表中查找PC地址对应的已编译代码块的开销',
+  p_compile:'编译',p_compile_tip:'将GBA指令翻译为RISC-V本地代码的开销',
+  p_sync:'同步',p_sync_tip:'JIT生成代码后刷新D-Cache和I-Cache的开销',
+  p_update:'update',p_update_tip:'GBA模拟器每帧更新：PPU扫描线+音频+DMA+定时器等',
+  p_scan:'扫描线',p_scan_tip:'PPU每帧228条扫描线的总渲染开销',
+  p_bg:'BG',p_bg_tip:'背景层渲染（BG0~BG3）',
+  p_bg_tf:'text快',p_bg_tf_tip:'Text模式背景快速路径（无马赛克/无仿射）',
+  p_bg_tm:'text马赛克',
+  p_bg_af:'仿射BG',p_bg_af_tip:'仿射变换背景渲染（旋转/缩放）',
+  p_bg_bm:'位图BG',p_bg_bm_tip:'位图模式背景渲染（Mode3/4/5）',
+  p_obj:'OBJ',p_obj_tip:'精灵对象渲染（最多128个精灵）',
+  p_fx:'效果',p_fx_tip:'混合效果（Alpha混合、亮度渐变、窗口裁剪）',
+  p_ord:'排序',p_ord_tip:'图层优先级排序',
+  p_aff:'仿射',p_aff_tip:'OBJ仿射变换计算',
+  p_blank:'空白',p_blank_tip:'V-Blank/H-Blank期间的空闲扫描线',
+  p_sound:'音频',p_sound_tip:'GBA音频合成（PSG+DirectSound）',
+  p_dma:'DMA',p_dma_tip:'DMA传输模拟',
+  p_timer:'定时器',p_timer_tip:'GBA硬件定时器模拟',
+  p_serial:'串口',p_serial_tip:'串行通信模拟',
+  p_irq:'IRQ',p_irq_tip:'中断处理开销',
+  c_insn:'指令/帧',c_insn_tip:'CPU每帧执行的GBA指令总数（ARM+Thumb）',
+  c_lkup_hit:'哈希表命中',c_lkup_hit_tip:'JIT哈希表查找命中：PC地址已有编译好的本地代码，可直接执行',
+  c_lkup_miss:'哈希表未中',c_lkup_miss_tip:'JIT哈希表查找未中：该PC地址没有编译过的代码，需要触发新编译',
+  c_xlat_arm:'编译ARM',c_xlat_arm_tip:'从ROM区域新编译的ARM指令块数量',
+  c_xlat_thumb:'编译Thumb',c_xlat_thumb_tip:'从ROM区域新编译的Thumb指令块数量',
+  c_xlat_arm_ram:'编译ARM(RAM)',c_xlat_arm_ram_tip:'从RAM区域(IWRAM/EWRAM)新编译的ARM指令块数量',
+  c_xlat_thumb_ram:'编译Thumb(RAM)',c_xlat_thumb_ram_tip:'从RAM区域(IWRAM/EWRAM)新编译的Thumb指令块数量',
+  c_fl_rom:'ROM缓存重置',c_fl_rom_tip:'ROM翻译缓存已满，整体回收并重新编译。频率越低缓存效率越高',
+  c_fl_ram:'RAM缓存重置',c_fl_ram_tip:'RAM翻译缓存因游戏自修改代码(SMC)而被回收重置',
+  c_ic_sync:'I-Cache同步',c_ic_sync_tip:'JIT生成新代码后，刷新CPU指令缓存使其生效的次数',
+  j_hot_cold:'ROM 热/冷分布',j_hot_cold_tip:'ROM缓存中热区(高频代码)与冷区(低频代码)的空间占比。热区在缓存重置时被保留',
+  j_hot:'热',j_cold:'冷',j_blocks:'块',j_alive:'存活轮次',
+  j_blocks_tip:'热区中已索引的代码块数量',j_age_tip:'当前热区连续被保留(Path A)的次数。达到阈值后触发新鲜度检查',
+  j_hot_zone:'热区',j_cold_zone:'冷区',
+  j_lifecycle:'热区生命周期',j_lifecycle_tip:'ROM缓存重置时，热区机制对高频代码块的保护情况',
+  j_retain:'保留',j_retain_tip:'ROM缓存满时，热区内容有效，直接保留并重新插入哈希表，跳过重编译',
+  j_rebuild:'重建',j_rebuild_tip:'热区过期或命中率低于75%阈值，重新扫描频率环构建新热区',
+  j_fresh:'新鲜度通过',j_fresh_tip:'热区新鲜度检查：75%以上的热区块仍在近期频率环中出现，确认热区仍然有效',
+  j_reuse:'复用率',j_reuse_tip:'保留次数/(保留+重建)。越高说明热区越稳定，越少触发昂贵的重编译',
+  j_since:'距上次重建',j_since_tip:'距上次热区重建(Path B)经过的时间。越久说明热区越稳定',
+  j_avoided:'免编译块',j_avoided_tip:'热区保留期间免于重编译的代码块总数 = 热区块数 × 保留次数',
+  w_window:'秒滑动窗口',w_window_tip:'最近%d秒的滑动窗口统计，反映当前运行状态',
+  w_hit_rate:'块查找命中率',w_hit_rate_tip:'哈希表查找命中 / 总查找次数。越高说明JIT缓存越有效，较少触发新编译',
+  w_compile_s:'新编译/s',w_compile_s_tip:'每秒新编译的GBA代码块数（ARM+Thumb, ROM+RAM），越低越好',
+  w_rom_flush_s:'ROM重置/s',w_rom_flush_s_tip:'ROM翻译缓存满后整体重置的频率。频率越低说明缓存容量和热区策略越有效',
+  w_ram_flush_s:'RAM重置/s',w_ram_flush_s_tip:'RAM缓存因自修改代码(SMC)而重置的频率',
+  w_ic_sync_s:'I-Cache同步/s',w_ic_sync_s_tip:'JIT生成代码后同步CPU指令缓存的频率',
+  w_cache_life:'ROM缓存寿命',w_cache_life_tip:'两次ROM缓存重置之间的平均间隔。越长说明缓存效率越高，热区保护越有效',
+  cum_title:'累计统计（自启动）',cum_title_tip:'从本次会话启动至今的累计统计',
+  cum_hit_rate:'块查找命中率',cum_hit_rate_tip:'累计哈希表查找命中率。括号内为总查找次数',
+  cum_compile:'编译总量',cum_compile_tip:'累计编译的代码块总数',
+  cum_rom_flush:'ROM重置',cum_rom_flush_tip:'累计ROM缓存重置次数',
+  cum_ram_flush:'RAM重置',cum_ram_flush_tip:'累计RAM缓存重置次数',
+  cum_ic_sync:'I-Cache同步',cum_ic_sync_tip:'累计I-Cache同步次数',
+  prof_hit:'块查找命中率',prof_hit_tip:'JIT哈希表查找命中 / 总查找次数。命中=直接执行已编译代码，未中=需要新编译',
+  start_stop_stream:'开始/停止推流',capture_title:'抓取一帧',record_title:'录制',
+},
+en:{
+  live_stream:'Live Stream',stream_start:'▶ Stream',stream_stop:'⏸ Stop',
+  capture:'Capture',record:'⏺ Record',record_stop:'⏹ Stop Rec',record_unavail:'Recording unavailable',
+  not_connected:'Not connected',await_stream:'Waiting for stream...',
+  free_mem:'Free Mem',frame_sync:'Frame Sync',audio_prod:'Audio Out (GBA)',audio_cons:'Audio In (I2S)',
+  settings:'Settings',dynarec:'Dynamic Recompilation (JIT)',sprite_limit:'Sprite Limit',
+  boot_mode:'Boot Mode',boot_game:'Start Game Directly',boot_bios:'BIOS Animation',
+  frameskip:'Frameskip',fs_off:'Off',fs_auto:'Auto',fs_auto_thr:'Auto (Threshold)',fs_fixed:'Fixed Interval',
+  fs_threshold:'Frameskip Threshold (%)',fs_interval:'Frameskip Interval',
+  games:'Games',rom_loading:'Loading...',rom_load_fail:'Load failed',rom_empty:'No .gba files on SD card',
+  rom_switching:'Loading: ',rom_switched:'Switched',rom_switch_fail:'Switch failed',
+  savestates:'Save States',save_slot:'Slot:',save_btn:'Save',load_btn:'Load',
+  saving:'Saving...',saved:'Saved',save_fail:'Save failed',
+  loading_state:'Loading...',loaded:'Loaded',load_state_fail:'Load failed',
+  no_saves:'No save states',deleted:'Deleted',delete_fail:'Delete failed',
+  dl_title:'Download',del_title:'Delete',
+  net_error:'Network error',failed:'Failed',
+  connecting:'Connecting...',init_decoder:'Initializing decoder...',streaming:'Streaming',disconnected:'Disconnected',
+  webcodecs_ready:'WebCodecs Ready',loading_broadway:'Loading Broadway.js decoder...',
+  broadway_ready:'Broadway Ready',broadway_fail:'Broadway load failed: ',
+  decode_err:'Decode error: ',broadway_decode_err:'Broadway decode error: ',
+  decoder_init:'Initializing decoder...',decoder_error:'Decoder error: ',
+  capture_fail:'Capture failed: ',frame_size_err:'Frame size error: ',script_load_fail:'Load failed: ',
+  ws_connected:'WS: Connected',ws_disconnected:'WS: Disconnected',
+  s_cpu_only:'CPU (excl. render)',s_render:'Render',frame_total:'Frame Total',
+  cpu_prof_title:'CPU Profiling (cycles/frame)',
+  cpu_prof_tip:'Per-frame CPU time breakdown by module. Click any metric to expand time series.',
+  jit_title:'JIT Cache',jit_tip:'JIT recompilation cache status. GBA code compiled to RISC-V native code and cached.',
+  p_exec:'Execute',p_exec_tip:'Time executing JIT native code (includes lookup+compile+sync)',
+  p_lookup:'Lookup',p_lookup_tip:'Hash table lookup cost for compiled code blocks by PC',
+  p_compile:'Compile',p_compile_tip:'Translating GBA instructions to RISC-V native code',
+  p_sync:'Sync',p_sync_tip:'Flushing D-Cache and I-Cache after JIT code generation',
+  p_update:'update',p_update_tip:'GBA per-frame update: PPU scanlines+audio+DMA+timers',
+  p_scan:'Scanline',p_scan_tip:'Total rendering cost of 228 scanlines per frame',
+  p_bg:'BG',p_bg_tip:'Background layer rendering (BG0~BG3)',
+  p_bg_tf:'Text Fast',p_bg_tf_tip:'Text mode BG fast path (no mosaic/no affine)',
+  p_bg_tm:'Text Mosaic',
+  p_bg_af:'Affine BG',p_bg_af_tip:'Affine transform BG rendering (rotation/scaling)',
+  p_bg_bm:'Bitmap BG',p_bg_bm_tip:'Bitmap mode BG rendering (Mode3/4/5)',
+  p_obj:'OBJ',p_obj_tip:'Sprite rendering (up to 128 sprites)',
+  p_fx:'Effects',p_fx_tip:'Blend effects (alpha, brightness, window clip)',
+  p_ord:'Sort',p_ord_tip:'Layer priority sorting',
+  p_aff:'Affine',p_aff_tip:'OBJ affine transform calculation',
+  p_blank:'Blank',p_blank_tip:'Idle scanlines during V-Blank/H-Blank',
+  p_sound:'Audio',p_sound_tip:'GBA audio synthesis (PSG+DirectSound)',
+  p_dma:'DMA',p_dma_tip:'DMA transfer emulation',
+  p_timer:'Timer',p_timer_tip:'GBA hardware timer emulation',
+  p_serial:'Serial',p_serial_tip:'Serial communication emulation',
+  p_irq:'IRQ',p_irq_tip:'Interrupt handling overhead',
+  c_insn:'Insn/Frame',c_insn_tip:'Total GBA instructions per frame (ARM+Thumb)',
+  c_lkup_hit:'Hash Hit',c_lkup_hit_tip:'JIT hash hit: compiled code exists for this PC',
+  c_lkup_miss:'Hash Miss',c_lkup_miss_tip:'JIT hash miss: no compiled code, new compilation needed',
+  c_xlat_arm:'Compile ARM',c_xlat_arm_tip:'Newly compiled ARM blocks from ROM',
+  c_xlat_thumb:'Compile Thumb',c_xlat_thumb_tip:'Newly compiled Thumb blocks from ROM',
+  c_xlat_arm_ram:'Compile ARM(RAM)',c_xlat_arm_ram_tip:'Newly compiled ARM blocks from RAM',
+  c_xlat_thumb_ram:'Compile Thumb(RAM)',c_xlat_thumb_ram_tip:'Newly compiled Thumb blocks from RAM',
+  c_fl_rom:'ROM Flush',c_fl_rom_tip:'ROM translation cache full, reclaimed. Lower = better',
+  c_fl_ram:'RAM Flush',c_fl_ram_tip:'RAM cache reset due to self-modifying code (SMC)',
+  c_ic_sync:'I$ Sync',c_ic_sync_tip:'I-Cache flushes after JIT code generation',
+  j_hot_cold:'ROM Hot/Cold',j_hot_cold_tip:'Hot vs cold code ratio in ROM cache. Hot zone preserved on reset.',
+  j_hot:'Hot',j_cold:'Cold',j_blocks:'Blk',j_alive:'Age',
+  j_blocks_tip:'Indexed code blocks in hot zone',j_age_tip:'Consecutive hot zone retentions (Path A)',
+  j_hot_zone:'Hot',j_cold_zone:'Cold',
+  j_lifecycle:'Hot Zone Lifecycle',j_lifecycle_tip:'Hot zone protection during ROM cache reset',
+  j_retain:'Retain',j_retain_tip:'Hot zone valid: retained, re-inserted into hash table, skip recompile',
+  j_rebuild:'Rebuild',j_rebuild_tip:'Hot zone expired or hit rate <75%, re-scan frequency ring',
+  j_fresh:'Fresh Pass',j_fresh_tip:'Freshness check: >75% hot blocks in recent frequency ring',
+  j_reuse:'Reuse%',j_reuse_tip:'Retain/(Retain+Rebuild). Higher = more stable',
+  j_since:'Since Rebuild',j_since_tip:'Time since last hot zone rebuild (Path B)',
+  j_avoided:'Avoided',j_avoided_tip:'Blocks avoided recompilation = hot blocks × retain count',
+  w_window:'s Window',w_window_tip:'Sliding window stats over last %ds, reflecting current state',
+  w_hit_rate:'Block Hit Rate',w_hit_rate_tip:'Hash hit / total lookups. Higher = better JIT cache',
+  w_compile_s:'Compile/s',w_compile_s_tip:'New GBA blocks compiled per second, lower is better',
+  w_rom_flush_s:'ROM Flush/s',w_rom_flush_s_tip:'ROM cache full reset frequency. Lower = better',
+  w_ram_flush_s:'RAM Flush/s',w_ram_flush_s_tip:'RAM cache reset due to SMC frequency',
+  w_ic_sync_s:'I$ Sync/s',w_ic_sync_s_tip:'I-Cache sync frequency after JIT code generation',
+  w_cache_life:'ROM Cache Life',w_cache_life_tip:'Average interval between ROM cache resets',
+  cum_title:'Cumulative (Since Boot)',cum_title_tip:'Cumulative stats since session start',
+  cum_hit_rate:'Block Hit Rate',cum_hit_rate_tip:'Cumulative hash hit rate. Total lookups in parentheses.',
+  cum_compile:'Total Compiled',cum_compile_tip:'Total compiled code blocks',
+  cum_rom_flush:'ROM Flush',cum_rom_flush_tip:'Total ROM cache resets',
+  cum_ram_flush:'RAM Flush',cum_ram_flush_tip:'Total RAM cache resets',
+  cum_ic_sync:'I$ Sync',cum_ic_sync_tip:'Total I-Cache syncs',
+  prof_hit:'Block Hit Rate',prof_hit_tip:'JIT hash hit / total. Hit = run compiled, Miss = compile new',
+  start_stop_stream:'Start/Stop stream',capture_title:'Capture frame',record_title:'Record',
+}};
+function t(k){return (I18N[curLang]&&I18N[curLang][k])||I18N.zh[k]||k;}
+function setLang(lang){curLang=lang;localStorage.setItem('gpsp_lang',lang);applyI18n();if(typeof buildLegend==='function')buildLegend();}
+function applyI18n(){
+  document.querySelectorAll('[data-i18n]').forEach(el=>{el.textContent=t(el.dataset.i18n);});
+  document.querySelectorAll('[data-i18n-tip]').forEach(el=>{el.setAttribute('data-tip',t(el.dataset.i18nTip));});
+  document.querySelectorAll('[data-i18n-title]').forEach(el=>{el.title=t(el.dataset.i18nTitle);});
+  document.querySelectorAll('.lang-btn').forEach(b=>{b.classList.toggle('active',b.dataset.lang===curLang);});
+  document.documentElement.lang=curLang==='zh'?'zh-CN':'en';
+}
+
 (function(){
 const $=id=>document.getElementById(id);
 const FRAME_US = 16743;
@@ -298,8 +485,8 @@ const FPS_ALPHA = 0.15;
  * cpu includes render time, so the stack shows total then render
  * as a sub-portion within it. */
 const SERIES = [
-  {key:'cpu_only', label:'CPU(不含渲染)', color:'#50c878'},
-  {key:'render',   label:'渲染',           color:'#d9a84a'},
+  {key:'cpu_only', label:'s_cpu_only', color:'#50c878'},
+  {key:'render',   label:'s_render',   color:'#d9a84a'},
 ];
 
 let history = [];  /* array of {ts, ...key: avg_us} */
@@ -464,7 +651,7 @@ function buildLegend(){
   for (const s of activeSeries) {
     const d = document.createElement('div');
     d.className = 'item';
-    d.innerHTML = `<div class="swatch" style="background:${s.color}"></div>${s.label}`;
+    d.innerHTML = `<div class="swatch" style="background:${s.color}"></div>${t(s.label)}`;
     el.appendChild(d);
   }
 }
@@ -475,60 +662,59 @@ function updateTable(data){
   for (const s of activeSeries) {
     const d = data[s.key];
     if (!d) continue;
-    html += `<tr><td>${s.label}</td><td class="v">${d.avg}</td><td class="p99">${d.p99}</td></tr>`;
+    html += `<tr><td>${t(s.label)}</td><td class="v">${d.avg}</td><td class="p99">${d.p99}</td></tr>`;
   }
   /* Add emu total if available */
-  if (data.emu) html += `<tr><td>帧总计</td><td class="v">${data.emu.avg}</td><td class="p99">${data.emu.p99}</td></tr>`;
+  if (data.emu) html += `<tr><td>${t('frame_total')}</td><td class="v">${data.emu.avg}</td><td class="p99">${data.emu.p99}</td></tr>`;
   $('tbl').innerHTML = html;
 }
 
 /* ── CPU profiling breakdown ──────────────────────── */
 /* All metric definitions with hierarchy info */
 const PROF_METRICS = [
-  /* top-level cycle metrics */
-  {key:'exec',   label:'执行',      color:'#50c878', indent:0,  parent:null, tip:'CPU执行JIT生成的本地代码的时间（包含查找+编译+同步）'},
-  {key:'drc_lkup',label:'查找',     color:'#d9a84a', indent:30, parent:'exec', tip:'在哈希表中查找PC地址对应的已编译代码块的开销'},
-  {key:'drc_xlat',label:'编译',     color:'#e06060', indent:30, parent:'exec', tip:'将GBA指令翻译为RISC-V本地代码的开销'},
-  {key:'drc_sync',label:'同步',     color:'#c080e0', indent:30, parent:'exec', tip:'JIT生成代码后刷新D-Cache和I-Cache的开销'},
-  {key:'update', label:'update',    color:'#4a90d9', indent:0,  parent:null, tip:'GBA模拟器每帧更新：PPU扫描线+音频+DMA+定时器等'},
-  {key:'scan',   label:'扫描线',    color:'#4a90d9', indent:30, parent:'update', tip:'PPU每帧228条扫描线的总渲染开销'},
-  {key:'bg',     label:'BG',        color:'#4a90d9', indent:60, parent:'scan', tip:'背景层渲染（BG0~BG3）'},
-  {key:'bg_tf',  label:'text快',    color:'#4a90d9', indent:90, parent:'bg', tip:'Text模式背景快速路径（无马赛克/无仿射）'},
-  {key:'bg_tm',  label:'text马赛克',color:'#60c0a0', indent:90, parent:'bg'},
-  {key:'bg_af',  label:'仿射BG',   color:'#c080e0', indent:90, parent:'bg', tip:'仿射变换背景渲染（旋转/缩放）'},
-  {key:'bg_bm',  label:'位图BG',   color:'#e06060', indent:90, parent:'bg', tip:'位图模式背景渲染（Mode3/4/5）'},
-  {key:'obj',    label:'OBJ',       color:'#60c0a0', indent:60, parent:'scan', tip:'精灵对象渲染（最多128个精灵）'},
-  {key:'fx',     label:'效果',      color:'#d9a84a', indent:60, parent:'scan', tip:'混合效果（Alpha混合、亮度渐变、窗口裁剪）'},
-  {key:'ord',    label:'排序',      color:'#c080e0', indent:60, parent:'scan', tip:'图层优先级排序'},
-  {key:'aff',    label:'仿射',      color:'#e06060', indent:60, parent:'scan', tip:'OBJ仿射变换计算'},
-  {key:'blank',  label:'空白',      color:'#666',    indent:60, parent:'scan', tip:'V-Blank/H-Blank期间的空闲扫描线'},
-  {key:'sound',  label:'音频',      color:'#8b5cf6', indent:30, parent:'update', tip:'GBA音频合成（PSG+DirectSound）'},
-  {key:'dma',    label:'DMA',       color:'#d9a84a', indent:30, parent:'update', tip:'DMA传输模拟'},
-  {key:'timer',  label:'定时器',    color:'#e06060', indent:30, parent:'update', tip:'GBA硬件定时器模拟'},
-  {key:'serial', label:'串口',      color:'#60c0a0', indent:30, parent:'update', tip:'串行通信模拟'},
-  {key:'irq',    label:'IRQ',       color:'#c080e0', indent:30, parent:'update', tip:'中断处理开销'},
+  {key:'exec',    label:'p_exec',    color:'#50c878', indent:0,  parent:null,     tip:'p_exec_tip'},
+  {key:'drc_lkup',label:'p_lookup',  color:'#d9a84a', indent:30, parent:'exec',   tip:'p_lookup_tip'},
+  {key:'drc_xlat',label:'p_compile', color:'#e06060', indent:30, parent:'exec',   tip:'p_compile_tip'},
+  {key:'drc_sync',label:'p_sync',    color:'#c080e0', indent:30, parent:'exec',   tip:'p_sync_tip'},
+  {key:'update',  label:'p_update',  color:'#4a90d9', indent:0,  parent:null,     tip:'p_update_tip'},
+  {key:'scan',    label:'p_scan',    color:'#4a90d9', indent:30, parent:'update', tip:'p_scan_tip'},
+  {key:'bg',      label:'p_bg',      color:'#4a90d9', indent:60, parent:'scan',   tip:'p_bg_tip'},
+  {key:'bg_tf',   label:'p_bg_tf',   color:'#4a90d9', indent:90, parent:'bg',     tip:'p_bg_tf_tip'},
+  {key:'bg_tm',   label:'p_bg_tm',   color:'#60c0a0', indent:90, parent:'bg'},
+  {key:'bg_af',   label:'p_bg_af',   color:'#c080e0', indent:90, parent:'bg',     tip:'p_bg_af_tip'},
+  {key:'bg_bm',   label:'p_bg_bm',   color:'#e06060', indent:90, parent:'bg',     tip:'p_bg_bm_tip'},
+  {key:'obj',     label:'p_obj',     color:'#60c0a0', indent:60, parent:'scan',   tip:'p_obj_tip'},
+  {key:'fx',      label:'p_fx',      color:'#d9a84a', indent:60, parent:'scan',   tip:'p_fx_tip'},
+  {key:'ord',     label:'p_ord',     color:'#c080e0', indent:60, parent:'scan',   tip:'p_ord_tip'},
+  {key:'aff',     label:'p_aff',     color:'#e06060', indent:60, parent:'scan',   tip:'p_aff_tip'},
+  {key:'blank',   label:'p_blank',   color:'#666',    indent:60, parent:'scan',   tip:'p_blank_tip'},
+  {key:'sound',   label:'p_sound',   color:'#8b5cf6', indent:30, parent:'update', tip:'p_sound_tip'},
+  {key:'dma',     label:'p_dma',     color:'#d9a84a', indent:30, parent:'update', tip:'p_dma_tip'},
+  {key:'timer',   label:'p_timer',   color:'#e06060', indent:30, parent:'update', tip:'p_timer_tip'},
+  {key:'serial',  label:'p_serial',  color:'#60c0a0', indent:30, parent:'update', tip:'p_serial_tip'},
+  {key:'irq',     label:'p_irq',     color:'#c080e0', indent:30, parent:'update', tip:'p_irq_tip'},
 ];
 
 /* Count metrics (not cycle-based) */
 const COUNT_METRICS = [
-  {key:'insn',         label:'指令/帧',       color:'#50c878', tip:'CPU每帧执行的GBA指令总数（ARM+Thumb）'},
-  {key:'lkup_hit',     label:'哈希表命中',    color:'#4a90d9', tip:'JIT哈希表查找命中：PC地址已有编译好的本地代码，可直接执行'},
-  {key:'lkup_miss',    label:'哈希表未中',    color:'#e06060', tip:'JIT哈希表查找未中：该PC地址没有编译过的代码，需要触发新编译'},
-  {key:'xlat_arm',     label:'编译ARM',       color:'#d9a84a', tip:'从ROM区域新编译的ARM指令块数量'},
-  {key:'xlat_thumb',   label:'编译Thumb',     color:'#8b5cf6', tip:'从ROM区域新编译的Thumb指令块数量'},
-  {key:'xlat_arm_ram', label:'编译ARM(RAM)',   color:'#60c0a0', tip:'从RAM区域(IWRAM/EWRAM)新编译的ARM指令块数量'},
-  {key:'xlat_thumb_ram',label:'编译Thumb(RAM)',color:'#c080e0', tip:'从RAM区域(IWRAM/EWRAM)新编译的Thumb指令块数量'},
-  {key:'fl_rom',       label:'ROM缓存重置',   color:'#e06060', tip:'ROM翻译缓存已满，整体回收并重新编译。频率越低缓存效率越高'},
-  {key:'fl_ram',       label:'RAM缓存重置',   color:'#d9a84a', tip:'RAM翻译缓存因游戏自修改代码(SMC)而被回收重置'},
-  {key:'ic_sync',      label:'I-Cache同步',   color:'#c080e0', tip:'JIT生成新代码后，刷新CPU指令缓存使其生效的次数'},
+  {key:'insn',          label:'c_insn',          color:'#50c878', tip:'c_insn_tip'},
+  {key:'lkup_hit',      label:'c_lkup_hit',      color:'#4a90d9', tip:'c_lkup_hit_tip'},
+  {key:'lkup_miss',     label:'c_lkup_miss',     color:'#e06060', tip:'c_lkup_miss_tip'},
+  {key:'xlat_arm',      label:'c_xlat_arm',      color:'#d9a84a', tip:'c_xlat_arm_tip'},
+  {key:'xlat_thumb',    label:'c_xlat_thumb',    color:'#8b5cf6', tip:'c_xlat_thumb_tip'},
+  {key:'xlat_arm_ram',  label:'c_xlat_arm_ram',  color:'#60c0a0', tip:'c_xlat_arm_ram_tip'},
+  {key:'xlat_thumb_ram',label:'c_xlat_thumb_ram',color:'#c080e0', tip:'c_xlat_thumb_ram_tip'},
+  {key:'fl_rom',        label:'c_fl_rom',        color:'#e06060', tip:'c_fl_rom_tip'},
+  {key:'fl_ram',        label:'c_fl_ram',        color:'#d9a84a', tip:'c_fl_ram_tip'},
+  {key:'ic_sync',       label:'c_ic_sync',       color:'#c080e0', tip:'c_ic_sync_tip'},
 ];
 
 function profBar(metric, pct, p) {
   const id = 'mc_' + metric.key;
   const pad = metric.indent ? `padding-left:${metric.indent}px` : '';
-  const tipAttr = metric.tip ? ` data-tip="${metric.tip}"` : '';
+  const tipAttr = metric.tip ? ` data-tip="${t(metric.tip)}"` : '';
   return `<div class="prof-row" style="${pad}" data-key="${metric.key}" data-color="${metric.color}">`
-       + `<span class="plbl"${tipAttr}>${metric.label}</span>`
+       + `<span class="plbl"${tipAttr}>${t(metric.label)}</span>`
        + `<div class="pbar-bg"><div class="pbar" style="width:${Math.min(pct,100)}%;background:${metric.color}"></div></div>`
        + `<span class="ppct">${pct}%</span></div>`
        + `<canvas class="mini-chart ${expandedMetric===metric.key?'open':''}" id="${id}"></canvas>`;
@@ -536,9 +722,9 @@ function profBar(metric, pct, p) {
 
 function countRow(metric, value) {
   const id = 'mc_' + metric.key;
-  const tipAttr = metric.tip ? ` data-tip="${metric.tip}"` : '';
+  const tipAttr = metric.tip ? ` data-tip="${t(metric.tip)}"` : '';
   return `<div class="prof-row" data-key="${metric.key}" data-color="${metric.color}">`
-       + `<span class="plbl"${tipAttr}>${metric.label}</span>`
+       + `<span class="plbl"${tipAttr}>${t(metric.label)}</span>`
        + `<div class="pbar-bg" style="display:flex;align-items:center;padding-left:6px;color:#afa;font-family:monospace;font-size:.78em">${value}</div>`
        + `<span class="ppct"></span></div>`
        + `<canvas class="mini-chart ${expandedMetric===metric.key?'open':''}" id="${id}"></canvas>`;
@@ -616,7 +802,7 @@ function updateProf(data){
   if (p.lkup_hit > 0 || p.lkup_miss > 0) {
     const hr = p.lkup_hit + p.lkup_miss > 0
       ? (p.lkup_hit / (p.lkup_hit + p.lkup_miss) * 100).toFixed(1) : '0';
-    thtml += `<tr><td><span data-tip="JIT哈希表查找命中 / 总查找次数。命中=直接执行已编译代码，未中=需要新编译">块查找命中率</span></td><td class="v" colspan="2">${hr}%</td></tr>`;
+    thtml += `<tr><td><span data-tip="${t('prof_hit_tip')}">${t('prof_hit')}</span></td><td class="v" colspan="2">${hr}%</td></tr>`;
   }
   $('prof_tbl').innerHTML = thtml;
 }
@@ -657,18 +843,18 @@ function updateJitCache(data) {
     const hotW = p.rom_cap > 0 ? (p.hot_wm / p.rom_cap * 100).toFixed(1) : '0';
     const coldW = p.rom_cap > 0 ? (Math.max(0, p.rom_used - p.hot_wm) / p.rom_cap * 100).toFixed(1) : '0';
     html += `<div style="margin-top:8px;font-size:.72em;color:#888;margin-bottom:2px">`
-         +  `<span data-tip="ROM缓存中热区(高频代码)与冷区(低频代码)的空间占比。热区在缓存重置时被保留">ROM 热/冷分布</span></div>`
+         +  `<span data-tip="${t('j_hot_cold_tip')}">${t('j_hot_cold')}</span></div>`
          +  `<div class="cache-row"><span class="clbl"></span>`
          +  `<div class="cbar-bg" style="display:flex">`
          +  `<div class="cbar" style="width:${hotW}%;background:#d9a84a;flex-shrink:0"></div>`
          +  `<div class="cbar" style="width:${coldW}%;background:#4a90d9;flex-shrink:0"></div>`
          +  `</div>`
-         +  `<span class="cval" style="width:auto;min-width:80px">热${hotKB}K 冷${coldKB}K</span></div>`;
+         +  `<span class="cval" style="width:auto;min-width:80px">${t('j_hot')}${hotKB}K ${t('j_cold')}${coldKB}K</span></div>`;
     html += `<div style="display:flex;flex-wrap:wrap;gap:6px 12px;font-size:.7em;margin-top:2px;padding-left:46px">`
-         +  `<span><span style="color:#d9a84a">■</span> 热区 ${hotPct}%</span>`
-         +  `<span><span style="color:#4a90d9">■</span> 冷区 ${coldPct}%</span>`
-         +  `<span style="color:#666" data-tip="热区中已索引的代码块数量">块 ${p.hot_blk||0}</span>`
-         +  `<span style="color:#666" data-tip="当前热区连续被保留(Path A)的次数。达到阈值后触发新鲜度检查">存活轮次 ${p.hot_age||0}</span>`
+         +  `<span><span style="color:#d9a84a">■</span> ${t('j_hot_zone')} ${hotPct}%</span>`
+         +  `<span><span style="color:#4a90d9">■</span> ${t('j_cold_zone')} ${coldPct}%</span>`
+         +  `<span style="color:#666" data-tip="${t('j_blocks_tip')}">${t('j_blocks')} ${p.hot_blk||0}</span>`
+         +  `<span style="color:#666" data-tip="${t('j_age_tip')}">${t('j_alive')} ${p.hot_age||0}</span>`
          +  `</div>`;
   }
 
@@ -683,16 +869,16 @@ function updateJitCache(data) {
     /* Avoided recompilation estimate: blocks preserved × Path A count */
     const avoidedBlocks = (p.hot_blk || 0) * hzA;
     html += `<div style="margin-top:8px;font-size:.72em;color:#888;margin-bottom:3px">`
-         +  `<span data-tip="ROM缓存重置时，热区机制对高频代码块的保护情况">热区生命周期</span></div>`
+         +  `<span data-tip="${t('j_lifecycle_tip')}">${t('j_lifecycle')}</span></div>`
          +  `<div style="display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.72em;font-family:monospace;padding-left:6px">`
-         +  `<span data-tip="ROM缓存满时，热区内容有效，直接保留并重新插入哈希表，跳过重编译">保留 <span style="color:#6f6">${hzA}</span></span>`
-         +  `<span data-tip="热区过期或命中率低于75%阈值，重新扫描频率环构建新热区">重建 <span style="color:#e06060">${hzB}</span></span>`
-         +  `<span data-tip="热区新鲜度检查：75%以上的热区块仍在近期频率环中出现，确认热区仍然有效">新鲜度通过 <span style="color:#afa">${hzS}</span></span>`
+         +  `<span data-tip="${t('j_retain_tip')}">${t('j_retain')} <span style="color:#6f6">${hzA}</span></span>`
+         +  `<span data-tip="${t('j_rebuild_tip')}">${t('j_rebuild')} <span style="color:#e06060">${hzB}</span></span>`
+         +  `<span data-tip="${t('j_fresh_tip')}">${t('j_fresh')} <span style="color:#afa">${hzS}</span></span>`
          +  `</div>`
          +  `<div style="display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.72em;font-family:monospace;padding-left:6px;margin-top:3px">`
-         +  `<span data-tip="保留次数/(保留+重建)。越高说明热区越稳定，越少触发昂贵的重编译">复用率 <span style="color:#8af">${reuseRate}%</span></span>`
-         +  `<span data-tip="距上次热区重建(Path B)经过的时间。越久说明热区越稳定">距上次重建 <span style="color:${freshColor}">${freshLabel}</span></span>`
-         +  `<span data-tip="热区保留期间免于重编译的代码块总数 = 热区块数 × 保留次数">免编译块 <span style="color:#afa">${avoidedBlocks}</span></span>`
+         +  `<span data-tip="${t('j_reuse_tip')}">${t('j_reuse')} <span style="color:#8af">${reuseRate}%</span></span>`
+         +  `<span data-tip="${t('j_since_tip')}">${t('j_since')} <span style="color:${freshColor}">${freshLabel}</span></span>`
+         +  `<span data-tip="${t('j_avoided_tip')}">${t('j_avoided')} <span style="color:#afa">${avoidedBlocks}</span></span>`
          +  `</div>`;
   }
 
@@ -711,25 +897,25 @@ function updateJitCache(data) {
     const wIcS = (w.ic / ws).toFixed(1);
     const wLife = w.fl_rom > 0 ? (ws / w.fl_rom).toFixed(1) : '∞';
     chtml += `<div style="grid-column:1/-1;color:#888;font-size:.72em;margin-top:2px;border-top:1px solid #1a2a3a;padding-top:4px">`
-          +  `<span data-tip="最近${ws}秒的滑动窗口统计，反映当前运行状态">${ws}秒滑动窗口</span></div>`
-          +  `<span class="ck" data-tip="哈希表查找命中 / 总查找次数。越高说明JIT缓存越有效，较少触发新编译">块查找命中率</span><span class="cv">${wHr}%</span>`
-          +  `<span class="ck" data-tip="每秒新编译的GBA代码块数（ARM+Thumb, ROM+RAM），越低越好">新编译/s</span><span class="cv">${wXlatS}</span>`
-          +  `<span class="ck" data-tip="ROM翻译缓存满后整体重置的频率。频率越低说明缓存容量和热区策略越有效">ROM重置/s</span><span class="cv">${wFlRomS}</span>`
-          +  `<span class="ck" data-tip="RAM缓存因自修改代码(SMC)而重置的频率">RAM重置/s</span><span class="cv">${wFlRamS}</span>`
-          +  `<span class="ck" data-tip="JIT生成代码后同步CPU指令缓存的频率">I-Cache同步/s</span><span class="cv">${wIcS}</span>`
-          +  `<span class="ck" data-tip="两次ROM缓存重置之间的平均间隔。越长说明缓存效率越高，热区保护越有效">ROM缓存寿命</span><span class="cv">${wLife}s</span>`;
+          +  `<span data-tip="${t('w_window_tip').replace('%d',ws)}">${ws}${t('w_window')}</span></div>`
+          +  `<span class="ck" data-tip="${t('w_hit_rate_tip')}">${t('w_hit_rate')}</span><span class="cv">${wHr}%</span>`
+          +  `<span class="ck" data-tip="${t('w_compile_s_tip')}">${t('w_compile_s')}</span><span class="cv">${wXlatS}</span>`
+          +  `<span class="ck" data-tip="${t('w_rom_flush_s_tip')}">${t('w_rom_flush_s')}</span><span class="cv">${wFlRomS}</span>`
+          +  `<span class="ck" data-tip="${t('w_ram_flush_s_tip')}">${t('w_ram_flush_s')}</span><span class="cv">${wFlRamS}</span>`
+          +  `<span class="ck" data-tip="${t('w_ic_sync_s_tip')}">${t('w_ic_sync_s')}</span><span class="cv">${wIcS}</span>`
+          +  `<span class="ck" data-tip="${t('w_cache_life_tip')}">${t('w_cache_life')}</span><span class="cv">${wLife}s</span>`;
   }
 
   if (c) {
     const cHr = (c.hr_x10 / 10).toFixed(1);
     const cTotal = Number(c.hits) + Number(c.misses);
     chtml += `<div style="grid-column:1/-1;color:#888;font-size:.72em;margin-top:2px;border-top:1px solid #1a2a3a;padding-top:4px">`
-          +  `<span data-tip="从本次会话启动至今的累计统计">累计统计（自启动）</span></div>`
-          +  `<span class="ck" data-tip="累计哈希表查找命中率。括号内为总查找次数">块查找命中率</span><span class="cv">${cHr}% (${cTotal})</span>`
-          +  `<span class="ck" data-tip="累计编译的代码块总数">编译总量</span><span class="cv">${c.xlat}</span>`
-          +  `<span class="ck" data-tip="累计ROM缓存重置次数">ROM重置</span><span class="cv">${c.fl_rom}</span>`
-          +  `<span class="ck" data-tip="累计RAM缓存重置次数">RAM重置</span><span class="cv">${c.fl_ram}</span>`
-          +  `<span class="ck" data-tip="累计I-Cache同步次数">I-Cache同步</span><span class="cv">${c.ic}</span>`;
+          +  `<span data-tip="${t('cum_title_tip')}">${t('cum_title')}</span></div>`
+          +  `<span class="ck" data-tip="${t('cum_hit_rate_tip')}">${t('cum_hit_rate')}</span><span class="cv">${cHr}% (${cTotal})</span>`
+          +  `<span class="ck" data-tip="${t('cum_compile_tip')}">${t('cum_compile')}</span><span class="cv">${c.xlat}</span>`
+          +  `<span class="ck" data-tip="${t('cum_rom_flush_tip')}">${t('cum_rom_flush')}</span><span class="cv">${c.fl_rom}</span>`
+          +  `<span class="ck" data-tip="${t('cum_ram_flush_tip')}">${t('cum_ram_flush')}</span><span class="cv">${c.fl_ram}</span>`
+          +  `<span class="ck" data-tip="${t('cum_ic_sync_tip')}">${t('cum_ic_sync')}</span><span class="cv">${c.ic}</span>`;
   }
 
   counts.innerHTML = chtml;
@@ -820,10 +1006,10 @@ async function saveSettings(){
     });
     const j = await r.json();
     const m = $('msg');
-    if(j.ok){ m.textContent='已保存'; m.className='msg ok'; }
-    else { m.textContent=j.error||'失败'; m.className='msg err'; }
+    if(j.ok){ m.textContent=t('saved'); m.className='msg ok'; }
+    else { m.textContent=j.error||t('failed'); m.className='msg err'; }
     setTimeout(()=>{ m.textContent=''; },2000);
-  } catch(e){ $('msg').textContent='网络错误'; $('msg').className='msg err'; }
+  } catch(e){ $('msg').textContent=t('net_error'); $('msg').className='msg err'; }
 }
 
 $('cfg_dynarec').addEventListener('change', saveSettings);
@@ -844,9 +1030,9 @@ async function loadRomList(){
   const el = $('rom_list');
   try {
     const r = await fetch('/api/roms');
-    if (!r.ok) { el.innerHTML='<div class="rom-empty">读取失败</div>'; return; }
+    if (!r.ok) { el.innerHTML='<div class="rom-empty">'+t('rom_load_fail')+'</div>'; return; }
     const roms = await r.json();
-    if (!roms.length) { el.innerHTML='<div class="rom-empty">SD卡未找到 .gba 文件</div>'; return; }
+    if (!roms.length) { el.innerHTML='<div class="rom-empty">'+t('rom_empty')+'</div>'; return; }
     el.innerHTML = '';
     roms.sort((a,b) => a.localeCompare(b));
     for (const name of roms) {
@@ -856,12 +1042,12 @@ async function loadRomList(){
       d.addEventListener('click', () => loadRom(name));
       el.appendChild(d);
     }
-  } catch(e){ el.innerHTML='<div class="rom-empty">网络错误</div>'; }
+  } catch(e){ el.innerHTML='<div class="rom-empty">'+t('net_error')+'</div>'; }
 }
 
 async function loadRom(filename){
   const m = $('rom_msg');
-  m.textContent = '加载中: ' + filename.replace(/\.gba$/i,'');
+  m.textContent = t('rom_switching') + filename.replace(/\.gba$/i,'');
   m.className = 'msg';
   try {
     const r = await fetch('/api/roms/load', {
@@ -869,9 +1055,9 @@ async function loadRom(filename){
       body: JSON.stringify({file: filename})
     });
     const j = await r.json();
-    if (j.ok) { m.textContent='已切换'; m.className='msg ok'; stRefresh(); }
-    else { m.textContent=j.error||'切换失败'; m.className='msg err'; }
-  } catch(e){ m.textContent='网络错误'; m.className='msg err'; }
+    if (j.ok) { m.textContent=t('rom_switched'); m.className='msg ok'; stRefresh(); }
+    else { m.textContent=j.error||t('rom_switch_fail'); m.className='msg err'; }
+  } catch(e){ m.textContent=t('net_error'); m.className='msg err'; }
   setTimeout(()=>{ m.textContent=''; }, 3000);
 }
 
@@ -882,9 +1068,9 @@ async function stRefresh(){
   const el = $('st_list');
   try {
     const r = await fetch('/api/states');
-    if (!r.ok) { el.innerHTML='<div class="rom-empty">读取失败</div>'; return; }
+    if (!r.ok) { el.innerHTML='<div class="rom-empty">'+t('rom_load_fail')+'</div>'; return; }
     const d = await r.json();
-    if (!d.slots || !d.slots.length) { el.innerHTML='<div class="rom-empty">暂无存档</div>'; return; }
+    if (!d.slots || !d.slots.length) { el.innerHTML='<div class="rom-empty">'+t('no_saves')+'</div>'; return; }
     el.innerHTML = '';
     for (const s of d.slots) {
       const div = document.createElement('div');
@@ -892,8 +1078,8 @@ async function stRefresh(){
       const sizeKB = (s.size / 1024).toFixed(0);
       div.innerHTML = `<span class="name">Slot ${s.slot} (${sizeKB} KB)</span>`
         + `<span style="display:flex;gap:6px">`
-        + `<a href="/api/states/download?slot=${s.slot}" style="color:#8af;font-size:.75em;text-decoration:none" title="下载">⬇</a>`
-        + `<span style="color:#f66;font-size:.75em;cursor:pointer" title="删除" data-slot="${s.slot}" class="st-del">✕</span>`
+        + `<a href="/api/states/download?slot=${s.slot}" style="color:#8af;font-size:.75em;text-decoration:none" title="${t('dl_title')}">⬇</a>`
+        + `<span style="color:#f66;font-size:.75em;cursor:pointer" title="${t('del_title')}" data-slot="${s.slot}" class="st-del">✕</span>`
         + `</span>`;
       el.appendChild(div);
     }
@@ -903,38 +1089,38 @@ async function stRefresh(){
         stDelete(parseInt(btn.dataset.slot));
       });
     });
-  } catch(e){ el.innerHTML='<div class="rom-empty">网络错误</div>'; }
+  } catch(e){ el.innerHTML='<div class="rom-empty">'+t('net_error')+'</div>'; }
 }
 
 async function stSave(){
   const slot = parseInt($('st_slot').value);
   const m = $('st_msg');
-  m.textContent = '保存中...'; m.className = 'msg';
+  m.textContent = t('saving'); m.className = 'msg';
   try {
     const r = await fetch('/api/states/save', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({slot})
     });
     const j = await r.json();
-    if (j.ok) { m.textContent='已保存'; m.className='msg ok'; stRefresh(); }
-    else { m.textContent=j.error||'保存失败'; m.className='msg err'; }
-  } catch(e){ m.textContent='网络错误'; m.className='msg err'; }
+    if (j.ok) { m.textContent=t('saved'); m.className='msg ok'; stRefresh(); }
+    else { m.textContent=j.error||t('save_fail'); m.className='msg err'; }
+  } catch(e){ m.textContent=t('net_error'); m.className='msg err'; }
   setTimeout(()=>{ m.textContent=''; }, 2000);
 }
 
 async function stLoad(){
   const slot = parseInt($('st_slot').value);
   const m = $('st_msg');
-  m.textContent = '读取中...'; m.className = 'msg';
+  m.textContent = t('loading_state'); m.className = 'msg';
   try {
     const r = await fetch('/api/states/load', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({slot})
     });
     const j = await r.json();
-    if (j.ok) { m.textContent='已读取'; m.className='msg ok'; }
-    else { m.textContent=j.error||'读取失败'; m.className='msg err'; }
-  } catch(e){ m.textContent='网络错误'; m.className='msg err'; }
+    if (j.ok) { m.textContent=t('loaded'); m.className='msg ok'; }
+    else { m.textContent=j.error||t('load_state_fail'); m.className='msg err'; }
+  } catch(e){ m.textContent=t('net_error'); m.className='msg err'; }
   setTimeout(()=>{ m.textContent=''; }, 2000);
 }
 
@@ -946,15 +1132,16 @@ async function stDelete(slot){
       body: JSON.stringify({slot})
     });
     const j = await r.json();
-    if (j.ok) { m.textContent='已删除'; m.className='msg ok'; stRefresh(); }
-    else { m.textContent=j.error||'删除失败'; m.className='msg err'; }
-  } catch(e){ m.textContent='网络错误'; m.className='msg err'; }
+    if (j.ok) { m.textContent=t('deleted'); m.className='msg ok'; stRefresh(); }
+    else { m.textContent=j.error||t('delete_fail'); m.className='msg err'; }
+  } catch(e){ m.textContent=t('net_error'); m.className='msg err'; }
   setTimeout(()=>{ m.textContent=''; }, 2000);
 }
 
 $('st_save_btn').addEventListener('click', stSave);
 $('st_load_btn').addEventListener('click', stLoad);
 stRefresh();
+applyI18n();
 
 /* ── Gamepad + Video Panel ─────────────────────────── */
 const CTRL_KEY_MAP = {
@@ -984,12 +1171,12 @@ function ctrlWsConnect(){
   ctrlWs = new WebSocket(proto + '//' + location.host + '/ws');
   ctrlWs.binaryType = 'arraybuffer';
   ctrlWs.onopen = () => {
-    $('ws_status').textContent = 'WS: 已连接';
+    $('ws_status').textContent = t('ws_connected');
     $('ws_status').className = 'ws-status ok';
     ctrlPingTimer = setInterval(ctrlSendPing, 2000);
   };
   ctrlWs.onclose = () => {
-    $('ws_status').textContent = 'WS: 断开';
+    $('ws_status').textContent = t('ws_disconnected');
     $('ws_status').className = 'ws-status err';
     clearInterval(ctrlPingTimer);
     ctrlWs = null;
@@ -1087,17 +1274,17 @@ async function captureFrame(){
   const t0 = performance.now();
   try {
     const r = await fetch('/api/frame');
-    if (!r.ok) { $('frame_info').textContent = '截帧失败: ' + r.status; return; }
+    if (!r.ok) { $('frame_info').textContent = t('capture_fail') + r.status; return; }
     const abuf = await r.arrayBuffer();
     if (abuf.byteLength !== 240 * 160 * 2) {
-      $('frame_info').textContent = '帧大小异常: ' + abuf.byteLength;
+      $('frame_info').textContent = t('frame_size_err') + abuf.byteLength;
       return;
     }
     renderRGB565(abuf);
     const ms = (performance.now() - t0).toFixed(0);
     $('frame_info').textContent = (abuf.byteLength / 1024).toFixed(1) + ' KB | ' + ms + ' ms';
   } catch(e){
-    $('frame_info').textContent = '网络错误';
+    $('frame_info').textContent = t('net_error');
   } finally {
     frameBusy = false;
   }
@@ -1132,7 +1319,7 @@ function loadScript(url) {
     const s = document.createElement('script');
     s.src = url;
     s.onload = resolve;
-    s.onerror = () => reject(new Error('加载失败: ' + url));
+    s.onerror = () => reject(new Error(t('script_load_fail') + url));
     document.head.appendChild(s);
   });
 }
@@ -1166,10 +1353,11 @@ function streamStart() {
   streamAudioPrimed = false;
   useBroadway = false;
   streamStartTime = performance.now();
-  $('stream_btn').textContent = '⏸ 停止';
+  $('stream_btn').querySelector('[data-i18n]').dataset.i18n = 'stream_stop';
+  $('stream_btn').querySelector('[data-i18n]').textContent = t('stream_stop');
   $('stream_btn').classList.add('on');
-  $('stream_info').textContent = '连接中...';
-  $('frame_info').textContent = '初始化解码器...';
+  $('stream_info').textContent = t('connecting');
+  $('frame_info').textContent = t('init_decoder');
 
   /* Init AudioContext at GBA's native 65536 Hz.  This matches the
    * createBuffer sample rate exactly — zero resampling in WebAudio.
@@ -1186,7 +1374,7 @@ function streamStart() {
   streamWs = new WebSocket(proto + '//' + location.host + '/ws/stream');
   streamWs.binaryType = 'arraybuffer';
   streamWs.onopen = async () => {
-    $('stream_info').textContent = '初始化解码器...';
+    $('stream_info').textContent = t('init_decoder');
 
     /* Init video decoder */
     let decoderOk = false;
@@ -1196,7 +1384,7 @@ function streamStart() {
         error: e => {
           console.error('VideoDecoder error:', e);
           streamDecErr = '' + e;
-          $('frame_info').textContent = '解码器错误: ' + e.message;
+          $('frame_info').textContent = t('decoder_error') + e.message;
         },
       });
       videoDecoder.configure({
@@ -1206,16 +1394,16 @@ function streamStart() {
         optimizeForLatency: true,
       });
       decoderOk = true;
-      $('frame_info').textContent = 'WebCodecs 就绪';
+      $('frame_info').textContent = t('webcodecs_ready');
     } else {
-      $('frame_info').textContent = '加载 Broadway.js 解码器...';
+      $('frame_info').textContent = t('loading_broadway');
       try {
         await initBroadway();
         useBroadway = true;
         decoderOk = true;
-        $('frame_info').textContent = 'Broadway 就绪';
+        $('frame_info').textContent = t('broadway_ready');
       } catch(e) {
-        $('frame_info').textContent = 'Broadway 加载失败: ' + e.message;
+        $('frame_info').textContent = t('broadway_fail') + e.message;
         console.error('Broadway init failed:', e);
       }
     }
@@ -1224,11 +1412,11 @@ function streamStart() {
       /* Send reset command (0x20) — backend will reset encoder
        * to produce IDR as first frame and start streaming task */
       streamWs.send(new Uint8Array([0x20]).buffer);
-      $('stream_info').textContent = '推流中';
+      $('stream_info').textContent = t('streaming');
     }
   };
   streamWs.onclose = () => {
-    $('stream_info').textContent = '已断开';
+    $('stream_info').textContent = t('disconnected');
     streamStop();
   };
   streamWs.onerror = () => {
@@ -1239,7 +1427,8 @@ function streamStart() {
 
 function streamStop() {
   streamActive = false;
-  $('stream_btn').textContent = '▶ 推流';
+  $('stream_btn').querySelector('[data-i18n]').dataset.i18n = 'stream_start';
+  $('stream_btn').querySelector('[data-i18n]').textContent = t('stream_start');
   $('stream_btn').classList.remove('on');
 
   if (streamWs) {
@@ -1294,7 +1483,7 @@ function onStreamMessage(evt) {
         streamFrames++;
       } catch(e) {
         console.warn('VideoDecoder decode error:', e);
-        $('frame_info').textContent = '解码异常: ' + e.message;
+        $('frame_info').textContent = t('decode_err') + e.message;
       }
     } else if (broadwayPlayer && useBroadway) {
       /* ── Broadway.js path ── */
@@ -1303,10 +1492,10 @@ function onStreamMessage(evt) {
         streamFrames++;
       } catch(e) {
         console.warn('Broadway decode error:', e);
-        $('frame_info').textContent = 'Broadway 解码异常: ' + e.message;
+        $('frame_info').textContent = t('broadway_decode_err') + e.message;
       }
     } else {
-      $('frame_info').textContent = '解码器初始化中...';
+      $('frame_info').textContent = t('decoder_init');
       return;
     }
 
@@ -1413,7 +1602,7 @@ $('rec_btn').addEventListener('click', function() {
   try {
     mediaRecorder = new MediaRecorder(stream, opts);
   } catch(e) {
-    $('frame_info').textContent = '录制不可用';
+    $('frame_info').textContent = t('record_unavail');
     return;
   }
 
@@ -1421,7 +1610,7 @@ $('rec_btn').addEventListener('click', function() {
     if (e.data.size > 0) recordChunks.push(e.data);
   };
   mediaRecorder.onstop = () => {
-    $('rec_btn').textContent = '⏺ 录制';
+    $('rec_btn').querySelector('[data-i18n]') && ($('rec_btn').querySelector('[data-i18n]').textContent = t('record'));
     $('rec_btn').classList.remove('rec');
     /* Download the recorded file */
     const blob = new Blob(recordChunks, { type: opts.mimeType });
@@ -1436,7 +1625,7 @@ $('rec_btn').addEventListener('click', function() {
   };
 
   mediaRecorder.start(1000); /* 1s timeslice */
-  $('rec_btn').textContent = '⏹ 停止录制';
+  $('rec_btn').querySelector('[data-i18n]') && ($('rec_btn').querySelector('[data-i18n]').textContent = t('record_stop'));
   $('rec_btn').classList.add('rec');
 });
 
