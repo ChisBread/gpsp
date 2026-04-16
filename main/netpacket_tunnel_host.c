@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -23,6 +24,7 @@
 #include "esp_timer.h"
 
 #include "c6_remote.h"
+#include "gpsp_config.h"
 #include "runtime_config.h"
 
 extern bool netpacket_host_attach_client(int fd, const char *peer_desc);
@@ -33,6 +35,7 @@ extern bool netpacket_host_attach_client(int fd, const char *peer_desc);
 #define TUNNEL_UNIQUE_SIZE    12
 #define TUNNEL_MSG_SIZE       16
 #define TUNNEL_MAX_PENDING    3
+#define LOBBY_POST_INTERVAL_US 20000000
 
 typedef enum {
     TUNNEL_CTRL_DISCONNECTED = 0,
@@ -63,6 +66,214 @@ static char ctrl_status[32] = "idle";
 static uint8_t ctrl_recv_buf[64];
 static size_t ctrl_recv_len;
 static pending_link_t pending_links[TUNNEL_MAX_PENDING];
+static int64_t lobby_last_post_us;
+
+/* Forward declarations for helpers referenced before their definitions */
+static bool set_nonblocking_nodelay(int fd);
+static bool resolve_host_addr(const char *host, uint16_t port,
+                              struct sockaddr_in *out_addr);
+static bool socket_connect_done(int fd);
+static bool socket_connect_wait(int fd, int timeout_ms);
+
+static void percent_encode_append(char *dst, size_t dst_size,
+                                  size_t *io_off, const char *src)
+{
+    size_t off = io_off ? *io_off : 0;
+    const char *hex = "0123456789ABCDEF";
+
+    if (!dst || dst_size == 0 || !io_off)
+        return;
+
+    if (!src)
+        src = "";
+
+    while (*src && off + 1 < dst_size) {
+        unsigned char c = (unsigned char)*src++;
+        bool safe = (c >= 'a' && c <= 'z') ||
+                    (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') ||
+                    c == '-' || c == '_' || c == '.' || c == '~';
+
+        if (safe) {
+            dst[off++] = (char)c;
+            continue;
+        }
+
+        if (off + 3 >= dst_size)
+            break;
+        dst[off++] = '%';
+        dst[off++] = hex[(c >> 4) & 0x0f];
+        dst[off++] = hex[c & 0x0f];
+    }
+
+    dst[off] = '\0';
+    *io_off = off;
+}
+
+static bool lobby_enabled(void)
+{
+    return gpsp_netplay_lobby_host[0] != '\0' &&
+           gpsp_netplay_lobby_port != 0 &&
+           gpsp_netplay_lobby_relay[0] != '\0';
+}
+
+static bool send_with_timeout(int fd, const void *buf, size_t len, int timeout_ms)
+{
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t sent = 0;
+    int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+
+    while (sent < len) {
+        ssize_t n = send(fd, p + sent, len - sent, 0);
+        if (n > 0) {
+            sent += (size_t)n;
+            continue;
+        }
+
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (esp_timer_get_time() > deadline)
+                return false;
+            fd_set wfds;
+            struct timeval tv = { .tv_sec = 0, .tv_usec = 20000 };
+            FD_ZERO(&wfds);
+            FD_SET(fd, &wfds);
+            (void)select(fd + 1, NULL, &wfds, NULL, &tv);
+            continue;
+        }
+        return false;
+    }
+
+    return true;
+}
+
+static bool recv_status_200(int fd)
+{
+    char resp[128];
+    size_t got = 0;
+    int64_t deadline = esp_timer_get_time() + 2000000;
+
+    while (got + 1 < sizeof(resp)) {
+        ssize_t n = recv(fd, resp + got, sizeof(resp) - got - 1, MSG_DONTWAIT);
+        if (n > 0) {
+            got += (size_t)n;
+            resp[got] = '\0';
+            if (strstr(resp, "\r\n"))
+                break;
+            continue;
+        }
+
+        if (n == 0)
+            break;
+
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (esp_timer_get_time() > deadline)
+                break;
+            fd_set rfds;
+            struct timeval tv = { .tv_sec = 0, .tv_usec = 20000 };
+            FD_ZERO(&rfds);
+            FD_SET(fd, &rfds);
+            (void)select(fd + 1, &rfds, NULL, NULL, &tv);
+            continue;
+        }
+        break;
+    }
+
+    if (got == 0)
+        return false;
+    return strstr(resp, " 200 ") != NULL;
+}
+
+static bool lobby_post_add(void)
+{
+    struct sockaddr_in addr;
+    int fd;
+    char encoded_nick[96];
+    size_t enc_off = 0;
+    char body[512];
+    char req[768];
+
+    if (!lobby_enabled())
+        return false;
+
+    if (!resolve_host_addr(gpsp_netplay_lobby_host, gpsp_netplay_lobby_port, &addr)) {
+        ESP_LOGW(TAG, "Invalid lobby address: %s", gpsp_netplay_lobby_host);
+        return false;
+    }
+
+    fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0) {
+        ESP_LOGW(TAG, "Lobby socket create failed: errno=%d", errno);
+        return false;
+    }
+
+    set_nonblocking_nodelay(fd);
+    int rc = connect(fd, (const struct sockaddr *)&addr, sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS) {
+        ESP_LOGW(TAG, "Lobby connect failed immediately: errno=%d", errno);
+        close(fd);
+        return false;
+    }
+    if (!socket_connect_wait(fd, 2000)) {
+        ESP_LOGW(TAG, "Lobby connect timeout/fail: %s:%u",
+                 gpsp_netplay_lobby_host,
+                 (unsigned)gpsp_netplay_lobby_port);
+        close(fd);
+        return false;
+    }
+
+    encoded_nick[0] = '\0';
+    percent_encode_append(encoded_nick, sizeof(encoded_nick), &enc_off,
+                          gpsp_netplay_ra_nick);
+
+    snprintf(body, sizeof(body),
+             "username=%s&core_name=%s&core_version=%s&game_name=GBA"
+             "&game_crc=00000000&port=%u&force_mitm=1&mitm_server=%s"
+             "&mitm_session=%s&has_password=0&has_spectate_password=0"
+             "&retroarch_version=ESP32-P4&frontend=ESP32-P4",
+             encoded_nick,
+             GPSP_NAME,
+             GPSP_NETPACKET_VERSION,
+             (unsigned)gpsp_netplay_ra_port,
+             gpsp_netplay_lobby_relay,
+             ctrl_room_id);
+
+    snprintf(req, sizeof(req),
+             "POST /add HTTP/1.1\r\n"
+             "Host: %s:%u\r\n"
+             "Connection: close\r\n"
+             "Content-Type: application/x-www-form-urlencoded\r\n"
+             "Content-Length: %u\r\n\r\n"
+             "%s",
+             gpsp_netplay_lobby_host,
+             (unsigned)gpsp_netplay_lobby_port,
+             (unsigned)strlen(body),
+             body);
+
+    bool ok = send_with_timeout(fd, req, strlen(req), 2000) && recv_status_200(fd);
+    close(fd);
+
+    if (ok) {
+        ESP_LOGI(TAG, "Lobby publish OK: relay=%s room=%s",
+                 gpsp_netplay_lobby_relay, ctrl_room_id);
+    } else {
+        ESP_LOGW(TAG, "Lobby publish failed");
+    }
+    return ok;
+}
+
+static void lobby_try_publish(bool force)
+{
+    if (!lobby_enabled() || ctrl_room_id[0] == '\0')
+        return;
+
+    int64_t now_us = esp_timer_get_time();
+    if (!force && (now_us - lobby_last_post_us) < LOBBY_POST_INTERVAL_US)
+        return;
+
+    if (lobby_post_add()) {
+        lobby_last_post_us = now_us;
+    }
+}
 
 static void bytes_to_hex(const uint8_t *src, size_t len, char *dst, size_t dst_len)
 {
@@ -176,6 +387,24 @@ static bool socket_connect_done(int fd)
     return true;
 }
 
+static bool socket_connect_wait(int fd, int timeout_ms)
+{
+    int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+
+    while (esp_timer_get_time() < deadline) {
+        if (socket_connect_done(fd))
+            return true;
+
+        fd_set wfds;
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 };
+        FD_ZERO(&wfds);
+        FD_SET(fd, &wfds);
+        (void)select(fd + 1, NULL, &wfds, NULL, &tv);
+    }
+
+    return socket_connect_done(fd);
+}
+
 static bool send_all_fd(int fd, const void *data, size_t len)
 {
     const uint8_t *ptr = (const uint8_t *)data;
@@ -219,6 +448,7 @@ static void stop_all(void)
     ctrl_state = TUNNEL_CTRL_DISCONNECTED;
     ctrl_recv_len = 0;
     ctrl_room_id[0] = '\0';
+    lobby_last_post_us = 0;
     set_status("idle");
 }
 
@@ -445,9 +675,11 @@ void netpacket_tunnel_host_poll(void)
         ctrl_state = TUNNEL_CTRL_READY;
         set_status("room_ready");
         ESP_LOGI(TAG, "Tunnel room created: %s", ctrl_room_id);
+        lobby_try_publish(true);
         return;
     }
 
+    lobby_try_publish(false);
     process_control_ready();
 }
 

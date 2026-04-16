@@ -328,6 +328,18 @@ btn:hover{background:#3a4a6a}
     <label data-i18n="netplay_tunnel_id">隧道 Session ID</label>
     <input type="text" id="cfg_np_tunnel" maxlength="24" placeholder="24位十六进制" style="background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:3px 8px;font-size:.82em;width:200px;font-family:monospace">
   </div>
+  <div class="row" id="row_np_lobby_host" style="display:none">
+    <label data-i18n="netplay_lobby_host">Lobby 地址</label>
+    <input type="text" id="cfg_np_lobby_host" placeholder="192.168.1.x" style="background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:3px 8px;font-size:.82em;width:140px">
+  </div>
+  <div class="row" id="row_np_lobby_port" style="display:none">
+    <label data-i18n="netplay_lobby_port">Lobby 端口</label>
+    <input type="number" id="cfg_np_lobby_port" min="1" max="65535" style="background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:3px 8px;font-size:.82em;width:80px">
+  </div>
+  <div class="row" id="row_np_lobby_relay" style="display:none">
+    <label data-i18n="netplay_lobby_relay">Relay 名称</label>
+    <input type="text" id="cfg_np_lobby_relay" maxlength="31" placeholder="chisofficial" style="background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:3px 8px;font-size:.82em;width:140px">
+  </div>
   <div class="row" id="row_np_room" style="display:none">
     <label data-i18n="netplay_room_id">房间 ID</label>
     <input type="text" id="cfg_np_room" readonly style="background:#111722;color:#9fd3ff;border:1px solid #35506b;border-radius:4px;padding:3px 8px;font-size:.82em;width:200px;font-family:monospace">
@@ -380,7 +392,7 @@ zh:{
   rtc_mode:'RTC 时钟',rtc_auto:'自动',rtc_on:'开启',rtc_off:'关闭',
   frameskip:'跳帧模式',fs_off:'关闭',fs_auto:'自动',fs_auto_thr:'自动 (阈值)',fs_fixed:'固定间隔',
   fs_threshold:'跳帧阈值 (%)',fs_interval:'跳帧间隔',
-  netplay:'联机',netplay_mode_lbl:'联机模式',np_off:'关闭',np_client:'客户端 (直连)',np_host:'主机 (等待连入)',np_tunnel:'隧道客户端',np_tunnel_host:'隧道主机 (创建房间)',netplay_host:'主机/隧道地址',netplay_port:'端口',netplay_nick:'昵称',netplay_tunnel_id:'隧道 Session ID',netplay_room_id:'房间 ID',netplay_room_status:'房间状态',
+  netplay:'联机',netplay_mode_lbl:'联机模式',np_off:'关闭',np_client:'客户端 (直连)',np_host:'主机 (等待连入)',np_tunnel:'隧道客户端',np_tunnel_host:'隧道主机 (创建房间)',netplay_host:'主机/隧道地址',netplay_port:'端口',netplay_nick:'昵称',netplay_tunnel_id:'隧道 Session ID',netplay_lobby_host:'Lobby 地址',netplay_lobby_port:'Lobby 端口',netplay_lobby_relay:'Relay 名称',netplay_room_id:'房间 ID',netplay_room_status:'房间状态',
   games:'游戏',rom_loading:'加载中...',rom_load_fail:'读取失败',rom_empty:'SD卡未找到 .gba 文件',
   rom_switching:'加载中: ',rom_switched:'已切换',rom_switch_fail:'切换失败',
   savestates:'即时存档',save_slot:'存档槽:',save_btn:'保存',load_btn:'读取',
@@ -472,7 +484,7 @@ en:{
   rtc_mode:'RTC Clock',rtc_auto:'Auto',rtc_on:'Enabled',rtc_off:'Disabled',
   frameskip:'Frameskip',fs_off:'Off',fs_auto:'Auto',fs_auto_thr:'Auto (Threshold)',fs_fixed:'Fixed Interval',
   fs_threshold:'Frameskip Threshold (%)',fs_interval:'Frameskip Interval',
-  netplay:'Netplay',netplay_mode_lbl:'Netplay Mode',np_off:'Disabled',np_client:'Client (Direct)',np_host:'Host (Listen)',np_tunnel:'Tunnel Client',np_tunnel_host:'Tunnel Host (Create Room)',netplay_host:'Host/Tunnel Address',netplay_port:'Port',netplay_nick:'Nickname',netplay_tunnel_id:'Tunnel Session ID',netplay_room_id:'Room ID',netplay_room_status:'Room Status',
+  netplay:'Netplay',netplay_mode_lbl:'Netplay Mode',np_off:'Disabled',np_client:'Client (Direct)',np_host:'Host (Listen)',np_tunnel:'Tunnel Client',np_tunnel_host:'Tunnel Host (Create Room)',netplay_host:'Host/Tunnel Address',netplay_port:'Port',netplay_nick:'Nickname',netplay_tunnel_id:'Tunnel Session ID',netplay_lobby_host:'Lobby Host',netplay_lobby_port:'Lobby Port',netplay_lobby_relay:'Relay Name',netplay_room_id:'Room ID',netplay_room_status:'Room Status',
   games:'Games',rom_loading:'Loading...',rom_load_fail:'Load failed',rom_empty:'No .gba files on SD card',
   rom_switching:'Loading: ',rom_switched:'Switched',rom_switch_fail:'Switch failed',
   savestates:'Save States',save_slot:'Slot:',save_btn:'Save',load_btn:'Load',
@@ -1092,6 +1104,9 @@ async function loadSettings(){
     $('cfg_np_port').value = String(j.netplay_port || 55435);
     $('cfg_np_nick').value = j.netplay_nick || '';
     $('cfg_np_tunnel').value = j.netplay_tunnel_id || '';
+    $('cfg_np_lobby_host').value = j.netplay_lobby_host || '';
+    $('cfg_np_lobby_port').value = String(j.netplay_lobby_port || 7777);
+    $('cfg_np_lobby_relay').value = j.netplay_lobby_relay || '';
     $('cfg_np_room').value = j.netplay_tunnel_room_id || '';
     $('cfg_np_status').textContent = j.netplay_tunnel_status || 'idle';
     updateNetplayUI();
@@ -1125,7 +1140,10 @@ async function saveSettings(){
     netplay_host: $('cfg_np_host').value,
     netplay_port: parseInt($('cfg_np_port').value, 10) || 55435,
     netplay_nick: $('cfg_np_nick').value,
-    netplay_tunnel_id: $('cfg_np_tunnel').value
+    netplay_tunnel_id: $('cfg_np_tunnel').value,
+    netplay_lobby_host: $('cfg_np_lobby_host').value,
+    netplay_lobby_port: parseInt($('cfg_np_lobby_port').value, 10) || 7777,
+    netplay_lobby_relay: $('cfg_np_lobby_relay').value
   };
   try {
     const r = await fetch('/api/settings', {
@@ -1153,6 +1171,9 @@ $('cfg_np_host').addEventListener('change', saveSettings);
 $('cfg_np_port').addEventListener('change', saveSettings);
 $('cfg_np_nick').addEventListener('change', saveSettings);
 $('cfg_np_tunnel').addEventListener('change', saveSettings);
+$('cfg_np_lobby_host').addEventListener('change', saveSettings);
+$('cfg_np_lobby_port').addEventListener('change', saveSettings);
+$('cfg_np_lobby_relay').addEventListener('change', saveSettings);
 
 function updateFrameskipUI(){
   var t = parseInt($('cfg_frameskip').value, 10);
@@ -1166,6 +1187,9 @@ function updateNetplayUI(){
   $('row_np_host').style.display = (m === 1 || m === 3 || m === 4) ? '' : 'none';
   /* tunnel session id: only for tunnel client mode */
   $('row_np_tunnel').style.display = (m === 3) ? '' : 'none';
+  $('row_np_lobby_host').style.display = (m === 3 || m === 4) ? '' : 'none';
+  $('row_np_lobby_port').style.display = (m === 3 || m === 4) ? '' : 'none';
+  $('row_np_lobby_relay').style.display = (m === 3 || m === 4) ? '' : 'none';
   $('row_np_room').style.display = (m === 4) ? '' : 'none';
   $('row_np_status').style.display = (m === 4) ? '' : 'none';
 }

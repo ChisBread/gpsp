@@ -27,6 +27,9 @@ char gpsp_netplay_ra_host[64];
 uint16_t gpsp_netplay_ra_port;
 char gpsp_netplay_ra_nick[32];
 char gpsp_netplay_ra_tunnel_id[25];
+char gpsp_netplay_lobby_host[64];
+uint16_t gpsp_netplay_lobby_port;
+char gpsp_netplay_lobby_relay[32];
 
 int gpsp_serial_setting;
 int gpsp_rtc_mode;
@@ -96,6 +99,9 @@ static void gpsp_runtime_config_set_defaults(void)
     gpsp_netplay_ra_port = 55435;
     strlcpy(gpsp_netplay_ra_nick, "ESP32-P4", sizeof(gpsp_netplay_ra_nick));
     gpsp_netplay_ra_tunnel_id[0] = '\0';
+    gpsp_netplay_lobby_host[0] = '\0';
+    gpsp_netplay_lobby_port = 7777;
+    gpsp_netplay_lobby_relay[0] = '\0';
 
     gpsp_serial_setting = SERIAL_MODE_AUTO;
     gpsp_rtc_mode = FEAT_AUTODETECT;
@@ -198,6 +204,24 @@ static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
 
     if (strcmp(key, "netplay_ra_tunnel_id") == 0) {
         strlcpy(gpsp_netplay_ra_tunnel_id, value, sizeof(gpsp_netplay_ra_tunnel_id));
+        return;
+    }
+
+    if (strcmp(key, "netplay_lobby_host") == 0) {
+        strlcpy(gpsp_netplay_lobby_host, value, sizeof(gpsp_netplay_lobby_host));
+        return;
+    }
+
+    if (strcmp(key, "netplay_lobby_port") == 0) {
+        parsed_long = strtol(value, &endptr, 10);
+        if (endptr != value && parsed_long >= 1 && parsed_long <= 65535) {
+            gpsp_netplay_lobby_port = (uint16_t)parsed_long;
+        }
+        return;
+    }
+
+    if (strcmp(key, "netplay_lobby_relay") == 0) {
+        strlcpy(gpsp_netplay_lobby_relay, value, sizeof(gpsp_netplay_lobby_relay));
         return;
     }
 
@@ -306,6 +330,9 @@ esp_err_t gpsp_runtime_config_save(void)
             "netplay_ra_port=%u\n"
             "netplay_ra_nick=%s\n"
             "netplay_ra_tunnel_id=%s\n"
+            "netplay_lobby_host=%s\n"
+            "netplay_lobby_port=%u\n"
+            "netplay_lobby_relay=%s\n"
             "frameskip_interval=%u\n"
             "frameskip_type=%u\n"
             "frameskip_threshold=%u\n",
@@ -321,6 +348,9 @@ esp_err_t gpsp_runtime_config_save(void)
             gpsp_netplay_ra_port,
             gpsp_netplay_ra_nick,
             gpsp_netplay_ra_tunnel_id,
+            gpsp_netplay_lobby_host,
+            gpsp_netplay_lobby_port,
+            gpsp_netplay_lobby_relay,
             (unsigned)gpsp_frameskip_interval,
             (unsigned)gpsp_frameskip_type,
             (unsigned)gpsp_frameskip_threshold);
@@ -377,5 +407,10 @@ esp_err_t gpsp_runtime_config_init(void)
              gpsp_netplay_ra_host,
              gpsp_netplay_ra_port,
              gpsp_netplay_ra_nick);
+    ESP_LOGI(TAG,
+             "Runtime lobby: host=%s port=%u relay=%s",
+             gpsp_netplay_lobby_host,
+             gpsp_netplay_lobby_port,
+             gpsp_netplay_lobby_relay);
     return ESP_OK;
 }

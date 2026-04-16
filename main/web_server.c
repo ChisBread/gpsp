@@ -212,6 +212,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         ",\"frameskip_type\":%u,\"frameskip_interval\":%u,\"frameskip_threshold\":%u"
         ",\"netplay_enable\":%d,\"netplay_mode\":%d,\"netplay_host\":\"%s\""
         ",\"netplay_port\":%u,\"netplay_nick\":\"%s\",\"netplay_tunnel_id\":\"%s\""
+        ",\"netplay_lobby_host\":\"%s\",\"netplay_lobby_port\":%u,\"netplay_lobby_relay\":\"%s\""
         ",\"netplay_tunnel_room_id\":\"%s\",\"netplay_tunnel_status\":\"%s\"}",
         dynarec_enable ? 1 : 0,
         sprite_limit ? 1 : 0,
@@ -227,6 +228,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         gpsp_netplay_ra_port,
         gpsp_netplay_ra_nick,
         gpsp_netplay_ra_tunnel_id,
+        gpsp_netplay_lobby_host,
+        gpsp_netplay_lobby_port,
+        gpsp_netplay_lobby_relay,
         netpacket_tunnel_host_room_id(),
         netpacket_tunnel_host_status());
 
@@ -238,7 +242,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
 /* ---- POST /api/settings → apply + save ---- */
 static esp_err_t settings_post_handler(httpd_req_t *req)
 {
-    char body[384];
+    char body[640];
     int received = httpd_req_recv(req, body, sizeof(body) - 1);
     if (received <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
@@ -417,6 +421,54 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
                         len = sizeof(gpsp_netplay_ra_tunnel_id) - 1;
                     memcpy(gpsp_netplay_ra_tunnel_id, q, len);
                     gpsp_netplay_ra_tunnel_id[len] = '\0';
+                }
+            }
+        }
+    }
+
+    p = strstr(body, "\"netplay_lobby_host\"");
+    if (p) {
+        p = strchr(p + 20, ':');
+        if (p) {
+            char *q = strchr(p, '"');
+            if (q) {
+                q++;
+                char *e = strchr(q, '"');
+                if (e) {
+                    size_t len = (size_t)(e - q);
+                    if (len >= sizeof(gpsp_netplay_lobby_host))
+                        len = sizeof(gpsp_netplay_lobby_host) - 1;
+                    memcpy(gpsp_netplay_lobby_host, q, len);
+                    gpsp_netplay_lobby_host[len] = '\0';
+                }
+            }
+        }
+    }
+
+    p = strstr(body, "\"netplay_lobby_port\"");
+    if (p) {
+        p = strchr(p + 20, ':');
+        if (p) {
+            int v = atoi(p + 1);
+            if (v >= 1 && v <= 65535)
+                gpsp_netplay_lobby_port = (uint16_t)v;
+        }
+    }
+
+    p = strstr(body, "\"netplay_lobby_relay\"");
+    if (p) {
+        p = strchr(p + 21, ':');
+        if (p) {
+            char *q = strchr(p, '"');
+            if (q) {
+                q++;
+                char *e = strchr(q, '"');
+                if (e) {
+                    size_t len = (size_t)(e - q);
+                    if (len >= sizeof(gpsp_netplay_lobby_relay))
+                        len = sizeof(gpsp_netplay_lobby_relay) - 1;
+                    memcpy(gpsp_netplay_lobby_relay, q, len);
+                    gpsp_netplay_lobby_relay[len] = '\0';
                 }
             }
         }
