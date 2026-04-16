@@ -798,7 +798,7 @@ esp_err_t web_server_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.max_uri_handlers = 20;
-    config.max_open_sockets = 4;  /* save sockets for netplay + WS */
+    config.max_open_sockets = 10;  /* save sockets for netplay + WS */
     config.stack_size = 8192;
 
     /* Init frame capture mutex once */

@@ -33,6 +33,11 @@
   #define SRPT_DEBUG_LOG(...)
 #endif
 
+#ifdef ESP_PLATFORM
+#include "esp_log.h"
+static const char *SP_TAG = "serialpoke";
+#endif
+
 #define MAX_QPACK             128    // 1 packet per frame (~2 second buffer, maybe too big)
 #define MAX_FPACK             512    // ~2 words per frame (can accumulate up to 256 words per frame)
 
@@ -260,8 +265,15 @@ bool serialpoke_update(unsigned cycles) {
     write_ioreg(REG_SIOMULTI0 + netplay_client_id, read_ioreg(REG_SIOMLT_SEND));
 
     // Check which state the master is in and try to act accordingly.
-    if (serstate.poke.peer[0].state == STATE_PREINIT)
+    if (serstate.poke.peer[0].state == STATE_PREINIT) {
+#ifdef ESP_PLATFORM
+      static unsigned s_preinit_log_ctr;
+      if (++s_preinit_log_ctr % 600 == 1)
+        ESP_LOGW(SP_TAG, "slave blocked: peer[0].state=PREINIT (my_id=%u)",
+                 (unsigned)netplay_client_id);
+#endif
       return false; // Does nothing, no data will be sent.
+    }
 
     else if (serstate.poke.peer[0].state == STATE_HANDSHAKE) {
       // Move the client to the PREINIT state, then to HANDSHAKE if it replies correctly.
@@ -379,6 +391,11 @@ void serialpoke_net_receive(const void* buf, size_t len, uint16_t client_id) {
     serstate.poke.peer[client_id].timeout = 0;
 
     serstate.poke.peer[client_id].state = flags & 0xFFFF;
+#ifdef ESP_PLATFORM
+    ESP_LOGI(SP_TAG, "RX from client=%u state=%u flags=0x%08x cnt=%u my_id=%u",
+             (unsigned)client_id, (unsigned)(flags & 0xFFFF),
+             (unsigned)flags, count, (unsigned)netplay_client_id);
+#endif
     SRPT_DEBUG_LOG("Received valid packet from client %d (state: %d)\n",
                    client_id, serstate.poke.peer[client_id].state);
 

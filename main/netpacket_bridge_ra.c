@@ -854,13 +854,11 @@ void netpacket_poll_receive(void)
                 np_send_all(ping, sizeof(ping));
                 np_last_ping_us = now;
 
-                if (np_tx_packets || np_rx_packets) {
-                    ESP_LOGI(TAG, "Stats: TX %u pkts/%u B, RX %u pkts/%u B",
-                             np_tx_packets, np_tx_bytes,
-                             np_rx_packets, np_rx_bytes);
-                    np_tx_packets = np_tx_bytes = 0;
-                    np_rx_packets = np_rx_bytes = 0;
-                }
+                ESP_LOGI(TAG, "Stats: TX %u pkts/%u B, RX %u pkts/%u B, serial_mode=%d",
+                         np_tx_packets, np_tx_bytes,
+                         np_rx_packets, np_rx_bytes, serial_mode);
+                np_tx_packets = np_tx_bytes = 0;
+                np_rx_packets = np_rx_bytes = 0;
             }
         }
         break;
@@ -877,6 +875,8 @@ void netpacket_send(uint16_t client_id, const void *buf, size_t len)
     }
 
     if (np_state != STATE_CONNECTED || np_socket_fd < 0 || !buf || len == 0) {
+        ESP_LOGD(TAG, "netpacket_send DROP: state=%d fd=%d buf=%p len=%u",
+                 np_state, np_socket_fd, buf, (unsigned)len);
         return;
     }
 
