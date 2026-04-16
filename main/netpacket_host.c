@@ -3,7 +3,8 @@
  *
  * Implements the host (server) side of the RetroArch Netplay protocol,
  * allowing other devices (RA clients or other ESP32-P4 units) to connect
- * for multiplayer gameplay.  Currently supports a single connected client.
+ * for multiplayer gameplay.  Supports up to HOST_MAX_CLIENTS clients
+ * (3 clients + host = 4-player GBA games via RFU).
  */
 
 #include <errno.h>
@@ -43,20 +44,39 @@
 #define RA_CMD_NETPACKET             0x0048u
 #define RA_CMD_PING_REQUEST          0x1100u
 #define RA_CMD_PING_RESPONSE         0x1101u
+#define RA_CMD_SETTING_ALLOW_PAUSE   0x2000u
+#define RA_CMD_SETTING_INPUT_LATENCY 0x2001u
 
+#define NETPACKET_BROADCAST          0xFFFFu
 #define NETPACKET_MAX_PAYLOAD        2048u
 
-/* ── Host states ──────────────────────────────────────────────────── */
+/* ── Per-client states ────────────────────────────────────────────── */
 
 typedef enum {
-    HOST_STATE_IDLE = 0,
-    HOST_STATE_LISTENING,
-    HOST_STATE_WAIT_CLIENT_HEADER,
-    HOST_STATE_WAIT_CLIENT_NICK,
-    HOST_STATE_WAIT_CLIENT_INFO,
-    HOST_STATE_WAIT_PLAY,
-    HOST_STATE_CONNECTED,
-} host_state_t;
+    CLIENT_STATE_EMPTY = 0,
+    CLIENT_STATE_WAIT_HEADER,
+    CLIENT_STATE_WAIT_NICK,
+    CLIENT_STATE_WAIT_INFO,
+    CLIENT_STATE_WAIT_PLAY,
+    CLIENT_STATE_CONNECTED,
+} client_state_t;
+
+/* ── Per-client data ──────────────────────────────────────────────── */
+
+#define HOST_MAX_CLIENTS   3   /* host + 3 = 4-player GBA max */
+#define HOST_RECV_BUF_SIZE 4096
+
+typedef struct {
+    int            fd;
+    client_state_t state;
+    uint32_t       protocol;       /* negotiated version */
+    uint32_t       assigned_id;    /* 1-based */
+    char           nick[RA_NICK_LEN];
+    size_t         recv_len;
+    uint32_t       tx_packets, tx_bytes;
+    uint32_t       rx_packets, rx_bytes;
+    uint8_t        recv_buf[HOST_RECV_BUF_SIZE];
+} host_client_t;
 
 /* ── Module state ─────────────────────────────────────────────────── */
 
@@ -65,21 +85,10 @@ extern u32 netplay_client_id;
 
 static const char *TAG = "gpsp_host";
 
-static int host_listen_fd  = -1;
-static int host_client_fd  = -1;
-static host_state_t host_state = HOST_STATE_IDLE;
-
+static int host_listen_fd = -1;
 static int64_t host_last_ping_us;
-static uint32_t host_client_protocol;
 
-/* Debug counters */
-static uint32_t host_tx_packets, host_tx_bytes;
-static uint32_t host_rx_packets, host_rx_bytes;
-
-/* Receive buffer for TCP stream reassembly */
-#define HOST_RECV_BUF_SIZE 4096
-static GPSP_EXTRAM_BSS uint8_t host_recv_buf[HOST_RECV_BUF_SIZE];
-static size_t host_recv_len;
+static GPSP_EXTRAM_BSS host_client_t host_clients[HOST_MAX_CLIENTS];
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
@@ -101,62 +110,60 @@ static uint32_t host_impl_magic(void)
     return magic;
 }
 
-static void host_disconnect_client(void)
+static int host_count_connected(void)
 {
-    if (host_client_fd >= 0) {
-        close(host_client_fd);
-        host_client_fd = -1;
-    }
-    host_recv_len = 0;
-    netplay_num_clients = 0;
-
-    /* Reset serial protocol state machines */
-    serialproto_reset();
-    rfu_reset();
-    serial_reset_irq();
-
-    /* Go back to listening if listener is still alive */
-    if (host_listen_fd >= 0) {
-        host_state = HOST_STATE_LISTENING;
-        ESP_LOGI(TAG, "Client disconnected, back to listening");
-    } else {
-        host_state = HOST_STATE_IDLE;
-    }
+    int n = 0;
+    for (int i = 0; i < HOST_MAX_CLIENTS; i++)
+        if (host_clients[i].state == CLIENT_STATE_CONNECTED)
+            n++;
+    return n;
 }
 
-static void host_stop(void)
+static host_client_t *host_find_by_id(uint32_t assigned_id)
 {
-    if (host_client_fd >= 0) {
-        close(host_client_fd);
-        host_client_fd = -1;
-    }
-    if (host_listen_fd >= 0) {
-        close(host_listen_fd);
-        host_listen_fd = -1;
-    }
-    host_state = HOST_STATE_IDLE;
-    host_recv_len = 0;
-    netplay_num_clients = 0;
-    netplay_client_id = 0;
-
-    /* Reset serial protocol state machines */
-    serialproto_reset();
-    rfu_reset();
-    serial_reset_irq();
+    for (int i = 0; i < HOST_MAX_CLIENTS; i++)
+        if (host_clients[i].state != CLIENT_STATE_EMPTY &&
+            host_clients[i].assigned_id == assigned_id)
+            return &host_clients[i];
+    return NULL;
 }
 
-static bool host_send_all(const void *data, size_t len)
+static uint32_t host_next_client_id(void)
+{
+    for (uint32_t id = 1; id <= HOST_MAX_CLIENTS; id++)
+        if (!host_find_by_id(id))
+            return id;
+    return 0; /* full */
+}
+
+static void host_update_num_clients(void)
+{
+    netplay_num_clients = (u32)host_count_connected();
+}
+
+static bool host_is_active(void)
+{
+    if (host_listen_fd >= 0) return true;
+    for (int i = 0; i < HOST_MAX_CLIENTS; i++)
+        if (host_clients[i].state != CLIENT_STATE_EMPTY)
+            return true;
+    return false;
+}
+
+/* ── Per-client TCP helpers ───────────────────────────────────────── */
+
+static bool client_send_all(host_client_t *c, const void *data, size_t len)
 {
     const uint8_t *p = (const uint8_t *)data;
     size_t sent = 0;
 
     while (sent < len) {
-        ssize_t n = send(host_client_fd, p + sent, len - sent, 0);
+        ssize_t n = send(c->fd, p + sent, len - sent, 0);
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
                 continue;
-            ESP_LOGW(TAG, "TCP send failed: errno=%d", errno);
-            host_disconnect_client();
+            ESP_LOGW(TAG, "Client %u: send failed errno=%d",
+                     c->assigned_id, errno);
             return false;
         }
         sent += (size_t)n;
@@ -164,51 +171,98 @@ static bool host_send_all(const void *data, size_t len)
     return true;
 }
 
-static ssize_t host_recv_more(void)
+static ssize_t client_recv_more(host_client_t *c)
 {
-    if (host_recv_len >= HOST_RECV_BUF_SIZE)
-        return (ssize_t)host_recv_len;
+    if (c->recv_len >= HOST_RECV_BUF_SIZE)
+        return (ssize_t)c->recv_len;
 
-    ssize_t n = recv(host_client_fd, host_recv_buf + host_recv_len,
-                     HOST_RECV_BUF_SIZE - host_recv_len, MSG_DONTWAIT);
+    ssize_t n = recv(c->fd, c->recv_buf + c->recv_len,
+                     HOST_RECV_BUF_SIZE - c->recv_len, MSG_DONTWAIT);
     if (n > 0) {
-        host_recv_len += (size_t)n;
+        c->recv_len += (size_t)n;
     } else if (n == 0) {
-        ESP_LOGW(TAG, "Client disconnected");
-        host_disconnect_client();
-        return -1;
+        return -1;  /* peer closed */
     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        ESP_LOGW(TAG, "TCP recv failed: errno=%d", errno);
-        host_disconnect_client();
         return -1;
     }
-    return (ssize_t)host_recv_len;
+    return (ssize_t)c->recv_len;
 }
 
-static void host_recv_consume(size_t n)
+static void client_recv_consume(host_client_t *c, size_t n)
 {
-    if (n >= host_recv_len)
-        host_recv_len = 0;
+    if (n >= c->recv_len)
+        c->recv_len = 0;
     else {
-        memmove(host_recv_buf, host_recv_buf + n, host_recv_len - n);
-        host_recv_len -= n;
+        memmove(c->recv_buf, c->recv_buf + n, c->recv_len - n);
+        c->recv_len -= n;
     }
 }
 
-static bool host_try_read(void *out, size_t needed)
+static bool client_try_read(host_client_t *c, void *out, size_t needed)
 {
-    if (host_recv_len < needed) {
-        if (host_recv_more() < 0) return false;
+    if (c->recv_len < needed) {
+        if (client_recv_more(c) < 0) return false;
     }
-    if (host_recv_len < needed) return false;
-    memcpy(out, host_recv_buf, needed);
-    host_recv_consume(needed);
+    if (c->recv_len < needed) return false;
+    memcpy(out, c->recv_buf, needed);
+    client_recv_consume(c, needed);
     return true;
+}
+
+/* ── Disconnect / cleanup ─────────────────────────────────────────── */
+
+static void host_disconnect_client(host_client_t *c)
+{
+    if (c->fd >= 0) {
+        close(c->fd);
+        c->fd = -1;
+    }
+
+    ESP_LOGI(TAG, "Client %u (\"%s\") disconnected",
+             c->assigned_id, c->nick);
+
+    bool was_connected = (c->state == CLIENT_STATE_CONNECTED);
+    c->state    = CLIENT_STATE_EMPTY;
+    c->recv_len = 0;
+
+    if (was_connected) {
+        host_update_num_clients();
+
+        /* Reset serial protocols when last client leaves */
+        if (netplay_num_clients == 0) {
+            serialproto_reset();
+            rfu_reset();
+            serial_reset_irq();
+        }
+    }
+}
+
+static void host_stop(void)
+{
+    for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
+        if (host_clients[i].fd >= 0) {
+            close(host_clients[i].fd);
+            host_clients[i].fd = -1;
+        }
+        host_clients[i].state    = CLIENT_STATE_EMPTY;
+        host_clients[i].recv_len = 0;
+    }
+    if (host_listen_fd >= 0) {
+        close(host_listen_fd);
+        host_listen_fd = -1;
+    }
+    netplay_num_clients = 0;
+    netplay_client_id   = 0;
+
+    serialproto_reset();
+    rfu_reset();
+    serial_reset_irq();
 }
 
 /* ── Receive dispatch ─────────────────────────────────────────────── */
 
-static void host_receive_dispatch(const void *buf, size_t len, uint16_t client_id)
+static void host_receive_dispatch(const void *buf, size_t len,
+                                  uint16_t client_id)
 {
     switch (serial_mode) {
     case SERIAL_MODE_RFU:
@@ -226,15 +280,12 @@ static void host_receive_dispatch(const void *buf, size_t len, uint16_t client_i
     }
 }
 
-/* ── Handshake phases (reversed: host receives first, then responds) */
+/* ── Listener ─────────────────────────────────────────────────────── */
 
 static bool host_start_listen(void)
 {
     if (host_listen_fd >= 0) return true;
-
-    if (!c6_remote_network_ready()) {
-        return false;
-    }
+    if (!c6_remote_network_ready()) return false;
 
     int sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sockfd < 0) {
@@ -245,14 +296,13 @@ static bool host_start_listen(void)
     int one = 1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
-    /* Non-blocking for accept() */
     int flags = fcntl(sockfd, F_GETFL, 0);
     if (flags >= 0) fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(gpsp_netplay_ra_port);
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(gpsp_netplay_ra_port);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (bind(sockfd, (const struct sockaddr *)&addr, sizeof(addr)) < 0) {
@@ -262,21 +312,20 @@ static bool host_start_listen(void)
         return false;
     }
 
-    if (listen(sockfd, 1) < 0) {
+    if (listen(sockfd, HOST_MAX_CLIENTS) < 0) {
         ESP_LOGW(TAG, "Listen failed: errno=%d", errno);
         close(sockfd);
         return false;
     }
 
-    host_listen_fd = sockfd;
-    host_state = HOST_STATE_LISTENING;
+    host_listen_fd    = sockfd;
     netplay_client_id = 0;  /* Host is always client 0 */
-    ESP_LOGI(TAG, "Listening for netplay clients on port %u",
-             gpsp_netplay_ra_port);
+    ESP_LOGI(TAG, "Listening on port %u (max %d clients)",
+             gpsp_netplay_ra_port, HOST_MAX_CLIENTS);
     return true;
 }
 
-static bool host_check_accept(void)
+static void host_check_accept(void)
 {
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
@@ -284,9 +333,30 @@ static bool host_check_accept(void)
     int fd = accept(host_listen_fd,
                     (struct sockaddr *)&client_addr, &addr_len);
     if (fd < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return false;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return;
         ESP_LOGW(TAG, "Accept failed: errno=%d", errno);
-        return false;
+        return;
+    }
+
+    /* Find a free slot */
+    host_client_t *c = NULL;
+    for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
+        if (host_clients[i].state == CLIENT_STATE_EMPTY) {
+            c = &host_clients[i];
+            break;
+        }
+    }
+    if (!c) {
+        ESP_LOGW(TAG, "No free client slots, rejecting connection");
+        close(fd);
+        return;
+    }
+
+    uint32_t id = host_next_client_id();
+    if (id == 0) {
+        ESP_LOGW(TAG, "No free client IDs, rejecting connection");
+        close(fd);
+        return;
     }
 
     /* Non-blocking + TCP_NODELAY */
@@ -295,76 +365,79 @@ static bool host_check_accept(void)
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-    host_client_fd = fd;
-    host_recv_len = 0;
+    memset(c, 0, sizeof(*c));
+    c->fd          = fd;
+    c->state       = CLIENT_STATE_WAIT_HEADER;
+    c->assigned_id = id;
 
     char addr_str[INET_ADDRSTRLEN];
     inet_ntoa_r(client_addr.sin_addr, addr_str, sizeof(addr_str));
-    ESP_LOGI(TAG, "Client connected from %s:%u",
-             addr_str, ntohs(client_addr.sin_port));
-
-    host_state = HOST_STATE_WAIT_CLIENT_HEADER;
-    return true;
+    ESP_LOGI(TAG, "Client %u connected from %s:%u",
+             id, addr_str, ntohs(client_addr.sin_port));
 }
 
-static bool host_handle_client_header(void)
+/* ── Per-client handshake phases ──────────────────────────────────── */
+
+static bool host_handle_client_header(host_client_t *c)
 {
     uint32_t header[6];
-    if (!host_try_read(header, sizeof(header))) return false;
+    if (!client_try_read(c, header, sizeof(header))) return false;
 
     if (ntohl(header[0]) != RA_NETPLAY_MAGIC) {
-        ESP_LOGE(TAG, "Bad magic from client: 0x%08x", ntohl(header[0]));
-        host_disconnect_client();
+        ESP_LOGE(TAG, "Client %u: bad magic 0x%08x",
+                 c->assigned_id, ntohl(header[0]));
+        host_disconnect_client(c);
         return false;
     }
 
     uint32_t client_proto = ntohl(header[3]);
-    ESP_LOGI(TAG, "Client protocol: %u, platform: 0x%08x",
-             (unsigned)client_proto, ntohl(header[1]));
+    ESP_LOGI(TAG, "Client %u: protocol %u, platform 0x%08x",
+             c->assigned_id, (unsigned)client_proto, ntohl(header[1]));
 
-    /* Negotiate protocol version */
-    host_client_protocol = client_proto < RA_NETPLAY_PROTOCOL_VERSION
-                             ? client_proto : RA_NETPLAY_PROTOCOL_VERSION;
-    if (host_client_protocol < 5) {
-        ESP_LOGE(TAG, "Client protocol too old: %u", (unsigned)client_proto);
-        host_disconnect_client();
+    c->protocol = client_proto < RA_NETPLAY_PROTOCOL_VERSION
+                      ? client_proto : RA_NETPLAY_PROTOCOL_VERSION;
+    if (c->protocol < 5) {
+        ESP_LOGE(TAG, "Client %u: protocol too old (%u)",
+                 c->assigned_id, (unsigned)client_proto);
+        host_disconnect_client(c);
         return false;
     }
 
-    /* Send our header in response */
     uint32_t response[6];
     response[0] = htonl(RA_NETPLAY_MAGIC);
     response[1] = htonl(host_platform_magic());
-    response[2] = htonl(0);                        /* No compression */
-    response[3] = htonl(0);                        /* No password */
-    response[4] = htonl(host_client_protocol);     /* Negotiated version */
+    response[2] = htonl(0);                    /* No compression */
+    response[3] = htonl(0);                    /* No password */
+    response[4] = htonl(c->protocol);          /* Negotiated version */
     response[5] = htonl(host_impl_magic());
 
-    if (!host_send_all(response, sizeof(response))) return false;
+    if (!client_send_all(c, response, sizeof(response))) {
+        host_disconnect_client(c);
+        return false;
+    }
 
-    host_state = HOST_STATE_WAIT_CLIENT_NICK;
+    c->state = CLIENT_STATE_WAIT_NICK;
     return true;
 }
 
-static bool host_handle_client_nick(void)
+static bool host_handle_client_nick(host_client_t *c)
 {
     uint32_t cmd[2];
-    if (!host_try_read(cmd, sizeof(cmd))) return false;
+    if (!client_try_read(c, cmd, sizeof(cmd))) return false;
 
     if (ntohl(cmd[0]) != RA_CMD_NICK || ntohl(cmd[1]) != RA_NICK_LEN) {
-        ESP_LOGE(TAG, "Expected NICK, got cmd=0x%04x size=%u",
-                 ntohl(cmd[0]), ntohl(cmd[1]));
-        host_disconnect_client();
+        ESP_LOGE(TAG, "Client %u: expected NICK, got 0x%04x",
+                 c->assigned_id, ntohl(cmd[0]));
+        host_disconnect_client(c);
         return false;
     }
 
-    char nick[RA_NICK_LEN];
-    if (!host_try_read(nick, sizeof(nick))) {
-        host_disconnect_client();
+    if (!client_try_read(c, c->nick, RA_NICK_LEN)) {
+        host_disconnect_client(c);
         return false;
     }
-    nick[RA_NICK_LEN - 1] = '\0';
-    ESP_LOGI(TAG, "Client nick: \"%s\"", nick);
+    c->nick[RA_NICK_LEN - 1] = '\0';
+    ESP_LOGI(TAG, "Client %u nick: \"%s\"", c->assigned_id, c->nick);
 
     /* Send our NICK */
     uint32_t nick_cmd[2];
@@ -375,41 +448,13 @@ static bool host_handle_client_nick(void)
     nick_cmd[0] = htonl(RA_CMD_NICK);
     nick_cmd[1] = htonl(RA_NICK_LEN);
 
-    if (!host_send_all(nick_cmd, sizeof(nick_cmd)) ||
-        !host_send_all(our_nick, sizeof(our_nick))) {
+    if (!client_send_all(c, nick_cmd, sizeof(nick_cmd)) ||
+        !client_send_all(c, our_nick, sizeof(our_nick))) {
+        host_disconnect_client(c);
         return false;
     }
 
-    host_state = HOST_STATE_WAIT_CLIENT_INFO;
-    return true;
-}
-
-static bool host_handle_client_info(void)
-{
-    uint32_t cmd[2];
-    if (!host_try_read(cmd, sizeof(cmd))) return false;
-
-    uint32_t cmd_id   = ntohl(cmd[0]);
-    uint32_t cmd_size = ntohl(cmd[1]);
-
-    if (cmd_id != RA_CMD_INFO) {
-        ESP_LOGE(TAG, "Expected INFO, got cmd=0x%04x", cmd_id);
-        host_disconnect_client();
-        return false;
-    }
-
-    /* Consume client INFO payload */
-    while (cmd_size > 0) {
-        uint8_t discard[256];
-        size_t chunk = cmd_size < sizeof(discard) ? cmd_size : sizeof(discard);
-        if (!host_try_read(discard, chunk)) {
-            host_disconnect_client();
-            return false;
-        }
-        cmd_size -= chunk;
-    }
-
-    /* ── Send our INFO ──────────────────────────────────────────── */
+    /* Send INFO immediately after NICK (RA client expects this order) */
     struct {
         uint32_t cmd[2];
         uint32_t content_crc;
@@ -422,11 +467,45 @@ static bool host_handle_client_info(void)
     info.cmd[1] = htonl(sizeof(info) - sizeof(info.cmd));
     info.content_crc = htonl(0);
     strlcpy(info.core_name, GPSP_NAME, sizeof(info.core_name));
-    strlcpy(info.core_version, GPSP_NETPACKET_VERSION, sizeof(info.core_version));
+    strlcpy(info.core_version, GPSP_NETPACKET_VERSION,
+            sizeof(info.core_version));
 
-    if (!host_send_all(&info, sizeof(info))) return false;
+    if (!client_send_all(c, &info, sizeof(info))) {
+        host_disconnect_client(c);
+        return false;
+    }
 
-    /* ── Send SYNC (assign client_id = 1) ───────────────────────── */
+    c->state = CLIENT_STATE_WAIT_INFO;
+    return true;
+}
+
+static bool host_handle_client_info(host_client_t *c)
+{
+    uint32_t cmd[2];
+    if (!client_try_read(c, cmd, sizeof(cmd))) return false;
+
+    uint32_t cmd_id   = ntohl(cmd[0]);
+    uint32_t cmd_size = ntohl(cmd[1]);
+
+    if (cmd_id != RA_CMD_INFO) {
+        ESP_LOGE(TAG, "Client %u: expected INFO, got 0x%04x",
+                 c->assigned_id, cmd_id);
+        host_disconnect_client(c);
+        return false;
+    }
+
+    /* Consume client INFO payload */
+    while (cmd_size > 0) {
+        uint8_t discard[256];
+        size_t chunk = cmd_size < sizeof(discard) ? cmd_size : sizeof(discard);
+        if (!client_try_read(c, discard, chunk)) {
+            host_disconnect_client(c);
+            return false;
+        }
+        cmd_size -= chunk;
+    }
+
+    /* INFO was already sent in the NICK phase.  Now send SYNC. */
     struct __attribute__((packed)) {
         uint32_t cmd[2];
         uint32_t frame_count;
@@ -438,44 +517,67 @@ static bool host_handle_client_info(void)
     } sync;
     memset(&sync, 0, sizeof(sync));
 
-    uint32_t assigned_id = 1;
+    sync.cmd[0]       = htonl(RA_CMD_SYNC);
+    sync.cmd[1]       = htonl(sizeof(sync) - sizeof(sync.cmd));
+    sync.frame_count   = htonl(0);
+    sync.client_num    = htonl(c->assigned_id);
+    sync.device_clients[0] = htonl(0);  /* slot 0 → host */
+    if (c->assigned_id <= RA_MAX_INPUT_DEVICES)
+        sync.device_clients[c->assigned_id] = htonl(c->assigned_id);
+    /* Echo client's own nick (RA uses this to detect server-forced renames) */
+    memcpy(sync.nick, c->nick, sizeof(sync.nick));
 
-    sync.cmd[0] = htonl(RA_CMD_SYNC);
-    sync.cmd[1] = htonl(sizeof(sync) - sizeof(sync.cmd));
-    sync.frame_count = htonl(0);
-    sync.client_num  = htonl(assigned_id);
-    /* devices[]: all zero (CORE_PACKET_INTERFACE, game handles mapping) */
-    /* share_modes[]: all zero */
-    sync.device_clients[0] = htonl(0);           /* slot 0 → host */
-    sync.device_clients[1] = htonl(assigned_id); /* slot 1 → client */
-    strlcpy(sync.nick, gpsp_netplay_ra_nick, sizeof(sync.nick));
+    if (!client_send_all(c, &sync, sizeof(sync))) {
+        host_disconnect_client(c);
+        return false;
+    }
 
-    if (!host_send_all(&sync, sizeof(sync))) return false;
+    /* Send SETTING commands (protocol v6+) */
+    if (c->protocol >= 6) {
+        uint32_t setting_cmd[3];
+        setting_cmd[0] = htonl(RA_CMD_SETTING_ALLOW_PAUSE);
+        setting_cmd[1] = htonl(4);
+        setting_cmd[2] = htonl(1);
+        if (!client_send_all(c, setting_cmd, sizeof(setting_cmd))) {
+            host_disconnect_client(c);
+            return false;
+        }
 
-    ESP_LOGI(TAG, "Sent INFO + SYNC, assigned client_id=%u",
-             (unsigned)assigned_id);
+        uint32_t latency_cmd[4];
+        latency_cmd[0] = htonl(RA_CMD_SETTING_INPUT_LATENCY);
+        latency_cmd[1] = htonl(8);
+        latency_cmd[2] = htonl(0);
+        latency_cmd[3] = htonl(0);
+        if (!client_send_all(c, latency_cmd, sizeof(latency_cmd))) {
+            host_disconnect_client(c);
+            return false;
+        }
+    }
 
-    host_state = HOST_STATE_WAIT_PLAY;
+    ESP_LOGI(TAG, "Client %u: sent SYNC (assigned_id=%u)",
+             c->assigned_id, c->assigned_id);
+
+    c->state = CLIENT_STATE_WAIT_PLAY;
     return true;
 }
 
-static bool host_handle_play(void)
+static bool host_handle_play(host_client_t *c)
 {
     uint32_t cmd[2];
-    if (!host_try_read(cmd, sizeof(cmd))) return false;
+    if (!client_try_read(c, cmd, sizeof(cmd))) return false;
 
     uint32_t cmd_id   = ntohl(cmd[0]);
     uint32_t cmd_size = ntohl(cmd[1]);
 
     if (cmd_id != RA_CMD_PLAY) {
-        /* Skip non-PLAY commands (SETTING etc.) that arrive before PLAY */
-        ESP_LOGD(TAG, "Pre-PLAY cmd 0x%04x size %u, skipping",
-                 cmd_id, (unsigned)cmd_size);
+        /* Skip pre-PLAY commands (SETTING etc.) */
+        ESP_LOGD(TAG, "Client %u: pre-PLAY cmd 0x%04x, skipping",
+                 c->assigned_id, cmd_id);
         while (cmd_size > 0) {
             uint8_t discard[256];
             size_t chunk = cmd_size < sizeof(discard) ? cmd_size : sizeof(discard);
-            if (!host_try_read(discard, chunk)) {
-                host_disconnect_client();
+            if (!client_try_read(c, discard, chunk)) {
+                host_disconnect_client(c);
                 return false;
             }
             cmd_size -= chunk;
@@ -487,45 +589,53 @@ static bool host_handle_play(void)
     while (cmd_size > 0) {
         uint8_t discard[64];
         size_t chunk = cmd_size < sizeof(discard) ? cmd_size : sizeof(discard);
-        if (!host_try_read(discard, chunk)) {
-            host_disconnect_client();
+        if (!client_try_read(c, discard, chunk)) {
+            host_disconnect_client(c);
             return false;
         }
         cmd_size -= chunk;
     }
 
-    ESP_LOGI(TAG, "Client requested PLAY");
+    /* Send MODE to confirm: "you are now playing"
+     * RA expects: frame(4) + mode(4) + devices(4) + share_modes(16) + nick(32) = 60 bytes */
+    struct __attribute__((packed)) {
+        uint32_t cmd[2];
+        uint32_t frame;
+        uint32_t mode;          /* YOU(31) | PLAYING(30) | client_num(low bits) */
+        uint32_t devices;
+        uint8_t  share_modes[RA_MAX_INPUT_DEVICES];
+        char     nick[RA_NICK_LEN];
+    } mode_msg;
+    memset(&mode_msg, 0, sizeof(mode_msg));
 
-    /* Send MODE to confirm: "you (client 1) are now playing" */
-    uint32_t mode_msg[5];
-    uint32_t assigned_id = 1;
+    mode_msg.cmd[0]  = htonl(RA_CMD_MODE);
+    mode_msg.cmd[1]  = htonl(sizeof(mode_msg) - sizeof(mode_msg.cmd));  /* 60 */
+    mode_msg.frame   = htonl(0);
+    mode_msg.mode    = htonl((1u << 31) | (1u << 30) | c->assigned_id);
+    mode_msg.devices = htonl(0);
+    memcpy(mode_msg.nick, c->nick, sizeof(mode_msg.nick));
 
-    mode_msg[0] = htonl(RA_CMD_MODE);
-    mode_msg[1] = htonl(12);                          /* 3 × uint32_t */
-    mode_msg[2] = htonl(0);                            /* frame */
-    mode_msg[3] = htonl((1u << 31) | (1u << 30));     /* is_you | is_playing */
-    mode_msg[4] = htonl(assigned_id);
+    if (!client_send_all(c, &mode_msg, sizeof(mode_msg))) {
+        host_disconnect_client(c);
+        return false;
+    }
 
-    if (!host_send_all(mode_msg, sizeof(mode_msg))) return false;
-
+    c->state          = CLIENT_STATE_CONNECTED;
     netplay_client_id = 0;  /* host is always 0 */
-    netplay_num_clients = 1;
-    host_last_ping_us = esp_timer_get_time();
+    host_update_num_clients();
 
-    ESP_LOGI(TAG, "Client %u now PLAYING — host ready!",
-             (unsigned)assigned_id);
-
-    host_state = HOST_STATE_CONNECTED;
+    ESP_LOGI(TAG, "Client %u (\"%s\") now PLAYING — %u client(s) active",
+             c->assigned_id, c->nick, netplay_num_clients);
     return true;
 }
 
-/* ── Runtime command processing (host side) ───────────────────────── */
+/* ── Runtime command processing (per-client) ──────────────────────── */
 
-static void host_process_commands(void)
+static void host_process_commands(host_client_t *c)
 {
-    while (host_recv_len >= 8 && host_state == HOST_STATE_CONNECTED) {
+    while (c->recv_len >= 8 && c->state == CLIENT_STATE_CONNECTED) {
         uint32_t cmd_hdr[2];
-        memcpy(cmd_hdr, host_recv_buf, sizeof(cmd_hdr));
+        memcpy(cmd_hdr, c->recv_buf, sizeof(cmd_hdr));
         uint32_t cmd_id   = ntohl(cmd_hdr[0]);
         uint32_t cmd_size = ntohl(cmd_hdr[1]);
 
@@ -535,23 +645,23 @@ static void host_process_commands(void)
         else
             total_needed = 8 + cmd_size;
 
-        if (host_recv_len < total_needed) break;
+        if (c->recv_len < total_needed) break;
 
-        uint8_t *payload = host_recv_buf + 8;
+        uint8_t *payload = c->recv_buf + 8;
 
         switch (cmd_id) {
         case RA_CMD_NETPACKET: {
-            uint32_t sender_id;
-            memcpy(&sender_id, payload, sizeof(sender_id));
-            sender_id = ntohl(sender_id);
-
+            /* The client_id field from client→host is the DESTINATION,
+             * but the serial protocols need the SENDER id.  Use the
+             * client's actual assigned_id as the sender. */
             const void *pkt_data = payload + 4;
             size_t pkt_len = cmd_size;
 
-            host_rx_packets++;
-            host_rx_bytes += pkt_len;
+            c->rx_packets++;
+            c->rx_bytes += pkt_len;
 
-            host_receive_dispatch(pkt_data, pkt_len, (uint16_t)sender_id);
+            host_receive_dispatch(pkt_data, pkt_len,
+                                  (uint16_t)c->assigned_id);
             break;
         }
 
@@ -559,7 +669,7 @@ static void host_process_commands(void)
             uint32_t pong[2];
             pong[0] = htonl(RA_CMD_PING_RESPONSE);
             pong[1] = htonl(0);
-            host_send_all(pong, sizeof(pong));
+            client_send_all(c, pong, sizeof(pong));
             break;
         }
 
@@ -567,17 +677,17 @@ static void host_process_commands(void)
             break;
 
         case RA_CMD_DISCONNECT:
-            ESP_LOGW(TAG, "Client sent DISCONNECT");
-            host_disconnect_client();
+            ESP_LOGW(TAG, "Client %u sent DISCONNECT", c->assigned_id);
+            host_disconnect_client(c);
             return;
 
         default:
-            ESP_LOGD(TAG, "Ignoring cmd 0x%04x size %u",
-                     cmd_id, (unsigned)cmd_size);
+            ESP_LOGD(TAG, "Client %u: ignoring cmd 0x%04x",
+                     c->assigned_id, cmd_id);
             break;
         }
 
-        host_recv_consume(total_needed);
+        client_recv_consume(c, total_needed);
     }
 }
 
@@ -587,71 +697,83 @@ void netpacket_host_poll(void)
 {
     /* If mode is not HOST, clean up any leftover state and return */
     if (gpsp_netplay_ra_mode != NETPLAY_MODE_HOST) {
-        if (host_state != HOST_STATE_IDLE)
+        if (host_is_active())
             host_stop();
         return;
     }
 
-    if (host_state == HOST_STATE_IDLE) {
+    /* Start listener if needed */
+    if (host_listen_fd < 0) {
         host_start_listen();
         return;
     }
 
-    /* Read from client socket if connected */
-    if (host_client_fd >= 0) {
-        host_recv_more();
+    /* Accept new connections */
+    host_check_accept();
+
+    /* Service each client */
+    for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
+        host_client_t *c = &host_clients[i];
+        if (c->state == CLIENT_STATE_EMPTY) continue;
+
+        /* Read data from client */
+        if (client_recv_more(c) < 0) {
+            ESP_LOGW(TAG, "Client %u: connection lost", c->assigned_id);
+            host_disconnect_client(c);
+            continue;
+        }
+
+        switch (c->state) {
+        case CLIENT_STATE_WAIT_HEADER:
+            host_handle_client_header(c);
+            break;
+        case CLIENT_STATE_WAIT_NICK:
+            host_handle_client_nick(c);
+            break;
+        case CLIENT_STATE_WAIT_INFO:
+            host_handle_client_info(c);
+            break;
+        case CLIENT_STATE_WAIT_PLAY:
+            host_handle_play(c);
+            break;
+        case CLIENT_STATE_CONNECTED:
+            host_process_commands(c);
+            break;
+        default:
+            break;
+        }
     }
 
-    switch (host_state) {
-    case HOST_STATE_LISTENING:
-        host_check_accept();
-        break;
-    case HOST_STATE_WAIT_CLIENT_HEADER:
-        host_handle_client_header();
-        break;
-    case HOST_STATE_WAIT_CLIENT_NICK:
-        host_handle_client_nick();
-        break;
-    case HOST_STATE_WAIT_CLIENT_INFO:
-        host_handle_client_info();
-        break;
-    case HOST_STATE_WAIT_PLAY:
-        host_handle_play();
-        break;
-    case HOST_STATE_CONNECTED:
-        host_process_commands();
+    /* Periodic ping + stats (every 5 seconds) */
+    int64_t now = esp_timer_get_time();
+    if (now - host_last_ping_us > 5000000) {
+        host_last_ping_us = now;
 
-        /* Periodic ping + stats (every 5 seconds) */
-        if (host_client_fd >= 0) {
-            int64_t now = esp_timer_get_time();
-            if (now - host_last_ping_us > 5000000) {
-                uint32_t ping[2];
-                ping[0] = htonl(RA_CMD_PING_REQUEST);
-                ping[1] = htonl(0);
-                host_send_all(ping, sizeof(ping));
-                host_last_ping_us = now;
+        uint32_t ping[2];
+        ping[0] = htonl(RA_CMD_PING_REQUEST);
+        ping[1] = htonl(0);
 
-                if (host_tx_packets || host_rx_packets) {
-                    ESP_LOGI(TAG, "Stats: TX %u pkts/%u B, RX %u pkts/%u B",
-                             host_tx_packets, host_tx_bytes,
-                             host_rx_packets, host_rx_bytes);
-                    host_tx_packets = host_tx_bytes = 0;
-                    host_rx_packets = host_rx_bytes = 0;
-                }
+        for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
+            host_client_t *c = &host_clients[i];
+            if (c->state != CLIENT_STATE_CONNECTED) continue;
+
+            client_send_all(c, ping, sizeof(ping));
+
+            if (c->tx_packets || c->rx_packets) {
+                ESP_LOGI(TAG, "Client %u: TX %u pkts/%u B, RX %u pkts/%u B",
+                         c->assigned_id,
+                         c->tx_packets, c->tx_bytes,
+                         c->rx_packets, c->rx_bytes);
+                c->tx_packets = c->tx_bytes = 0;
+                c->rx_packets = c->rx_bytes = 0;
             }
         }
-        break;
-    default:
-        break;
     }
 }
 
 void netpacket_host_send(uint16_t client_id, const void *buf, size_t len)
 {
-    if (host_state != HOST_STATE_CONNECTED || host_client_fd < 0 ||
-        !buf || len == 0) {
-        return;
-    }
+    if (!buf || len == 0) return;
 
     if (len > NETPACKET_MAX_PAYLOAD) {
         ESP_LOGW(TAG, "Dropping oversized netpacket (%u bytes)",
@@ -659,14 +781,32 @@ void netpacket_host_send(uint16_t client_id, const void *buf, size_t len)
         return;
     }
 
+    /* Header: cmd + payload_size + sender_id.
+     * Per RA protocol, sender_id = 0 when data originates from host. */
     uint32_t hdr[3];
     hdr[0] = htonl(RA_CMD_NETPACKET);
     hdr[1] = htonl((uint32_t)len);
-    hdr[2] = htonl((uint32_t)client_id);
+    hdr[2] = htonl(0);  /* sender = host */
 
-    host_tx_packets++;
-    host_tx_bytes += len;
+    if (client_id == NETPACKET_BROADCAST) {
+        /* Send to all connected clients */
+        for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
+            host_client_t *c = &host_clients[i];
+            if (c->state != CLIENT_STATE_CONNECTED) continue;
 
-    if (!host_send_all(hdr, sizeof(hdr))) return;
-    host_send_all(buf, len);
+            c->tx_packets++;
+            c->tx_bytes += len;
+            if (client_send_all(c, hdr, sizeof(hdr)))
+                client_send_all(c, buf, len);
+        }
+    } else {
+        /* Unicast to specific client */
+        host_client_t *c = host_find_by_id(client_id);
+        if (!c || c->state != CLIENT_STATE_CONNECTED) return;
+
+        c->tx_packets++;
+        c->tx_bytes += len;
+        if (client_send_all(c, hdr, sizeof(hdr)))
+            client_send_all(c, buf, len);
+    }
 }
