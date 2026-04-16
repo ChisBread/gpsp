@@ -844,7 +844,8 @@ static esp_err_t restore_previous_session(const gba_session_state_t *previous,
         memcpy(gamepak_backup, backup_snapshot, sizeof(gamepak_backup));
     }
 
-    if (load_gamepak(NULL, previous->rom_path, 0, 0, 0) != 0) {
+    if (load_gamepak(NULL, previous->rom_path,
+                     gpsp_rtc_mode, 0, gpsp_serial_setting) != 0) {
         return ESP_FAIL;
     }
 
@@ -946,7 +947,8 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
         }
 
         t_rom0 = esp_timer_get_time();
-        if (load_gamepak(NULL, next_rom_path, 0, 0, 0) != 0) {
+        if (load_gamepak(NULL, next_rom_path,
+                         gpsp_rtc_mode, 0, gpsp_serial_setting) != 0) {
             ESP_LOGE(TAG, "Failed to load ROM: %s", next_rom_path);
             restore_previous_session(&previous, backup_snapshot);
             return ESP_FAIL;

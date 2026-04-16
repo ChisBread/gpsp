@@ -14,18 +14,20 @@
 
 #include "common.h"
 #include "cpu.h"
+#include "gba_memory.h"
 #include "main.h"
+#include "serial.h"
 #include "storage.h"
 
 static const char *TAG = "gpsp_config";
 
-bool gpsp_netplay_udp_enabled;
-uint16_t gpsp_netplay_udp_port;
-uint32_t gpsp_netplay_peer_timeout_ms;
-uint32_t gpsp_netplay_hello_interval_ms;
-int gpsp_netplay_local_client_id_override;
+bool gpsp_netplay_ra_enabled;
+char gpsp_netplay_ra_host[64];
+uint16_t gpsp_netplay_ra_port;
+char gpsp_netplay_ra_nick[32];
 
-char gpsp_netplay_broadcast_addr[16];
+int gpsp_serial_setting;
+int gpsp_rtc_mode;
 
 bool gpsp_web_server_enabled;
 
@@ -86,14 +88,13 @@ static void gpsp_runtime_config_set_defaults(void)
     sprite_limit = 1;
     selected_boot_mode = boot_game;
 
-    gpsp_netplay_udp_enabled = CONFIG_GPSP_NETPLAY_UDP_ENABLE;
-    gpsp_netplay_udp_port = CONFIG_GPSP_NETPLAY_UDP_PORT;
-    gpsp_netplay_peer_timeout_ms = CONFIG_GPSP_NETPLAY_PEER_TIMEOUT_MS;
-    gpsp_netplay_hello_interval_ms = CONFIG_GPSP_NETPLAY_HELLO_INTERVAL_MS;
-    gpsp_netplay_local_client_id_override = -1;
-    strlcpy(gpsp_netplay_broadcast_addr,
-            CONFIG_GPSP_NETPLAY_BROADCAST_ADDR,
-            sizeof(gpsp_netplay_broadcast_addr));
+    gpsp_netplay_ra_enabled = false;
+    gpsp_netplay_ra_host[0] = '\0';
+    gpsp_netplay_ra_port = 55435;
+    strlcpy(gpsp_netplay_ra_nick, "ESP32-P4", sizeof(gpsp_netplay_ra_nick));
+
+    gpsp_serial_setting = SERIAL_MODE_AUTO;
+    gpsp_rtc_mode = FEAT_AUTODETECT;
 
     gpsp_web_server_enabled = true;
 
@@ -153,46 +154,56 @@ static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
     char *endptr = NULL;
     long parsed_long;
 
-    if (strcmp(key, "netplay_udp_enable") == 0) {
-        gpsp_netplay_udp_enabled = atoi(value) != 0;
-        return;
-    }
-
-    if (strcmp(key, "netplay_udp_port") == 0) {
-        parsed_long = strtol(value, &endptr, 10);
-        if (endptr != value && parsed_long >= 1024 && parsed_long <= 65535) {
-            gpsp_netplay_udp_port = (uint16_t)parsed_long;
+    if (strcmp(key, "netplay_ra_enable") == 0) {
+        int enabled;
+        if (parse_bool_value(value, &enabled)) {
+            gpsp_netplay_ra_enabled = enabled;
         }
         return;
     }
 
-    if (strcmp(key, "netplay_broadcast_addr") == 0) {
-        strlcpy(gpsp_netplay_broadcast_addr, value, sizeof(gpsp_netplay_broadcast_addr));
+    if (strcmp(key, "netplay_ra_host") == 0) {
+        strlcpy(gpsp_netplay_ra_host, value, sizeof(gpsp_netplay_ra_host));
         return;
     }
 
-    if (strcmp(key, "netplay_peer_timeout_ms") == 0) {
+    if (strcmp(key, "netplay_ra_port") == 0) {
         parsed_long = strtol(value, &endptr, 10);
-        if (endptr != value && parsed_long >= 100 && parsed_long <= 30000) {
-            gpsp_netplay_peer_timeout_ms = (uint32_t)parsed_long;
+        if (endptr != value && parsed_long >= 1 && parsed_long <= 65535) {
+            gpsp_netplay_ra_port = (uint16_t)parsed_long;
         }
         return;
     }
 
-    if (strcmp(key, "netplay_hello_interval_ms") == 0) {
-        parsed_long = strtol(value, &endptr, 10);
-        if (endptr != value && parsed_long >= 50 && parsed_long <= 5000) {
-            gpsp_netplay_hello_interval_ms = (uint32_t)parsed_long;
-        }
+    if (strcmp(key, "netplay_ra_nick") == 0) {
+        strlcpy(gpsp_netplay_ra_nick, value, sizeof(gpsp_netplay_ra_nick));
         return;
     }
 
-    if (strcmp(key, "netplay_local_client_id") == 0) {
-        parsed_long = strtol(value, &endptr, 10);
-        if (endptr != value && parsed_long >= -1 && parsed_long <= 31) {
-            gpsp_netplay_local_client_id_override = (int)parsed_long;
-            return;
-        }
+    if (strcmp(key, "serial_mode") == 0) {
+        if (strcasecmp(value, "auto") == 0)
+            gpsp_serial_setting = SERIAL_MODE_AUTO;
+        else if (strcasecmp(value, "disabled") == 0)
+            gpsp_serial_setting = SERIAL_MODE_DISABLED;
+        else if (strcasecmp(value, "rfu") == 0)
+            gpsp_serial_setting = SERIAL_MODE_RFU;
+        else if (strcasecmp(value, "mul_poke") == 0)
+            gpsp_serial_setting = SERIAL_MODE_SERIAL_POKE;
+        else if (strcasecmp(value, "mul_aw1") == 0)
+            gpsp_serial_setting = SERIAL_MODE_SERIAL_AW1;
+        else if (strcasecmp(value, "mul_aw2") == 0)
+            gpsp_serial_setting = SERIAL_MODE_SERIAL_AW2;
+        return;
+    }
+
+    if (strcmp(key, "rtc_mode") == 0) {
+        if (strcasecmp(value, "auto") == 0)
+            gpsp_rtc_mode = FEAT_AUTODETECT;
+        else if (strcasecmp(value, "enabled") == 0)
+            gpsp_rtc_mode = FEAT_ENABLE;
+        else if (strcasecmp(value, "disabled") == 0)
+            gpsp_rtc_mode = FEAT_DISABLE;
+        return;
     }
 
     if (strcmp(key, "web_server_enable") == 0) {
@@ -230,6 +241,27 @@ static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
     ESP_LOGW(TAG, "Ignoring unknown or invalid config entry: %s=%s", key, value);
 }
 
+static const char *serial_setting_to_str(int setting)
+{
+    switch (setting) {
+    case SERIAL_MODE_DISABLED:    return "disabled";
+    case SERIAL_MODE_RFU:         return "rfu";
+    case SERIAL_MODE_SERIAL_POKE: return "mul_poke";
+    case SERIAL_MODE_SERIAL_AW1:  return "mul_aw1";
+    case SERIAL_MODE_SERIAL_AW2:  return "mul_aw2";
+    default:                      return "auto";
+    }
+}
+
+static const char *rtc_mode_to_str(int mode)
+{
+    switch (mode) {
+    case FEAT_DISABLE: return "disabled";
+    case FEAT_ENABLE:  return "enabled";
+    default:           return "auto";
+    }
+}
+
 esp_err_t gpsp_runtime_config_save(void)
 {
     FILE *config_file = fopen(GPSP_RUNTIME_CONFIG_PATH, "w");
@@ -244,26 +276,26 @@ esp_err_t gpsp_runtime_config_save(void)
             "dynarec_enable=%d\n"
             "sprite_limit=%d\n"
             "bios_animation=%d\n"
+            "serial_mode=%s\n"
+            "rtc_mode=%s\n"
             "web_server_enable=%d\n"
-            "netplay_udp_enable=%d\n"
-            "netplay_udp_port=%u\n"
-            "netplay_broadcast_addr=%s\n"
-            "netplay_peer_timeout_ms=%u\n"
-            "netplay_hello_interval_ms=%u\n"
-            "netplay_local_client_id=%d\n"
+            "netplay_ra_enable=%d\n"
+            "netplay_ra_host=%s\n"
+            "netplay_ra_port=%u\n"
+            "netplay_ra_nick=%s\n"
             "frameskip_interval=%u\n"
             "frameskip_type=%u\n"
             "frameskip_threshold=%u\n",
             dynarec_enable ? 1 : 0,
             sprite_limit ? 1 : 0,
             selected_boot_mode == boot_bios ? 1 : 0,
+            serial_setting_to_str(gpsp_serial_setting),
+            rtc_mode_to_str(gpsp_rtc_mode),
             gpsp_web_server_enabled ? 1 : 0,
-            gpsp_netplay_udp_enabled ? 1 : 0,
-            gpsp_netplay_udp_port,
-            gpsp_netplay_broadcast_addr,
-            (unsigned)gpsp_netplay_peer_timeout_ms,
-            (unsigned)gpsp_netplay_hello_interval_ms,
-            gpsp_netplay_local_client_id_override,
+            gpsp_netplay_ra_enabled ? 1 : 0,
+            gpsp_netplay_ra_host,
+            gpsp_netplay_ra_port,
+            gpsp_netplay_ra_nick,
             (unsigned)gpsp_frameskip_interval,
             (unsigned)gpsp_frameskip_type,
             (unsigned)gpsp_frameskip_threshold);
@@ -315,12 +347,10 @@ esp_err_t gpsp_runtime_config_init(void)
              sprite_limit ? 1 : 0,
              selected_boot_mode == boot_bios ? "bios" : "game");
     ESP_LOGI(TAG,
-             "Runtime netplay: enable=%d port=%u broadcast=%s peer_timeout=%u hello=%u local_client_id=%d",
-             gpsp_netplay_udp_enabled ? 1 : 0,
-             gpsp_netplay_udp_port,
-             gpsp_netplay_broadcast_addr,
-             (unsigned)gpsp_netplay_peer_timeout_ms,
-             (unsigned)gpsp_netplay_hello_interval_ms,
-             gpsp_netplay_local_client_id_override);
+             "Runtime netplay: ra_enable=%d host=%s port=%u nick=%s",
+             gpsp_netplay_ra_enabled ? 1 : 0,
+             gpsp_netplay_ra_host,
+             gpsp_netplay_ra_port,
+             gpsp_netplay_ra_nick);
     return ESP_OK;
 }

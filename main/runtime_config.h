@@ -16,12 +16,13 @@ extern "C" {
 
 #define GPSP_RUNTIME_CONFIG_PATH STORAGE_MOUNT_POINT "/gpsp.cfg"
 
-extern bool gpsp_netplay_udp_enabled;
-extern uint16_t gpsp_netplay_udp_port;
-extern uint32_t gpsp_netplay_peer_timeout_ms;
-extern uint32_t gpsp_netplay_hello_interval_ms;
-extern int gpsp_netplay_local_client_id_override;
-extern char gpsp_netplay_broadcast_addr[16];
+extern bool gpsp_netplay_ra_enabled;
+extern char gpsp_netplay_ra_host[64];
+extern uint16_t gpsp_netplay_ra_port;
+extern char gpsp_netplay_ra_nick[32];
+
+extern int gpsp_serial_setting;
+extern int gpsp_rtc_mode;
 
 extern bool gpsp_web_server_enabled;
 

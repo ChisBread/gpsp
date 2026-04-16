@@ -2,9 +2,10 @@ idf_component_register(
     SRCS
         "app_main.c"
         "av_pipeline.c"
+        "av_stream.c"
         "c6_remote.c"
         "gba_session.c"
-        "netpacket_bridge.c"
+        "netpacket_bridge_ra.c"
         "runtime_config.c"
         "web_server.c"
     INCLUDE_DIRS "."

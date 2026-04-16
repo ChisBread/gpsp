@@ -25,6 +25,7 @@
  */
 
 #include "web_server.h"
+#include "av_stream.h"
 #include "runtime_config.h"
 #include "gba_session.h"
 #include "storage.h"
@@ -40,17 +41,14 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
-#include <driver/ppa.h>
-
-#include "esp_h264_enc_single.h"
-#include "esp_h264_enc_single_hw.h"
-#include "esp_h264_alloc.h"
 
 #include "av_pipeline.h"
 #include "common.h"
 #include "cpu.h"
+#include "gba_memory.h"
 #include "main.h"
 #include "savestate.h"
+#include "serial.h"
 
 static const char *TAG = "web_server";
 
@@ -64,41 +62,18 @@ static volatile int64_t  s_last_emu_read_us;  /* timestamp of last emu read */
 /* ---- frame capture mutex (serialises /api/frame requests) ---- */
 static SemaphoreHandle_t s_frame_mutex;
 
-/* ---- H.264 live streaming state ---- */
-#define STREAM_FPS          30    /* target stream FPS (every other GBA frame) */
-#define STREAM_BITRATE      512000
-#define STREAM_GOP          30
-#define STREAM_QP_MIN       18
-#define STREAM_QP_MAX       36
-#define STREAM_AUDIO_SAMPLES_MAX  4400  /* drain buffer may hold up to ~4 GBA frames */
-#define STREAM_YUV_SIZE     (GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * 3 / 2)  /* 57600 */
-
-static struct {
-    volatile bool        active;       /* streaming loop running? */
-    volatile bool        task_done;    /* task finished, awaiting reap */
-    volatile int         ws_fd;        /* stream WS client socket FD (-1 = none) */
-    TaskHandle_t         task;         /* streaming task handle */
-    /* PPA for RGB565→YUV420 color conversion */
-    ppa_client_handle_t  ppa_client;
-    /* H.264 HW encoder */
-    esp_h264_enc_handle_t enc;
-    /* Pre-allocated buffers (PSRAM, allocated once) */
-    uint8_t *rgb_buf;     /* 76800 B — snapshot from AV pipeline */
-    uint8_t *yuv_buf;     /* 57600 B — PPA output, H264 input */
-    uint8_t *h264_buf;    /* 57600 B — H264 output NALs */
-    uint8_t *vid_pkt_buf; /* 57600+16 B — video WS frame */
-    uint8_t *aud_pkt_buf; /* ~17600+16 B — audio WS frame */
-    int16_t *audio_buf;   /* ~4400 × 2 B — audio samples */
-    uint32_t yuv_actual;  /* actual allocated size (may be rounded for cache) */
-    uint32_t h264_actual;
-    uint32_t frame_count;
-} s_stream;
-
 /* ---- embedded HTML ---- */
 extern const char web_home_html_start[] asm("_binary_web_home_html_start");
 extern const char web_home_html_end[]   asm("_binary_web_home_html_end");
 extern const char web_server_html_start[] asm("_binary_web_server_html_start");
 extern const char web_server_html_end[]   asm("_binary_web_server_html_end");
+
+/* ---- HTTP GET /favicon.ico → 204 No Content ---- */
+static esp_err_t favicon_handler(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "204 No Content");
+    return httpd_resp_send(req, NULL, 0);
+}
 
 /* ---- HTTP GET / → home page ---- */
 static esp_err_t root_get_handler(httpd_req_t *req)
@@ -205,19 +180,48 @@ static esp_err_t stats_get_handler(httpd_req_t *req)
     return httpd_resp_send(req, buf, len);
 }
 
+static const char *serial_setting_str(int s)
+{
+    switch (s) {
+    case SERIAL_MODE_DISABLED:    return "disabled";
+    case SERIAL_MODE_RFU:         return "rfu";
+    case SERIAL_MODE_SERIAL_POKE: return "mul_poke";
+    case SERIAL_MODE_SERIAL_AW1:  return "mul_aw1";
+    case SERIAL_MODE_SERIAL_AW2:  return "mul_aw2";
+    default:                      return "auto";
+    }
+}
+
+static const char *rtc_mode_str(int m)
+{
+    switch (m) {
+    case FEAT_DISABLE: return "disabled";
+    case FEAT_ENABLE:  return "enabled";
+    default:           return "auto";
+    }
+}
+
 /* ---- GET /api/settings → current settings JSON ---- */
 static esp_err_t settings_get_handler(httpd_req_t *req)
 {
-    char buf[384];
+    char buf[640];
     int len = snprintf(buf, sizeof(buf),
         "{\"dynarec_enable\":%d,\"sprite_limit\":%d,\"boot_mode\":\"%s\""
-        ",\"frameskip_type\":%u,\"frameskip_interval\":%u,\"frameskip_threshold\":%u}",
+        ",\"serial_mode\":\"%s\",\"rtc_mode\":\"%s\""
+        ",\"frameskip_type\":%u,\"frameskip_interval\":%u,\"frameskip_threshold\":%u"
+        ",\"netplay_enable\":%d,\"netplay_host\":\"%s\",\"netplay_port\":%u,\"netplay_nick\":\"%s\"}",
         dynarec_enable ? 1 : 0,
         sprite_limit ? 1 : 0,
         selected_boot_mode == boot_bios ? "bios" : "game",
+        serial_setting_str(gpsp_serial_setting),
+        rtc_mode_str(gpsp_rtc_mode),
         (unsigned)gpsp_frameskip_type,
         (unsigned)gpsp_frameskip_interval,
-        (unsigned)gpsp_frameskip_threshold);
+        (unsigned)gpsp_frameskip_threshold,
+        gpsp_netplay_ra_enabled ? 1 : 0,
+        gpsp_netplay_ra_host,
+        gpsp_netplay_ra_port,
+        gpsp_netplay_ra_nick);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -227,7 +231,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
 /* ---- POST /api/settings → apply + save ---- */
 static esp_err_t settings_post_handler(httpd_req_t *req)
 {
-    char body[256];
+    char body[384];
     int received = httpd_req_recv(req, body, sizeof(body) - 1);
     if (received <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
@@ -269,6 +273,32 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
             selected_boot_mode = boot_game;
     }
 
+    p = strstr(body, "\"serial_mode\"");
+    if (p) {
+        if (strstr(p, "\"rfu\""))
+            gpsp_serial_setting = SERIAL_MODE_RFU;
+        else if (strstr(p, "\"mul_poke\""))
+            gpsp_serial_setting = SERIAL_MODE_SERIAL_POKE;
+        else if (strstr(p, "\"mul_aw1\""))
+            gpsp_serial_setting = SERIAL_MODE_SERIAL_AW1;
+        else if (strstr(p, "\"mul_aw2\""))
+            gpsp_serial_setting = SERIAL_MODE_SERIAL_AW2;
+        else if (strstr(p, "\"disabled\""))
+            gpsp_serial_setting = SERIAL_MODE_DISABLED;
+        else
+            gpsp_serial_setting = SERIAL_MODE_AUTO;
+    }
+
+    p = strstr(body, "\"rtc_mode\"");
+    if (p) {
+        if (strstr(p, "\"enabled\""))
+            gpsp_rtc_mode = FEAT_ENABLE;
+        else if (strstr(p, "\"disabled\""))
+            gpsp_rtc_mode = FEAT_DISABLE;
+        else
+            gpsp_rtc_mode = FEAT_AUTODETECT;
+    }
+
     p = strstr(body, "\"frameskip_type\"");
     if (p) {
         p = strchr(p + 16, ':');
@@ -296,6 +326,61 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
             int v = atoi(p + 1);
             if (v >= 0 && v <= 100)
                 gpsp_frameskip_threshold = (uint32_t)v;
+        }
+    }
+
+    p = strstr(body, "\"netplay_enable\"");
+    if (p) {
+        p = strchr(p + 16, ':');
+        if (p) gpsp_netplay_ra_enabled = atoi(p + 1) ? true : false;
+    }
+
+    p = strstr(body, "\"netplay_host\"");
+    if (p) {
+        p = strchr(p + 14, ':');
+        if (p) {
+            /* Extract string value between quotes */
+            char *q = strchr(p, '"');
+            if (q) {
+                q++;
+                char *e = strchr(q, '"');
+                if (e) {
+                    size_t len = (size_t)(e - q);
+                    if (len >= sizeof(gpsp_netplay_ra_host))
+                        len = sizeof(gpsp_netplay_ra_host) - 1;
+                    memcpy(gpsp_netplay_ra_host, q, len);
+                    gpsp_netplay_ra_host[len] = '\0';
+                }
+            }
+        }
+    }
+
+    p = strstr(body, "\"netplay_port\"");
+    if (p) {
+        p = strchr(p + 14, ':');
+        if (p) {
+            int v = atoi(p + 1);
+            if (v >= 1 && v <= 65535)
+                gpsp_netplay_ra_port = (uint16_t)v;
+        }
+    }
+
+    p = strstr(body, "\"netplay_nick\"");
+    if (p) {
+        p = strchr(p + 14, ':');
+        if (p) {
+            char *q = strchr(p, '"');
+            if (q) {
+                q++;
+                char *e = strchr(q, '"');
+                if (e) {
+                    size_t len = (size_t)(e - q);
+                    if (len >= sizeof(gpsp_netplay_ra_nick))
+                        len = sizeof(gpsp_netplay_ra_nick) - 1;
+                    memcpy(gpsp_netplay_ra_nick, q, len);
+                    gpsp_netplay_ra_nick[len] = '\0';
+                }
+            }
         }
     }
 
@@ -674,365 +759,6 @@ uint16_t web_server_input_read(void)
     return keys;
 }
 
-/* ---- H.264 + audio streaming ---- */
-
-static void stream_free_buffers(void)
-{
-    heap_caps_free(s_stream.rgb_buf);     s_stream.rgb_buf    = NULL;
-    heap_caps_free(s_stream.yuv_buf);     s_stream.yuv_buf    = NULL;
-    heap_caps_free(s_stream.h264_buf);    s_stream.h264_buf   = NULL;
-    heap_caps_free(s_stream.vid_pkt_buf); s_stream.vid_pkt_buf = NULL;
-    heap_caps_free(s_stream.aud_pkt_buf); s_stream.aud_pkt_buf = NULL;
-    heap_caps_free(s_stream.audio_buf);   s_stream.audio_buf  = NULL;
-}
-
-static bool stream_alloc_buffers(void)
-{
-    /* All buffers in PSRAM.  H264 buffers must be 16-byte aligned per esp_h264_alloc.h.
-     * Use 64-byte alignment for cache-friendliness. */
-    const uint32_t align = 64;
-    const uint32_t rgb_size  = GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * 2;     /* 76800 */
-    const uint32_t yuv_size  = STREAM_YUV_SIZE;                               /* 57600 */
-    const uint32_t h264_size = STREAM_YUV_SIZE;                               /* worst-case NALs */
-    const uint32_t vid_pkt_size = h264_size + 16;                             /* header + NAL */
-    const uint32_t aud_pkt_size = STREAM_AUDIO_SAMPLES_MAX * 2 * sizeof(int16_t) + 16;
-    const uint32_t aud_size  = STREAM_AUDIO_SAMPLES_MAX * 2 * sizeof(int16_t);
-
-    const uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-
-    s_stream.rgb_buf     = heap_caps_aligned_alloc(align, rgb_size,     caps);
-    s_stream.yuv_buf     = heap_caps_aligned_alloc(align, yuv_size,     caps);
-    s_stream.h264_buf    = heap_caps_aligned_alloc(align, h264_size,    caps);
-    s_stream.vid_pkt_buf = heap_caps_aligned_alloc(align, vid_pkt_size, caps);
-    s_stream.aud_pkt_buf = heap_caps_aligned_alloc(align, aud_pkt_size, caps);
-    s_stream.audio_buf   = heap_caps_aligned_alloc(align, aud_size,     caps);
-
-    s_stream.yuv_actual  = yuv_size;
-    s_stream.h264_actual = h264_size;
-
-    if (!s_stream.rgb_buf || !s_stream.yuv_buf || !s_stream.h264_buf ||
-        !s_stream.vid_pkt_buf || !s_stream.aud_pkt_buf || !s_stream.audio_buf) {
-        ESP_LOGE(TAG, "Stream buffer alloc failed");
-        stream_free_buffers();
-        return false;
-    }
-    ESP_LOGI(TAG, "Stream buffers allocated: %u bytes PSRAM",
-             rgb_size + yuv_size + h264_size + vid_pkt_size + aud_pkt_size + aud_size);
-    return true;
-}
-
-/* Lazily create PPA client + H264 encoder (persistent, never freed).
- * These leak a few KB on destroy, so we keep them alive forever. */
-static esp_err_t stream_ensure_encoder(void)
-{
-    if (!s_stream.ppa_client) {
-        ppa_client_config_t ppa_cfg = {
-            .oper_type = PPA_OPERATION_SRM,
-        };
-        esp_err_t err = ppa_register_client(&ppa_cfg, &s_stream.ppa_client);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "PPA client register failed: %s", esp_err_to_name(err));
-            return err;
-        }
-    }
-
-    if (!s_stream.enc) {
-        esp_h264_enc_cfg_hw_t enc_cfg = {
-            .pic_type = ESP_H264_RAW_FMT_O_UYY_E_VYY,
-            .gop      = STREAM_GOP,
-            .fps      = STREAM_FPS,
-            .res      = { .width = GBA_SCREEN_WIDTH, .height = GBA_SCREEN_HEIGHT },
-            .rc       = { .bitrate = STREAM_BITRATE, .qp_min = STREAM_QP_MIN, .qp_max = STREAM_QP_MAX },
-        };
-        esp_h264_err_t h264_ret = esp_h264_enc_hw_new(&enc_cfg, &s_stream.enc);
-        if (h264_ret != ESP_H264_ERR_OK) {
-            ESP_LOGE(TAG, "H264 encoder create failed: %d", h264_ret);
-            return ESP_FAIL;
-        }
-
-        h264_ret = esp_h264_enc_open(s_stream.enc);
-        if (h264_ret != ESP_H264_ERR_OK) {
-            ESP_LOGE(TAG, "H264 encoder open failed: %d", h264_ret);
-            esp_h264_enc_del(s_stream.enc);
-            s_stream.enc = NULL;
-            return ESP_FAIL;
-        }
-        ESP_LOGI(TAG, "H264 HW encoder ready (%ux%u, %ubps, GOP=%u)",
-                 GBA_SCREEN_WIDTH, GBA_SCREEN_HEIGHT, STREAM_BITRATE, STREAM_GOP);
-    }
-
-    return ESP_OK;
-}
-
-/* WS async send completion callback — signal stream to stop on error. */
-static void stream_ws_send_cb(esp_err_t err, int sock, void *arg)
-{
-    if (err != ESP_OK && s_stream.ws_fd == sock) {
-        ESP_LOGW(TAG, "Stream WS send failed fd=%d: %s, stopping", sock, esp_err_to_name(err));
-        s_stream.ws_fd = -1;
-        s_stream.active = false;
-    }
-}
-
-/* Synchronous WS binary send helper. Returns ESP_OK on success. */
-static esp_err_t stream_ws_send(uint8_t *payload, size_t len)
-{
-    if (s_stream.ws_fd < 0 || !s_server) return ESP_FAIL;
-    httpd_ws_frame_t ws_frame = {
-        .type    = HTTPD_WS_TYPE_BINARY,
-        .payload = payload,
-        .len     = len,
-    };
-    esp_err_t err = httpd_ws_send_data(s_server, s_stream.ws_fd, &ws_frame);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Stream WS send failed: %s", esp_err_to_name(err));
-        s_stream.ws_fd = -1;
-        s_stream.active = false;
-    }
-    return err;
-}
-
-static void stream_task(void *arg)
-{
-    (void)arg;
-    ESP_LOGI(TAG, "Stream task started");
-
-    const uint32_t rgb_frame_size = GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * 2;
-    s_stream.frame_count = 0;
-
-    while (s_stream.active && s_stream.ws_fd >= 0) {
-
-        /* ----- 1. Snapshot RGB565 frame from AV pipeline -----
-         * Blocks until the next GBA frame is ready (~16.7ms at 59.7 FPS).
-         * Paced by GBA's native frame rate. */
-        esp_err_t snap = av_pipeline_snapshot_frame(s_stream.rgb_buf, rgb_frame_size);
-        if (snap != ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(8));
-            continue;
-        }
-
-        /* ----- 2. Interleave audio and video on alternating frames -----
-         * Even frames: encode + send video (30fps H.264)
-         * Odd frames:  drain + send audio (30fps, covers ~2 GBA frames)
-         * This avoids back-to-back large WS sends that overflow WiFi TX. */
-
-        if ((s_stream.frame_count & 1) != 0 && s_stream.ws_fd >= 0) {
-            /* ODD frame → send accumulated audio */
-            if (av_pipeline_audio_enabled()) {
-                const uint32_t max_audio_bytes = STREAM_AUDIO_SAMPLES_MAX * 2 * sizeof(int16_t);
-                size_t bytes = av_pipeline_stream_audio_read(s_stream.audio_buf, max_audio_bytes);
-                uint32_t samples = bytes / (2 * sizeof(int16_t));
-                if (samples > 0) {
-                    uint8_t *pkt = s_stream.aud_pkt_buf;
-                    pkt[0] = 0x02;
-                    pkt[1] = 0x00;
-                    uint32_t pts = s_stream.frame_count;
-                    memcpy(&pkt[2], &pts, 4);
-                    memcpy(&pkt[6], &samples, 4);
-                    uint32_t pcm_bytes = samples * 2 * sizeof(int16_t);
-                    memcpy(&pkt[10], s_stream.audio_buf, pcm_bytes);
-                    stream_ws_send(pkt, 10 + pcm_bytes);
-                }
-            }
-        }
-
-        if ((s_stream.frame_count & 1) == 0 && s_stream.ws_fd >= 0) {
-            /* EVEN frame → encode and send video */
-            ppa_srm_oper_config_t srm_cfg = {
-                .in = {
-                    .buffer     = s_stream.rgb_buf,
-                    .pic_w      = GBA_SCREEN_WIDTH,
-                    .pic_h      = GBA_SCREEN_HEIGHT,
-                    .block_w    = GBA_SCREEN_WIDTH,
-                    .block_h    = GBA_SCREEN_HEIGHT,
-                    .block_offset_x = 0,
-                    .block_offset_y = 0,
-                    .srm_cm     = PPA_SRM_COLOR_MODE_RGB565,
-                },
-                .out = {
-                    .buffer      = s_stream.yuv_buf,
-                    .buffer_size = s_stream.yuv_actual,
-                    .pic_w       = GBA_SCREEN_WIDTH,
-                    .pic_h       = GBA_SCREEN_HEIGHT,
-                    .block_offset_x = 0,
-                    .block_offset_y = 0,
-                    .srm_cm      = PPA_SRM_COLOR_MODE_YUV420,
-                },
-                .rotation_angle  = PPA_SRM_ROTATION_ANGLE_0,
-                .scale_x         = 1.0f,
-                .scale_y         = 1.0f,
-                .rgb_swap        = false,
-                .byte_swap       = false,
-                .mode            = PPA_TRANS_MODE_BLOCKING,
-            };
-            esp_err_t ppa_ret = ppa_do_scale_rotate_mirror(s_stream.ppa_client, &srm_cfg);
-            if (ppa_ret != ESP_OK) {
-                s_stream.frame_count++;
-                continue;
-            }
-
-            esp_h264_enc_in_frame_t in_frame = {
-                .raw_data = { .buffer = s_stream.yuv_buf, .len = s_stream.yuv_actual },
-                .pts = s_stream.frame_count,
-            };
-            esp_h264_enc_out_frame_t out_frame = {
-                .raw_data = { .buffer = s_stream.h264_buf, .len = s_stream.h264_actual },
-            };
-            esp_h264_err_t h264_ret = esp_h264_enc_process(s_stream.enc, &in_frame, &out_frame);
-            if (h264_ret != ESP_H264_ERR_OK) {
-                s_stream.frame_count++;
-                continue;
-            }
-
-            if (s_stream.ws_fd >= 0 && out_frame.length > 0) {
-                uint8_t *pkt = s_stream.vid_pkt_buf;
-                pkt[0] = 0x01;
-                pkt[1] = (uint8_t)out_frame.frame_type;
-                uint32_t pts = s_stream.frame_count;
-                memcpy(&pkt[2], &pts, 4);
-                memcpy(&pkt[6], out_frame.raw_data.buffer, out_frame.length);
-                stream_ws_send(pkt, 6 + out_frame.length);
-            }
-        }
-
-        s_stream.frame_count++;
-    }
-
-    ESP_LOGI(TAG, "Stream task ending, freeing buffers");
-    av_pipeline_stream_audio_stop();
-    stream_free_buffers();
-    s_stream.active = false;
-    /* Do NOT use vTaskDelete(NULL) — task was created with
-     * xTaskCreatePinnedToCoreWithCaps so the stack would leak.
-     * Suspend self and let the handler reap us. */
-    s_stream.task_done = true;
-    vTaskSuspend(NULL);
-}
-
-/* Reap a finished stream task (free its WithCaps stack+TCB). */
-static void stream_reap_task(void)
-{
-    if (s_stream.task && s_stream.task_done) {
-        vTaskDeleteWithCaps(s_stream.task);
-        s_stream.task = NULL;
-        s_stream.task_done = false;
-        ESP_LOGI(TAG, "Reaped stream task");
-    }
-}
-
-/* WebSocket handler for /ws/stream */
-static esp_err_t ws_stream_handler(httpd_req_t *req)
-{
-    if (req->method == HTTP_GET) {
-        /* New stream client connected — just record the fd.
-         * All heavy work (alloc, encoder, task) deferred to 0x20
-         * to avoid blocking the httpd socket-accept path. */
-        int fd = httpd_req_to_sockfd(req);
-        ESP_LOGI(TAG, "Stream WS client connected, fd=%d", fd);
-        s_stream.ws_fd = fd;
-        return ESP_OK;
-    }
-
-    /* Handle incoming WS messages (e.g. client disconnect detection) */
-    httpd_ws_frame_t ws_pkt = {0};
-    uint8_t buf[8];
-    ws_pkt.payload = buf;
-    ws_pkt.type = HTTPD_WS_TYPE_BINARY;
-
-    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, sizeof(buf));
-    if (ret != ESP_OK) {
-        int fd = httpd_req_to_sockfd(req);
-        ESP_LOGI(TAG, "Stream WS recv failed on fd=%d", fd);
-        /* Only tear down if this fd is still the active stream fd.
-         * A newer connection may have already replaced us. */
-        if (s_stream.ws_fd == fd) {
-            bool was_active = s_stream.active;
-            s_stream.ws_fd = -1;
-            s_stream.active = false;
-            if (was_active) {
-                vTaskDelay(pdMS_TO_TICKS(50));
-                stream_reap_task();
-            }
-            stream_free_buffers();
-        }
-        return ESP_FAIL;
-    }
-
-    /* 0x10 = stop streaming command from client */
-    if (ws_pkt.len >= 1 && buf[0] == 0x10) {
-        int fd = httpd_req_to_sockfd(req);
-        if (s_stream.ws_fd == fd) {
-            ESP_LOGI(TAG, "Stream stop requested by client");
-            s_stream.ws_fd = -1;
-            s_stream.active = false;
-            vTaskDelay(pdMS_TO_TICKS(50));
-            stream_reap_task();
-            stream_free_buffers();
-        }
-    }
-
-    /* 0x20 = reset/start command from client (decoder ready).
-     * All resource allocation happens here, NOT in the GET handler,
-     * to avoid blocking the httpd socket-accept path. */
-    if (ws_pkt.len >= 1 && buf[0] == 0x20) {
-        int fd = httpd_req_to_sockfd(req);
-        if (s_stream.ws_fd != fd) {
-            ESP_LOGW(TAG, "Ignoring reset from stale fd=%d (current=%d)", fd, s_stream.ws_fd);
-            return ESP_OK;
-        }
-        ESP_LOGI(TAG, "Stream reset requested by client (fd=%d)", fd);
-
-        /* Tear down any previous session */
-        if (s_stream.active) {
-            s_stream.active = false;
-            vTaskDelay(pdMS_TO_TICKS(50));
-            stream_reap_task();
-        } else {
-            stream_reap_task();
-        }
-        stream_free_buffers();
-
-        /* Allocate buffers + ensure encoder */
-        if (!stream_alloc_buffers()) {
-            return ESP_OK;
-        }
-        if (stream_ensure_encoder() != ESP_OK) {
-            stream_free_buffers();
-            return ESP_OK;
-        }
-
-        /* Reset encoder → first frame will be IDR */
-        esp_h264_enc_close(s_stream.enc);
-        if (esp_h264_enc_open(s_stream.enc) != ESP_H264_ERR_OK) {
-            ESP_LOGE(TAG, "H264 encoder reopen failed");
-            stream_free_buffers();
-            return ESP_OK;
-        }
-        av_pipeline_stream_audio_start();
-
-        s_stream.active = true;
-        s_stream.frame_count = 0;
-
-        /* Start streaming task on service core */
-        BaseType_t core = (CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0;
-        BaseType_t xret = xTaskCreatePinnedToCoreWithCaps(
-            stream_task, "av_stream",
-            6144, NULL,
-            tskIDLE_PRIORITY + 3,
-            &s_stream.task,
-            core,
-            MALLOC_CAP_SPIRAM);
-        if (xret != pdPASS) {
-            ESP_LOGE(TAG, "Stream task creation failed");
-            av_pipeline_stream_audio_stop();
-            stream_free_buffers();
-            s_stream.active = false;
-        }
-    }
-
-    return ESP_OK;
-}
-
 esp_err_t web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -1051,6 +777,8 @@ esp_err_t web_server_start(void)
         return ret;
     }
 
+    av_stream_set_server(s_server);
+
     /* Root page */
     const httpd_uri_t root_uri = {
         .uri = "/",
@@ -1058,6 +786,14 @@ esp_err_t web_server_start(void)
         .handler = root_get_handler,
     };
     httpd_register_uri_handler(s_server, &root_uri);
+
+    /* Favicon — suppress browser 404 noise */
+    const httpd_uri_t favicon_uri = {
+        .uri = "/favicon.ico",
+        .method = HTTP_GET,
+        .handler = favicon_handler,
+    };
+    httpd_register_uri_handler(s_server, &favicon_uri);
 
     /* WebSocket endpoint */
     const httpd_uri_t ws_uri = {
@@ -1168,14 +904,10 @@ esp_err_t web_server_start(void)
     const httpd_uri_t ws_stream_uri = {
         .uri = "/ws/stream",
         .method = HTTP_GET,
-        .handler = ws_stream_handler,
+        .handler = av_stream_ws_handler,
         .is_websocket = true,
     };
     httpd_register_uri_handler(s_server, &ws_stream_uri);
-
-    /* Init stream state */
-    s_stream.ws_fd = -1;
-    s_stream.active = false;
 
     ESP_LOGI(TAG, "Web server started on port %d", config.server_port);
     return ESP_OK;
