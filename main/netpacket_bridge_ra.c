@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include "lwip/inet.h"
+#include "lwip/netdb.h"
 #include "lwip/sockets.h"
 
 #include "esp_log.h"
@@ -24,6 +25,7 @@
 #include "common.h"
 #include "gpsp_config.h"
 #include "main.h"
+#include "netpacket_tunnel_host.h"
 #include "runtime_config.h"
 #include "serial.h"
 
@@ -134,6 +136,34 @@ static bool np_parse_tunnel_id(const char *hex, uint8_t out[12])
         if (*end != '\0') return false;
         out[i] = (uint8_t)v;
     }
+    return true;
+}
+
+static bool np_resolve_server_addr(struct sockaddr_in *server_addr)
+{
+    struct addrinfo hints;
+    struct addrinfo *res = NULL;
+    char port_str[8];
+
+    memset(server_addr, 0, sizeof(*server_addr));
+    server_addr->sin_family = AF_INET;
+    server_addr->sin_port = htons(gpsp_netplay_ra_port);
+
+    if (inet_aton(gpsp_netplay_ra_host, &server_addr->sin_addr))
+        return true;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    snprintf(port_str, sizeof(port_str), "%u", gpsp_netplay_ra_port);
+
+    if (getaddrinfo(gpsp_netplay_ra_host, port_str, &hints, &res) != 0 || !res) {
+        ESP_LOGW(TAG, "Failed to resolve host: %s", gpsp_netplay_ra_host);
+        return false;
+    }
+
+    memcpy(server_addr, res->ai_addr, sizeof(*server_addr));
+    freeaddrinfo(res);
     return true;
 }
 
@@ -261,8 +291,9 @@ static bool np_start_connect(void)
     }
     np_last_connect_attempt_us = now_us;
 
-    /* Host mode uses listener, not outbound connection */
-    if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST) {
+    /* Host modes use host-side handlers, not outbound RA client connection */
+    if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST ||
+        gpsp_netplay_ra_mode == NETPLAY_MODE_TUNNEL_HOST) {
         return false;
     }
 
@@ -282,12 +313,7 @@ static bool np_start_connect(void)
         return false;
     }
 
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(gpsp_netplay_ra_port);
-
-    if (!inet_aton(gpsp_netplay_ra_host, &server_addr.sin_addr)) {
-        ESP_LOGW(TAG, "Invalid RA host address: %s", gpsp_netplay_ra_host);
+    if (!np_resolve_server_addr(&server_addr)) {
         return false;
     }
 
@@ -803,9 +829,12 @@ static void np_process_commands(void)
 
 void netpacket_poll_receive(void)
 {
+    netpacket_tunnel_host_poll();
+
     /* Host mode management (also handles cleanup on mode change) */
     netpacket_host_poll();
-    if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST) {
+    if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST ||
+        gpsp_netplay_ra_mode == NETPLAY_MODE_TUNNEL_HOST) {
         /* Tear down any leftover client connection when switching to host */
         if (np_state != STATE_DISCONNECTED) {
             ESP_LOGI(TAG, "Switching to host mode, disconnecting client");
@@ -886,7 +915,8 @@ void netpacket_poll_receive(void)
 
 void netpacket_send(uint16_t client_id, const void *buf, size_t len)
 {
-    if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST) {
+    if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST ||
+        gpsp_netplay_ra_mode == NETPLAY_MODE_TUNNEL_HOST) {
         netpacket_host_send(client_id, buf, len);
         return;
     }

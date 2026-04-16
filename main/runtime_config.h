@@ -16,11 +16,12 @@ extern "C" {
 
 #define GPSP_RUNTIME_CONFIG_PATH STORAGE_MOUNT_POINT "/gpsp.cfg"
 
-/* Netplay mode: 0=disabled, 1=client (direct), 2=host, 3=tunnel client */
+/* Netplay mode: 0=disabled, 1=client (direct), 2=host, 3=tunnel client, 4=tunnel host */
 #define NETPLAY_MODE_DISABLED       0
 #define NETPLAY_MODE_CLIENT         1
 #define NETPLAY_MODE_HOST           2
 #define NETPLAY_MODE_TUNNEL_CLIENT  3
+#define NETPLAY_MODE_TUNNEL_HOST    4
 
 extern int  gpsp_netplay_ra_mode;
 extern bool gpsp_netplay_ra_enabled;   /* derived: mode != 0 */

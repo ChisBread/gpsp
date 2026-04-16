@@ -171,7 +171,7 @@ static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
 
     if (strcmp(key, "netplay_ra_mode") == 0) {
         parsed_long = strtol(value, &endptr, 10);
-        if (endptr != value && parsed_long >= 0 && parsed_long <= 3) {
+        if (endptr != value && parsed_long >= 0 && parsed_long <= 4) {
             gpsp_netplay_ra_mode = (int)parsed_long;
             gpsp_netplay_ra_enabled = (gpsp_netplay_ra_mode != NETPLAY_MODE_DISABLED);
         }

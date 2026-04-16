@@ -78,6 +78,13 @@ typedef struct {
     uint8_t        recv_buf[HOST_RECV_BUF_SIZE];
 } host_client_t;
 
+/* Forward declarations for handlers used by host_service_clients() */
+static bool host_handle_client_header(host_client_t *c);
+static bool host_handle_client_nick(host_client_t *c);
+static bool host_handle_client_info(host_client_t *c);
+static bool host_handle_play(host_client_t *c);
+static void host_process_commands(host_client_t *c);
+
 /* ── Module state ─────────────────────────────────────────────────── */
 
 extern u32 netplay_num_clients;
@@ -148,6 +155,45 @@ static bool host_is_active(void)
         if (host_clients[i].state != CLIENT_STATE_EMPTY)
             return true;
     return false;
+}
+
+static host_client_t *host_alloc_client_slot(uint32_t *assigned_id)
+{
+    host_client_t *c = NULL;
+    uint32_t id = host_next_client_id();
+
+    if (id == 0)
+        return NULL;
+
+    for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
+        if (host_clients[i].state == CLIENT_STATE_EMPTY) {
+            c = &host_clients[i];
+            break;
+        }
+    }
+
+    if (!c)
+        return NULL;
+
+    memset(c, 0, sizeof(*c));
+    c->fd = -1;
+    c->assigned_id = id;
+
+    if (assigned_id)
+        *assigned_id = id;
+
+    return c;
+}
+
+static bool host_prepare_client_socket(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0)
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    return true;
 }
 
 /* ── Per-client TCP helpers ───────────────────────────────────────── */
@@ -339,33 +385,16 @@ static void host_check_accept(void)
     }
 
     /* Find a free slot */
-    host_client_t *c = NULL;
-    for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
-        if (host_clients[i].state == CLIENT_STATE_EMPTY) {
-            c = &host_clients[i];
-            break;
-        }
-    }
+    uint32_t id = 0;
+    host_client_t *c = host_alloc_client_slot(&id);
     if (!c) {
         ESP_LOGW(TAG, "No free client slots, rejecting connection");
         close(fd);
         return;
     }
 
-    uint32_t id = host_next_client_id();
-    if (id == 0) {
-        ESP_LOGW(TAG, "No free client IDs, rejecting connection");
-        close(fd);
-        return;
-    }
-
     /* Non-blocking + TCP_NODELAY */
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    int one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-
-    memset(c, 0, sizeof(*c));
+    host_prepare_client_socket(fd);
     c->fd          = fd;
     c->state       = CLIENT_STATE_WAIT_HEADER;
     c->assigned_id = id;
@@ -374,6 +403,94 @@ static void host_check_accept(void)
     inet_ntoa_r(client_addr.sin_addr, addr_str, sizeof(addr_str));
     ESP_LOGI(TAG, "Client %u connected from %s:%u",
              id, addr_str, ntohs(client_addr.sin_port));
+}
+
+bool netpacket_host_attach_client(int fd, const char *peer_desc)
+{
+    uint32_t id = 0;
+    host_client_t *c;
+
+    if (fd < 0)
+        return false;
+
+    c = host_alloc_client_slot(&id);
+    if (!c) {
+        ESP_LOGW(TAG, "No free host slots for tunnel client %s",
+                 peer_desc ? peer_desc : "<unknown>");
+        close(fd);
+        return false;
+    }
+
+    host_prepare_client_socket(fd);
+    c->fd = fd;
+    c->state = CLIENT_STATE_WAIT_HEADER;
+    c->assigned_id = id;
+
+    ESP_LOGI(TAG, "Attached tunnel client %u from %s",
+             (unsigned)id, peer_desc ? peer_desc : "<unknown>");
+    return true;
+}
+
+static void host_service_clients(void)
+{
+    /* Service each client */
+    for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
+        host_client_t *c = &host_clients[i];
+        if (c->state == CLIENT_STATE_EMPTY) continue;
+
+        /* Read data from client */
+        if (client_recv_more(c) < 0) {
+            ESP_LOGW(TAG, "Client %u: connection lost", c->assigned_id);
+            host_disconnect_client(c);
+            continue;
+        }
+
+        switch (c->state) {
+        case CLIENT_STATE_WAIT_HEADER:
+            host_handle_client_header(c);
+            break;
+        case CLIENT_STATE_WAIT_NICK:
+            host_handle_client_nick(c);
+            break;
+        case CLIENT_STATE_WAIT_INFO:
+            host_handle_client_info(c);
+            break;
+        case CLIENT_STATE_WAIT_PLAY:
+            host_handle_play(c);
+            break;
+        case CLIENT_STATE_CONNECTED:
+            host_process_commands(c);
+            break;
+        default:
+            break;
+        }
+    }
+
+    /* Periodic ping + stats (every 5 seconds) */
+    int64_t now = esp_timer_get_time();
+    if (now - host_last_ping_us > 5000000) {
+        host_last_ping_us = now;
+
+        uint32_t ping[2];
+        ping[0] = htonl(RA_CMD_PING_REQUEST);
+        ping[1] = htonl(0);
+
+        for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
+            host_client_t *c = &host_clients[i];
+            if (c->state != CLIENT_STATE_CONNECTED) continue;
+
+            client_send_all(c, ping, sizeof(ping));
+
+            if (c->tx_packets || c->rx_packets) {
+                ESP_LOGI(TAG, "Client %u: TX %u pkts/%u B, RX %u pkts/%u B",
+                         c->assigned_id,
+                         c->tx_packets, c->tx_bytes,
+                         c->rx_packets, c->rx_bytes);
+                c->tx_packets = c->tx_bytes = 0;
+                c->rx_packets = c->rx_bytes = 0;
+            }
+        }
+    }
 }
 
 /* ── Per-client handshake phases ──────────────────────────────────── */
@@ -695,80 +812,29 @@ static void host_process_commands(host_client_t *c)
 
 void netpacket_host_poll(void)
 {
-    /* If mode is not HOST, clean up any leftover state and return */
-    if (gpsp_netplay_ra_mode != NETPLAY_MODE_HOST) {
+    /* If mode is not host-compatible, clean up any leftover state and return */
+    if (gpsp_netplay_ra_mode != NETPLAY_MODE_HOST &&
+        gpsp_netplay_ra_mode != NETPLAY_MODE_TUNNEL_HOST) {
         if (host_is_active())
             host_stop();
         return;
     }
 
-    /* Start listener if needed */
-    if (host_listen_fd < 0) {
-        host_start_listen();
-        return;
-    }
-
-    /* Accept new connections */
-    host_check_accept();
-
-    /* Service each client */
-    for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
-        host_client_t *c = &host_clients[i];
-        if (c->state == CLIENT_STATE_EMPTY) continue;
-
-        /* Read data from client */
-        if (client_recv_more(c) < 0) {
-            ESP_LOGW(TAG, "Client %u: connection lost", c->assigned_id);
-            host_disconnect_client(c);
-            continue;
+    if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST) {
+        /* Start listener if needed */
+        if (host_listen_fd < 0) {
+            host_start_listen();
+            return;
         }
 
-        switch (c->state) {
-        case CLIENT_STATE_WAIT_HEADER:
-            host_handle_client_header(c);
-            break;
-        case CLIENT_STATE_WAIT_NICK:
-            host_handle_client_nick(c);
-            break;
-        case CLIENT_STATE_WAIT_INFO:
-            host_handle_client_info(c);
-            break;
-        case CLIENT_STATE_WAIT_PLAY:
-            host_handle_play(c);
-            break;
-        case CLIENT_STATE_CONNECTED:
-            host_process_commands(c);
-            break;
-        default:
-            break;
-        }
+        /* Accept new connections */
+        host_check_accept();
+    } else if (host_listen_fd >= 0) {
+        close(host_listen_fd);
+        host_listen_fd = -1;
     }
 
-    /* Periodic ping + stats (every 5 seconds) */
-    int64_t now = esp_timer_get_time();
-    if (now - host_last_ping_us > 5000000) {
-        host_last_ping_us = now;
-
-        uint32_t ping[2];
-        ping[0] = htonl(RA_CMD_PING_REQUEST);
-        ping[1] = htonl(0);
-
-        for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
-            host_client_t *c = &host_clients[i];
-            if (c->state != CLIENT_STATE_CONNECTED) continue;
-
-            client_send_all(c, ping, sizeof(ping));
-
-            if (c->tx_packets || c->rx_packets) {
-                ESP_LOGI(TAG, "Client %u: TX %u pkts/%u B, RX %u pkts/%u B",
-                         c->assigned_id,
-                         c->tx_packets, c->tx_bytes,
-                         c->rx_packets, c->rx_bytes);
-                c->tx_packets = c->tx_bytes = 0;
-                c->rx_packets = c->rx_bytes = 0;
-            }
-        }
-    }
+    host_service_clients();
 }
 
 void netpacket_host_send(uint16_t client_id, const void *buf, size_t len)

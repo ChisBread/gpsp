@@ -7,6 +7,7 @@ idf_component_register(
         "gba_session.c"
         "netpacket_bridge_ra.c"
         "netpacket_host.c"
+        "netpacket_tunnel_host.c"
         "runtime_config.c"
         "web_server.c"
     INCLUDE_DIRS "."

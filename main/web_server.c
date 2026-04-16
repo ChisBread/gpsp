@@ -28,6 +28,7 @@
 #include "av_stream.h"
 #include "runtime_config.h"
 #include "gba_session.h"
+#include "netpacket_tunnel_host.h"
 #include "storage.h"
 #include "esp32p4/input_driver.h"
 #include "c6_remote.h"
@@ -204,13 +205,14 @@ static const char *rtc_mode_str(int m)
 /* ---- GET /api/settings → current settings JSON ---- */
 static esp_err_t settings_get_handler(httpd_req_t *req)
 {
-    char buf[768];
+    char buf[1024];
     int len = snprintf(buf, sizeof(buf),
         "{\"dynarec_enable\":%d,\"sprite_limit\":%d,\"boot_mode\":\"%s\""
         ",\"serial_mode\":\"%s\",\"rtc_mode\":\"%s\""
         ",\"frameskip_type\":%u,\"frameskip_interval\":%u,\"frameskip_threshold\":%u"
         ",\"netplay_enable\":%d,\"netplay_mode\":%d,\"netplay_host\":\"%s\""
-        ",\"netplay_port\":%u,\"netplay_nick\":\"%s\",\"netplay_tunnel_id\":\"%s\"}",
+        ",\"netplay_port\":%u,\"netplay_nick\":\"%s\",\"netplay_tunnel_id\":\"%s\""
+        ",\"netplay_tunnel_room_id\":\"%s\",\"netplay_tunnel_status\":\"%s\"}",
         dynarec_enable ? 1 : 0,
         sprite_limit ? 1 : 0,
         selected_boot_mode == boot_bios ? "bios" : "game",
@@ -224,7 +226,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         gpsp_netplay_ra_host,
         gpsp_netplay_ra_port,
         gpsp_netplay_ra_nick,
-        gpsp_netplay_ra_tunnel_id);
+        gpsp_netplay_ra_tunnel_id,
+        netpacket_tunnel_host_room_id(),
+        netpacket_tunnel_host_status());
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -343,7 +347,7 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         p = strchr(p + 14, ':');
         if (p) {
             int v = atoi(p + 1);
-            if (v >= 0 && v <= 3) {
+            if (v >= 0 && v <= 4) {
                 gpsp_netplay_ra_mode = v;
                 gpsp_netplay_ra_enabled = (v != 0);
             }
