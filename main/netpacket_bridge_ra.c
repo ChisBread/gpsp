@@ -27,6 +27,10 @@
 #include "runtime_config.h"
 #include "serial.h"
 
+/* Host mode (netpacket_host.c) */
+extern void netpacket_host_poll(void);
+extern void netpacket_host_send(uint16_t client_id, const void *buf, size_t len);
+
 /* ── RetroArch Netplay protocol constants ─────────────────────────── */
 
 #define RA_NETPLAY_MAGIC             0x52414E50u  /* "RANP" */
@@ -81,6 +85,10 @@ static int64_t np_last_connect_attempt_us;
 static int64_t np_last_ping_us;
 static uint32_t np_server_protocol;
 
+/* Debug counters */
+static uint32_t np_tx_packets, np_tx_bytes;
+static uint32_t np_rx_packets, np_rx_bytes;
+
 /* Receive buffer for TCP stream reassembly */
 #define NP_RECV_BUF_SIZE 4096
 static GPSP_EXTRAM_BSS uint8_t np_recv_buf[NP_RECV_BUF_SIZE];
@@ -113,6 +121,20 @@ static uint32_t np_impl_magic(void)
     magic ^= RA_NETPLAY_PROTOCOL_VERSION << (i & 0xf);
 
     return magic;
+}
+
+static bool np_parse_tunnel_id(const char *hex, uint8_t out[12])
+{
+    size_t len = strlen(hex);
+    if (len != 24) return false;
+    for (int i = 0; i < 12; i++) {
+        char h[3] = { hex[i*2], hex[i*2+1], '\0' };
+        char *end;
+        unsigned long v = strtoul(h, &end, 16);
+        if (*end != '\0') return false;
+        out[i] = (uint8_t)v;
+    }
+    return true;
 }
 
 static void np_disconnect(void)
@@ -215,6 +237,7 @@ static void np_receive_dispatch(const void *buf, size_t len, uint16_t client_id)
         serialaw_net_receive(buf, len, client_id);
         break;
     default:
+        ESP_LOGW(TAG, "Dropping NETPACKET: serial_mode=%d not handled", serial_mode);
         break;
     }
 }
@@ -227,17 +250,30 @@ static bool np_start_connect(void)
     struct sockaddr_in server_addr;
     int64_t now_us = esp_timer_get_time();
 
-    /* Rate-limit connection attempts to 1/sec */
+    /* Rate-limit connection attempts to 2 sec */
     if (now_us - np_last_connect_attempt_us < 2000000) {
         return false;
     }
     np_last_connect_attempt_us = now_us;
 
+    /* Host mode uses listener, not outbound connection */
+    if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST) {
+        return false;
+    }
+
     if (!c6_remote_network_ready()) {
+        ESP_LOGD(TAG, "Network not ready, deferring connect");
         return false;
     }
 
     if (gpsp_netplay_ra_host[0] == '\0') {
+        ESP_LOGD(TAG, "No host configured");
+        return false;
+    }
+
+    if (gpsp_netplay_ra_mode == NETPLAY_MODE_TUNNEL_CLIENT &&
+        gpsp_netplay_ra_tunnel_id[0] == '\0') {
+        ESP_LOGD(TAG, "No tunnel_id configured");
         return false;
     }
 
@@ -303,7 +339,26 @@ static bool np_check_connect(void)
         return false;
     }
 
-    ESP_LOGI(TAG, "TCP connected to RetroArch host");
+    ESP_LOGI(TAG, "TCP connected to %s",
+             gpsp_netplay_ra_mode == NETPLAY_MODE_TUNNEL_CLIENT
+                 ? "tunnel server" : "RetroArch host");
+
+    /* For tunnel client, send RATS + session_id before RANP header */
+    if (gpsp_netplay_ra_mode == NETPLAY_MODE_TUNNEL_CLIENT) {
+        uint8_t rats_msg[16];
+        uint8_t session_bytes[12];
+        if (!np_parse_tunnel_id(gpsp_netplay_ra_tunnel_id, session_bytes)) {
+            ESP_LOGE(TAG, "Invalid tunnel_id hex: %s", gpsp_netplay_ra_tunnel_id);
+            np_disconnect();
+            return false;
+        }
+        memcpy(rats_msg, "RATS", 4);
+        memcpy(rats_msg + 4, session_bytes, 12);
+        if (!np_send_all(rats_msg, sizeof(rats_msg))) {
+            return false;
+        }
+        ESP_LOGI(TAG, "Sent tunnel RATS: session=%s", gpsp_netplay_ra_tunnel_id);
+    }
 
     /* Send our header immediately */
     uint32_t header[6];
@@ -368,6 +423,8 @@ static bool np_send_nick(void)
     cmd[0] = htonl(RA_CMD_NICK);
     cmd[1] = htonl(RA_NICK_LEN);
 
+    ESP_LOGI(TAG, "Sending NICK: \"%s\"", nick);
+
     if (!np_send_all(cmd, sizeof(cmd)) || !np_send_all(nick, sizeof(nick))) {
         return false;
     }
@@ -420,6 +477,8 @@ static bool np_send_info(void)
     info.content_crc = htonl(0);  /* CRC not critical for CORE_PACKET_INTERFACE */
     strlcpy(info.core_name, GPSP_NAME, sizeof(info.core_name));
     strlcpy(info.core_version, GPSP_NETPACKET_VERSION, sizeof(info.core_version));
+
+    ESP_LOGI(TAG, "Sending INFO: core=%s ver=%s crc=0", info.core_name, info.core_version);
 
     if (!np_send_all(&info, sizeof(info))) {
         return false;
@@ -660,6 +719,11 @@ static void np_process_commands(void)
             const void *pkt_data = payload + 4;
             size_t pkt_len = cmd_size;  /* cmd_size = data only, client_id is extra */
 
+            np_rx_packets++;
+            np_rx_bytes += pkt_len;
+            ESP_LOGD(TAG, "NETPACKET recv: sender=%u len=%u serial_mode=%d",
+                     (unsigned)sender_id, (unsigned)pkt_len, serial_mode);
+
             np_receive_dispatch(pkt_data, pkt_len, (uint16_t)sender_id);
             break;
         }
@@ -734,9 +798,14 @@ static void np_process_commands(void)
 
 void netpacket_poll_receive(void)
 {
+    /* Host mode management (also handles cleanup on mode change) */
+    netpacket_host_poll();
+    if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST) {
+        return;
+    }
+
     if (np_state == STATE_DISCONNECTED) {
-        if (gpsp_netplay_ra_enabled && serial_mode != SERIAL_MODE_DISABLED &&
-            serial_mode != SERIAL_MODE_GBP && serial_mode != SERIAL_MODE_AUTO) {
+        if (gpsp_netplay_ra_enabled) {
             np_start_connect();
         }
         return;
@@ -775,7 +844,7 @@ void netpacket_poll_receive(void)
     case STATE_CONNECTED:
         np_process_commands();
 
-        /* Periodic ping (every 5 seconds) */
+        /* Periodic ping + stats (every 5 seconds) */
         if (np_socket_fd >= 0) {
             int64_t now = esp_timer_get_time();
             if (now - np_last_ping_us > 5000000) {
@@ -784,6 +853,14 @@ void netpacket_poll_receive(void)
                 ping[1] = htonl(0);
                 np_send_all(ping, sizeof(ping));
                 np_last_ping_us = now;
+
+                if (np_tx_packets || np_rx_packets) {
+                    ESP_LOGI(TAG, "Stats: TX %u pkts/%u B, RX %u pkts/%u B",
+                             np_tx_packets, np_tx_bytes,
+                             np_rx_packets, np_rx_bytes);
+                    np_tx_packets = np_tx_bytes = 0;
+                    np_rx_packets = np_rx_bytes = 0;
+                }
             }
         }
         break;
@@ -794,6 +871,11 @@ void netpacket_poll_receive(void)
 
 void netpacket_send(uint16_t client_id, const void *buf, size_t len)
 {
+    if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST) {
+        netpacket_host_send(client_id, buf, len);
+        return;
+    }
+
     if (np_state != STATE_CONNECTED || np_socket_fd < 0 || !buf || len == 0) {
         return;
     }
@@ -814,6 +896,10 @@ void netpacket_send(uint16_t client_id, const void *buf, size_t len)
     hdr[0] = htonl(RA_CMD_NETPACKET);
     hdr[1] = htonl((uint32_t)len);
     hdr[2] = htonl((uint32_t)client_id);
+
+    np_tx_packets++;
+    np_tx_bytes += len;
+    ESP_LOGD(TAG, "NETPACKET send: target=%u len=%u", (unsigned)client_id, (unsigned)len);
 
     if (!np_send_all(hdr, sizeof(hdr))) {
         return;

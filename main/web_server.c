@@ -204,12 +204,13 @@ static const char *rtc_mode_str(int m)
 /* ---- GET /api/settings → current settings JSON ---- */
 static esp_err_t settings_get_handler(httpd_req_t *req)
 {
-    char buf[640];
+    char buf[768];
     int len = snprintf(buf, sizeof(buf),
         "{\"dynarec_enable\":%d,\"sprite_limit\":%d,\"boot_mode\":\"%s\""
         ",\"serial_mode\":\"%s\",\"rtc_mode\":\"%s\""
         ",\"frameskip_type\":%u,\"frameskip_interval\":%u,\"frameskip_threshold\":%u"
-        ",\"netplay_enable\":%d,\"netplay_host\":\"%s\",\"netplay_port\":%u,\"netplay_nick\":\"%s\"}",
+        ",\"netplay_enable\":%d,\"netplay_mode\":%d,\"netplay_host\":\"%s\""
+        ",\"netplay_port\":%u,\"netplay_nick\":\"%s\",\"netplay_tunnel_id\":\"%s\"}",
         dynarec_enable ? 1 : 0,
         sprite_limit ? 1 : 0,
         selected_boot_mode == boot_bios ? "bios" : "game",
@@ -219,9 +220,11 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         (unsigned)gpsp_frameskip_interval,
         (unsigned)gpsp_frameskip_threshold,
         gpsp_netplay_ra_enabled ? 1 : 0,
+        gpsp_netplay_ra_mode,
         gpsp_netplay_ra_host,
         gpsp_netplay_ra_port,
-        gpsp_netplay_ra_nick);
+        gpsp_netplay_ra_nick,
+        gpsp_netplay_ra_tunnel_id);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -335,6 +338,18 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         if (p) gpsp_netplay_ra_enabled = atoi(p + 1) ? true : false;
     }
 
+    p = strstr(body, "\"netplay_mode\"");
+    if (p) {
+        p = strchr(p + 14, ':');
+        if (p) {
+            int v = atoi(p + 1);
+            if (v >= 0 && v <= 3) {
+                gpsp_netplay_ra_mode = v;
+                gpsp_netplay_ra_enabled = (v != 0);
+            }
+        }
+    }
+
     p = strstr(body, "\"netplay_host\"");
     if (p) {
         p = strchr(p + 14, ':');
@@ -379,6 +394,25 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
                         len = sizeof(gpsp_netplay_ra_nick) - 1;
                     memcpy(gpsp_netplay_ra_nick, q, len);
                     gpsp_netplay_ra_nick[len] = '\0';
+                }
+            }
+        }
+    }
+
+    p = strstr(body, "\"netplay_tunnel_id\"");
+    if (p) {
+        p = strchr(p + 19, ':');
+        if (p) {
+            char *q = strchr(p, '"');
+            if (q) {
+                q++;
+                char *e = strchr(q, '"');
+                if (e) {
+                    size_t len = (size_t)(e - q);
+                    if (len >= sizeof(gpsp_netplay_ra_tunnel_id))
+                        len = sizeof(gpsp_netplay_ra_tunnel_id) - 1;
+                    memcpy(gpsp_netplay_ra_tunnel_id, q, len);
+                    gpsp_netplay_ra_tunnel_id[len] = '\0';
                 }
             }
         }
@@ -764,6 +798,7 @@ esp_err_t web_server_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.max_uri_handlers = 20;
+    config.max_open_sockets = 4;  /* save sockets for netplay + WS */
     config.stack_size = 8192;
 
     /* Init frame capture mutex once */

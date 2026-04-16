@@ -21,10 +21,12 @@
 
 static const char *TAG = "gpsp_config";
 
+int  gpsp_netplay_ra_mode;
 bool gpsp_netplay_ra_enabled;
 char gpsp_netplay_ra_host[64];
 uint16_t gpsp_netplay_ra_port;
 char gpsp_netplay_ra_nick[32];
+char gpsp_netplay_ra_tunnel_id[25];
 
 int gpsp_serial_setting;
 int gpsp_rtc_mode;
@@ -88,10 +90,12 @@ static void gpsp_runtime_config_set_defaults(void)
     sprite_limit = 1;
     selected_boot_mode = boot_game;
 
+    gpsp_netplay_ra_mode = NETPLAY_MODE_DISABLED;
     gpsp_netplay_ra_enabled = false;
     gpsp_netplay_ra_host[0] = '\0';
     gpsp_netplay_ra_port = 55435;
     strlcpy(gpsp_netplay_ra_nick, "ESP32-P4", sizeof(gpsp_netplay_ra_nick));
+    gpsp_netplay_ra_tunnel_id[0] = '\0';
 
     gpsp_serial_setting = SERIAL_MODE_AUTO;
     gpsp_rtc_mode = FEAT_AUTODETECT;
@@ -158,6 +162,18 @@ static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
         int enabled;
         if (parse_bool_value(value, &enabled)) {
             gpsp_netplay_ra_enabled = enabled;
+            /* Legacy: if enabled but mode is disabled, default to client */
+            if (enabled && gpsp_netplay_ra_mode == NETPLAY_MODE_DISABLED)
+                gpsp_netplay_ra_mode = NETPLAY_MODE_CLIENT;
+        }
+        return;
+    }
+
+    if (strcmp(key, "netplay_ra_mode") == 0) {
+        parsed_long = strtol(value, &endptr, 10);
+        if (endptr != value && parsed_long >= 0 && parsed_long <= 3) {
+            gpsp_netplay_ra_mode = (int)parsed_long;
+            gpsp_netplay_ra_enabled = (gpsp_netplay_ra_mode != NETPLAY_MODE_DISABLED);
         }
         return;
     }
@@ -177,6 +193,11 @@ static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
 
     if (strcmp(key, "netplay_ra_nick") == 0) {
         strlcpy(gpsp_netplay_ra_nick, value, sizeof(gpsp_netplay_ra_nick));
+        return;
+    }
+
+    if (strcmp(key, "netplay_ra_tunnel_id") == 0) {
+        strlcpy(gpsp_netplay_ra_tunnel_id, value, sizeof(gpsp_netplay_ra_tunnel_id));
         return;
     }
 
@@ -280,9 +301,11 @@ esp_err_t gpsp_runtime_config_save(void)
             "rtc_mode=%s\n"
             "web_server_enable=%d\n"
             "netplay_ra_enable=%d\n"
+            "netplay_ra_mode=%d\n"
             "netplay_ra_host=%s\n"
             "netplay_ra_port=%u\n"
             "netplay_ra_nick=%s\n"
+            "netplay_ra_tunnel_id=%s\n"
             "frameskip_interval=%u\n"
             "frameskip_type=%u\n"
             "frameskip_threshold=%u\n",
@@ -293,9 +316,11 @@ esp_err_t gpsp_runtime_config_save(void)
             rtc_mode_to_str(gpsp_rtc_mode),
             gpsp_web_server_enabled ? 1 : 0,
             gpsp_netplay_ra_enabled ? 1 : 0,
+            gpsp_netplay_ra_mode,
             gpsp_netplay_ra_host,
             gpsp_netplay_ra_port,
             gpsp_netplay_ra_nick,
+            gpsp_netplay_ra_tunnel_id,
             (unsigned)gpsp_frameskip_interval,
             (unsigned)gpsp_frameskip_type,
             (unsigned)gpsp_frameskip_threshold);

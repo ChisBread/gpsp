@@ -24,8 +24,10 @@
 #include "input_driver.h"
 #include "main.h"
 #include "savestate.h"
+#include "serial.h"
 #include "sound.h"
 #include "storage.h"
+#include "runtime_config.h"
 #include "video.h"
 #include "web_server.h"
 #include "runtime_config.h"
@@ -1337,6 +1339,33 @@ void gba_emulation_task(void *param)
         {
             clear_gamepak_stickybits();
             execute_arm(execute_cycles);
+        }
+
+        /* ── Per-frame serial / netplay housekeeping ──
+         * Mirrors what libretro's retro_run() does after execute_arm.
+         * rfu_frame_update  : peer broadcast TTL, host re-announce, client timeouts
+         * serialpoke/aw     : frame-based housekeeping
+         * netpacket_poll_receive : drive TCP connect/accept/handshake each frame
+         *   (inside rfu_update it's only called in WAITEVENT state, which is
+         *    too late for initial connection establishment)
+         */
+        {
+            extern void netpacket_poll_receive(void);
+            switch (serial_mode) {
+            case SERIAL_MODE_RFU:
+                rfu_frame_update();
+                break;
+            case SERIAL_MODE_SERIAL_POKE:
+                serialpoke_frame_update();
+                break;
+            default:
+                break;
+            }
+            /* Always tick netplay connection management regardless of serial_mode,
+             * so listen/connect/handshake can proceed before the game activates RFU. */
+            if (gpsp_netplay_ra_mode != NETPLAY_MODE_DISABLED) {
+                netpacket_poll_receive();
+            }
         }
 
         t1 = esp_timer_get_time();

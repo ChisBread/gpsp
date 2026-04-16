@@ -286,10 +286,15 @@ btn:hover{background:#3a4a6a}
 <div class="card">
   <h2 data-i18n="netplay">联机</h2>
   <div class="row">
-    <label data-i18n="netplay_enable">启用联机</label>
-    <label class="toggle"><input type="checkbox" id="cfg_netplay"><span class="sl"></span></label>
+    <label data-i18n="netplay_mode_lbl">联机模式</label>
+    <select id="cfg_np_mode" onchange="updateNetplayUI()" style="background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:3px 8px;font-size:.82em">
+      <option value="0" data-i18n-v="np_off">关闭</option>
+      <option value="1" data-i18n-v="np_client">客户端 (直连)</option>
+      <option value="2" data-i18n-v="np_host">主机 (等待连入)</option>
+      <option value="3" data-i18n-v="np_tunnel">隧道客户端</option>
+    </select>
   </div>
-  <div class="row">
+  <div class="row" id="row_np_host">
     <label data-i18n="netplay_host">主机地址</label>
     <input type="text" id="cfg_np_host" placeholder="192.168.1.x" style="background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:3px 8px;font-size:.82em;width:140px">
   </div>
@@ -300,6 +305,10 @@ btn:hover{background:#3a4a6a}
   <div class="row">
     <label data-i18n="netplay_nick">昵称</label>
     <input type="text" id="cfg_np_nick" maxlength="31" style="background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:3px 8px;font-size:.82em;width:140px">
+  </div>
+  <div class="row" id="row_np_tunnel">
+    <label data-i18n="netplay_tunnel_id">隧道 Session ID</label>
+    <input type="text" id="cfg_np_tunnel" maxlength="24" placeholder="24位十六进制" style="background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:3px 8px;font-size:.82em;width:200px;font-family:monospace">
   </div>
   <div class="msg" id="np_msg"></div>
 </div>
@@ -345,7 +354,7 @@ zh:{
   rtc_mode:'RTC 时钟',rtc_auto:'自动',rtc_on:'开启',rtc_off:'关闭',
   frameskip:'跳帧模式',fs_off:'关闭',fs_auto:'自动',fs_auto_thr:'自动 (阈值)',fs_fixed:'固定间隔',
   fs_threshold:'跳帧阈值 (%)',fs_interval:'跳帧间隔',
-  netplay:'联机',netplay_enable:'启用联机',netplay_host:'主机地址',netplay_port:'端口',netplay_nick:'昵称',
+  netplay:'联机',netplay_mode_lbl:'联机模式',np_off:'关闭',np_client:'客户端 (直连)',np_host:'主机 (等待连入)',np_tunnel:'隧道客户端',netplay_host:'主机/隧道地址',netplay_port:'端口',netplay_nick:'昵称',netplay_tunnel_id:'隧道 Session ID',
   games:'游戏',rom_loading:'加载中...',rom_load_fail:'读取失败',rom_empty:'SD卡未找到 .gba 文件',
   rom_switching:'加载中: ',rom_switched:'已切换',rom_switch_fail:'切换失败',
   savestates:'即时存档',save_slot:'存档槽:',save_btn:'保存',load_btn:'读取',
@@ -436,7 +445,7 @@ en:{
   rtc_mode:'RTC Clock',rtc_auto:'Auto',rtc_on:'Enabled',rtc_off:'Disabled',
   frameskip:'Frameskip',fs_off:'Off',fs_auto:'Auto',fs_auto_thr:'Auto (Threshold)',fs_fixed:'Fixed Interval',
   fs_threshold:'Frameskip Threshold (%)',fs_interval:'Frameskip Interval',
-  netplay:'Netplay',netplay_enable:'Enable Netplay',netplay_host:'Host Address',netplay_port:'Port',netplay_nick:'Nickname',
+  netplay:'Netplay',netplay_mode_lbl:'Netplay Mode',np_off:'Disabled',np_client:'Client (Direct)',np_host:'Host (Listen)',np_tunnel:'Tunnel Client',netplay_host:'Host/Tunnel Address',netplay_port:'Port',netplay_nick:'Nickname',netplay_tunnel_id:'Tunnel Session ID',
   games:'Games',rom_loading:'Loading...',rom_load_fail:'Load failed',rom_empty:'No .gba files on SD card',
   rom_switching:'Loading: ',rom_switched:'Switched',rom_switch_fail:'Switch failed',
   savestates:'Save States',save_slot:'Slot:',save_btn:'Save',load_btn:'Load',
@@ -519,6 +528,7 @@ function t(k){return (I18N[curLang]&&I18N[curLang][k])||I18N.zh[k]||k;}
 function setLang(lang){curLang=lang;localStorage.setItem('gpsp_lang',lang);applyI18n();if(typeof buildLegend==='function')buildLegend();}
 function applyI18n(){
   document.querySelectorAll('[data-i18n]').forEach(el=>{el.textContent=t(el.dataset.i18n);});
+  document.querySelectorAll('[data-i18n-v]').forEach(el=>{el.textContent=t(el.dataset.i18nV);});
   document.querySelectorAll('[data-i18n-tip]').forEach(el=>{el.setAttribute('data-tip',t(el.dataset.i18nTip));});
   document.querySelectorAll('[data-i18n-title]').forEach(el=>{el.title=t(el.dataset.i18nTitle);});
   document.querySelectorAll('.lang-btn').forEach(b=>{b.classList.toggle('active',b.dataset.lang===curLang);});
@@ -1041,10 +1051,12 @@ async function loadSettings(){
     $('cfg_frameskip').value = String(j.frameskip_type || 0);
     $('cfg_fs_threshold').value = String(j.frameskip_threshold || 33);
     $('cfg_fs_interval').value = String(j.frameskip_interval || 1);
-    $('cfg_netplay').checked = !!j.netplay_enable;
+    $('cfg_np_mode').value = String(j.netplay_mode || 0);
     $('cfg_np_host').value = j.netplay_host || '';
     $('cfg_np_port').value = String(j.netplay_port || 55435);
     $('cfg_np_nick').value = j.netplay_nick || '';
+    $('cfg_np_tunnel').value = j.netplay_tunnel_id || '';
+    updateNetplayUI();
     updateFrameskipUI();
   } catch(e){}
 }
@@ -1060,10 +1072,11 @@ async function saveSettings(){
     frameskip_type: parseInt($('cfg_frameskip').value, 10) || 0,
     frameskip_interval: parseInt($('cfg_fs_interval').value, 10) || 1,
     frameskip_threshold: parseInt($('cfg_fs_threshold').value, 10) || 33,
-    netplay_enable: $('cfg_netplay').checked ? 1 : 0,
+    netplay_mode: parseInt($('cfg_np_mode').value, 10) || 0,
     netplay_host: $('cfg_np_host').value,
     netplay_port: parseInt($('cfg_np_port').value, 10) || 55435,
-    netplay_nick: $('cfg_np_nick').value
+    netplay_nick: $('cfg_np_nick').value,
+    netplay_tunnel_id: $('cfg_np_tunnel').value
   };
   try {
     const r = await fetch('/api/settings', {
@@ -1086,16 +1099,26 @@ $('cfg_rtc').addEventListener('change', saveSettings);
 $('cfg_frameskip').addEventListener('change', function(){ updateFrameskipUI(); saveSettings(); });
 $('cfg_fs_threshold').addEventListener('change', saveSettings);
 $('cfg_fs_interval').addEventListener('change', saveSettings);
-$('cfg_netplay').addEventListener('change', saveSettings);
+$('cfg_np_mode').addEventListener('change', function(){ updateNetplayUI(); saveSettings(); });
 $('cfg_np_host').addEventListener('change', saveSettings);
 $('cfg_np_port').addEventListener('change', saveSettings);
 $('cfg_np_nick').addEventListener('change', saveSettings);
+$('cfg_np_tunnel').addEventListener('change', saveSettings);
 
 function updateFrameskipUI(){
   var t = parseInt($('cfg_frameskip').value, 10);
   $('row_fs_threshold').style.display = (t === 2) ? '' : 'none';
   $('row_fs_interval').style.display = (t === 3) ? '' : 'none';
 }
+
+function updateNetplayUI(){
+  var m = parseInt($('cfg_np_mode').value, 10);
+  /* host/tunnel address: shown for client(1) and tunnel(3) */
+  $('row_np_host').style.display = (m === 1 || m === 3) ? '' : 'none';
+  /* tunnel session id: only for tunnel mode */
+  $('row_np_tunnel').style.display = (m === 3) ? '' : 'none';
+}
+updateNetplayUI();
 
 /* ── ROM picker ────────────────────────────────────── */
 async function loadRomList(){
