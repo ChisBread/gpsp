@@ -34,6 +34,7 @@ cpu_alert_type write_rcnt(u16 value);
 // Serial IRQ interface
 u32 serial_next_event();
 bool update_serial(unsigned cycles);
+void serial_reset_irq(void);
 
 // RFU interface
 void rfu_reset(void);

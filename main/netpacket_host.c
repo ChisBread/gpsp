@@ -110,6 +110,11 @@ static void host_disconnect_client(void)
     host_recv_len = 0;
     netplay_num_clients = 0;
 
+    /* Reset serial protocol state machines */
+    serialproto_reset();
+    rfu_reset();
+    serial_reset_irq();
+
     /* Go back to listening if listener is still alive */
     if (host_listen_fd >= 0) {
         host_state = HOST_STATE_LISTENING;
@@ -133,6 +138,11 @@ static void host_stop(void)
     host_recv_len = 0;
     netplay_num_clients = 0;
     netplay_client_id = 0;
+
+    /* Reset serial protocol state machines */
+    serialproto_reset();
+    rfu_reset();
+    serial_reset_irq();
 }
 
 static bool host_send_all(const void *data, size_t len)

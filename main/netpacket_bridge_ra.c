@@ -147,6 +147,11 @@ static void np_disconnect(void)
     np_recv_len = 0;
     netplay_num_clients = 0;
     netplay_client_id = 0;
+
+    /* Reset serial protocol state machines to avoid stale peer state */
+    serialproto_reset();
+    rfu_reset();
+    serial_reset_irq();
 }
 
 static bool np_send_all(const void *data, size_t len)
@@ -801,6 +806,18 @@ void netpacket_poll_receive(void)
     /* Host mode management (also handles cleanup on mode change) */
     netpacket_host_poll();
     if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST) {
+        /* Tear down any leftover client connection when switching to host */
+        if (np_state != STATE_DISCONNECTED) {
+            ESP_LOGI(TAG, "Switching to host mode, disconnecting client");
+            np_disconnect();
+        }
+        return;
+    }
+
+    /* Tear down client connection if netplay was disabled */
+    if (!gpsp_netplay_ra_enabled && np_state != STATE_DISCONNECTED) {
+        ESP_LOGI(TAG, "Netplay disabled, disconnecting");
+        np_disconnect();
         return;
     }
 

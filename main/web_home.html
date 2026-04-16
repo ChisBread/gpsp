@@ -142,6 +142,12 @@ btn:hover{background:#3a4a6a}
     <div class="ctrl-toolbar">
       <button class="tbtn" id="stream_btn" data-i18n-title="start_stop_stream" title="开始/停止推流"><span data-i18n="stream_start">▶ 推流</span></button>
       <button class="tbtn" id="frame_once" data-i18n-title="capture_title" title="抓取一帧">📷 <span data-i18n="capture">截帧</span></button>
+      <select id="frame_auto" style="background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.78em">
+        <option value="0" data-i18n="fa_off">关闭</option>
+        <option value="1000">1s</option>
+        <option value="3000">3s</option>
+        <option value="5000">5s</option>
+      </select>
       <button class="tbtn" id="rec_btn" data-i18n-title="record_title" title="录制"><span data-i18n="record">⏺ 录制</span></button>
       <span class="vol-wrap">🔊 <span data-i18n="volume">音量</span><input type="range" id="vol_slider" min="0" max="100" value="100"><span class="vol-val" id="vol_val">100</span></span>
       <span style="color:#666;font-size:.72em" id="stream_info" data-i18n="not_connected">未连接</span>
@@ -184,7 +190,17 @@ btn:hover{background:#3a4a6a}
   </div>
 </div>
 
-<div class="card full">
+<div class="card full" id="stats_card">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+    <h2 style="margin:0" data-i18n="stats_title">统计</h2>
+    <select id="stats_freq" style="background:#1a2030;color:#e0e0e0;border:1px solid #444;border-radius:4px;padding:3px 6px;font-size:.78em">
+      <option value="0" data-i18n="fa_off">关闭</option>
+      <option value="1000" selected>1s</option>
+      <option value="3000">3s</option>
+      <option value="5000">5s</option>
+    </select>
+  </div>
+  <div id="stats_body">
   <div class="hdr">
     <div><span class="fps" id="fps">--</span> <span class="sub">FPS</span></div>
     <div class="sub"><span data-i18n="free_mem">空闲内存</span>: <span id="heap">--</span> KB | <span data-i18n="frame_sync">帧同步</span>: <span id="acq">--</span> us | <span data-i18n="audio_prod">音频产出(GBA侧)</span>: <span id="snd">--</span> us | <span data-i18n="audio_cons">音频消费(I2S)</span>: <span id="i2s_buf">--</span></div>
@@ -194,6 +210,7 @@ btn:hover{background:#3a4a6a}
   </div>
   <div class="legend" id="legend"></div>
   <table class="st" id="tbl"></table>
+  </div>
 </div>
 
 <div class="card" id="prof_card" style="display:none">
@@ -432,6 +449,7 @@ zh:{
   prof_hit:'块查找命中率',prof_hit_tip:'JIT哈希表查找命中 / 总查找次数。命中=直接执行已编译代码，未中=需要新编译',
   volume:'音量',
   start_stop_stream:'开始/停止推流',capture_title:'抓取一帧',record_title:'录制',
+  stats_title:'统计',fa_off:'关闭',stream_np_conflict:'联机模式下不可推流',
 },
 en:{
   live_stream:'Live Stream',stream_start:'▶ Stream',stream_stop:'⏸ Stop',
@@ -523,6 +541,7 @@ en:{
   prof_hit:'Block Hit Rate',prof_hit_tip:'JIT hash hit / total. Hit = run compiled, Miss = compile new',
   volume:'Vol',
   start_stop_stream:'Start/Stop stream',capture_title:'Capture frame',record_title:'Record',
+  stats_title:'Statistics',fa_off:'Off',stream_np_conflict:'Streaming unavailable during netplay',
 }};
 function t(k){return (I18N[curLang]&&I18N[curLang][k])||I18N.zh[k]||k;}
 function setLang(lang){curLang=lang;localStorage.setItem('gpsp_lang',lang);applyI18n();if(typeof buildLegend==='function')buildLegend();}
@@ -1034,8 +1053,16 @@ async function poll(){
   } catch(e){}
 }
 
-setInterval(poll, 1000);
-poll();
+let statsTimer = null;
+function startStatsPoll(ms) {
+  clearInterval(statsTimer); statsTimer = null;
+  const show = ms > 0;
+  if ($('stats_body')) $('stats_body').style.display = show ? '' : 'none';
+  if (!show) { $('prof_card').style.display = 'none'; $('jit_card').style.display = 'none'; }
+  if (ms > 0) { poll(); statsTimer = setInterval(poll, ms); }
+}
+$('stats_freq').addEventListener('change', function(){ startStatsPoll(parseInt(this.value,10)); });
+startStatsPoll(1000);
 
 /* ── Settings ─────────────────────────────────────── */
 async function loadSettings(){
@@ -1386,6 +1413,14 @@ async function captureFrame(){
 }
 $('frame_once').addEventListener('click', captureFrame);
 
+/* ── Frame auto-refresh ── */
+let frameAutoTimer = null;
+$('frame_auto').addEventListener('change', function(){
+  clearInterval(frameAutoTimer); frameAutoTimer = null;
+  const ms = parseInt(this.value, 10);
+  if (ms > 0) { captureFrame(); frameAutoTimer = setInterval(captureFrame, ms); }
+});
+
 /* ── H.264 Stream via WebSocket (WebCodecs / Broadway.js) ── */
 let streamWs = null;
 let videoDecoder = null;   /* WebCodecs VideoDecoder (secure ctx only) */
@@ -1443,6 +1478,10 @@ async function initBroadway() {
 
 function streamStart() {
   if (streamActive) return;
+  if (parseInt($('cfg_np_mode').value, 10) !== 0) {
+    $('stream_info').textContent = t('stream_np_conflict');
+    return;
+  }
   streamActive = true;
   streamFrames = 0;
   streamVidMsgs = 0;
@@ -1756,6 +1795,11 @@ $('rec_btn').addEventListener('click', function() {
   mediaRecorder.start(1000); /* 1s timeslice */
   $('rec_btn').querySelector('[data-i18n]') && ($('rec_btn').querySelector('[data-i18n]').textContent = t('record_stop'));
   $('rec_btn').classList.add('rec');
+});
+
+/* ── Netplay/streaming exclusion ── */
+$('cfg_np_mode').addEventListener('change', function(){
+  if (parseInt(this.value, 10) !== 0 && streamActive) streamStop();
 });
 
 })();

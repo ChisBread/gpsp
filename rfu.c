@@ -237,7 +237,12 @@ void rfu_reset() {
   rfu_resp_timeout = 0;
   rfu_timeout = RFU_DEF_TIMEOUT;
   rfu_rtx_max = RFU_DEF_RTXMAX;
+  memset(rfu_buf, 0, sizeof(rfu_buf));
+  rfu_cmd = 0;
+  rfu_plen = 0;
+  memset(&rfu_tx_buf, 0, sizeof(rfu_tx_buf));
   memset(&rfu_host, 0, sizeof(rfu_host));
+  memset(&rfu_client, 0, sizeof(rfu_client));
 
   // Clear all the received broadcasts.
   memset(&rfu_peer_bcst, 0, sizeof(rfu_peer_bcst));

@@ -23,6 +23,10 @@ int serial_mode = SERIAL_MODE_AUTO;
 
 static u32 serial_irq_cycles = 0;
 
+void serial_reset_irq(void) {
+  serial_irq_cycles = 0;
+}
+
 // Timings are very aproximate, hopefully they are good enough.
 #define CLOCK_CYC_256KHZ_8BIT        524    // CLOCK / 256KHz * 8
 #define CLOCK_CYC_256KHZ_32BIT      2097    // CLOCK / 256KHz * 32

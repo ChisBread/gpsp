@@ -44,7 +44,7 @@ static const char *TAG = "av_stream";
 
 /* ---- tunables ---- */
 #define STREAM_FPS              30
-#define STREAM_BITRATE          512000
+#define STREAM_BITRATE          256000
 #define STREAM_GOP              30
 #define STREAM_QP_MIN           18
 #define STREAM_QP_MAX           36
