@@ -49,17 +49,15 @@ static const char *TAG = "av_stream";
 #define STREAM_QP_MIN           18
 #define STREAM_QP_MAX           36
 #define STREAM_AUDIO_SAMPLES_MAX 4400   /* drain buffer: up to ~4 GBA frames */
-#define STREAM_YUV_SIZE         (GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * 3 / 2)
 
 /* ---- module state ---- */
 static httpd_handle_t s_server;   /* set by av_stream_set_server() */
 
 static struct {
     volatile bool        active;
-    volatile bool        task_done;
     volatile int         ws_fd;         /* stream WS client socket FD (-1 = none) */
+    volatile int         pending_fd;    /* handler→task: start session with this fd, -1 = none */
     TaskHandle_t         task;
-    SemaphoreHandle_t    done_sem;      /* signalled when stream_task exits */
 
     /* PPA colour converter + H.264 HW encoder (persistent, never freed) */
     ppa_client_handle_t  ppa_client;
@@ -79,7 +77,14 @@ static struct {
 
 /* ================================================================
  * Buffer allocation
+ *
+ * Only called from stream_task — no concurrent access.
+ * httpd_ws_send_data() is synchronous (blocks until socket send
+ * completes), so buffers are safe to free after the task loop exits.
  * ================================================================ */
+
+/* Round up to cache-line boundary so DMA never straddles into heap metadata */
+#define ALIGN64(x) (((x) + 63u) & ~63u)
 
 static void stream_free_buffers(void)
 {
@@ -91,15 +96,15 @@ static void stream_free_buffers(void)
     heap_caps_free(s_stream.audio_buf);   s_stream.audio_buf   = NULL;
 }
 
-/* Round up to cache-line boundary so DMA never straddles into heap metadata */
-#define ALIGN64(x) (((x) + 63u) & ~63u)
-
 static bool stream_alloc_buffers(void)
 {
+    if (s_stream.rgb_buf) return true;   /* already allocated */
+
     const uint32_t align     = 64;
     const uint32_t caps      = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     const uint32_t rgb_sz    = ALIGN64(GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * 2);
-    const uint32_t yuv_sz    = ALIGN64(STREAM_YUV_SIZE);
+    /* Generous YUV buffer: PPA may use padded row strides internally */
+    const uint32_t yuv_sz    = ALIGN64(GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * 2);
     const uint32_t h264_sz   = ALIGN64(rgb_sz);              /* 2x for encoder headroom */
     const uint32_t vid_pkt_sz = ALIGN64(h264_sz + 64);
     const uint32_t aud_pkt_sz = ALIGN64(STREAM_AUDIO_SAMPLES_MAX * 2 * sizeof(int16_t) + 64);
@@ -193,33 +198,60 @@ static esp_err_t stream_ws_send(uint8_t *payload, size_t len)
 }
 
 /* ================================================================
- * Streaming task  (runs on the service core)
+ * Streaming task  (persistent — runs forever, sleeps between sessions)
+ *
+ * The handler NEVER blocks — it only sets pending_fd and notifies.
+ * All resource management (buf acquire/release, audio start/stop,
+ * httpd flush) happens here, avoiding the deadlock where the handler
+ * blocks the httpd thread while the task tries to send via httpd.
  * ================================================================ */
 
 static void stream_task(void *arg)
 {
     (void)arg;
-    ESP_LOGI(TAG, "Stream task started");
-
     const uint32_t rgb_frame_size = GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * 2;
-    s_stream.frame_count = 0;
 
-    while (s_stream.active && s_stream.ws_fd >= 0) {
-
-        /* 1. Snapshot RGB565 frame (blocks until next GBA VSYNC) */
-        if (av_pipeline_snapshot_frame(s_stream.rgb_buf, rgb_frame_size) != ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(8));
-            continue;
+    for (;;) {
+        /* Sleep until the handler posts a new session. */
+        if (s_stream.pending_fd < 0) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         }
 
-        /* 2. Interleave audio / video on alternating frames.
-         *    Even → video (H.264),  Odd → audio (PCM). */
+        int new_fd = s_stream.pending_fd;
+        s_stream.pending_fd = -1;
+        if (new_fd < 0) continue;
 
-        /* --- ODD: send accumulated audio --- */
-        if ((s_stream.frame_count & 1) != 0 && s_stream.ws_fd >= 0) {
-            if (av_pipeline_audio_enabled()) {
+        /* ── Set up session ── */
+        if (!stream_alloc_buffers()) continue;
+        if (stream_ensure_encoder() != ESP_OK) {
+            stream_free_buffers();
+            continue;
+        }
+        esp_h264_enc_close(s_stream.enc);
+        if (esp_h264_enc_open(s_stream.enc) != ESP_H264_ERR_OK) {
+            ESP_LOGE(TAG, "H264 encoder reopen failed");
+            stream_free_buffers();
+            continue;
+        }
+        av_pipeline_stream_audio_start();
+
+        s_stream.ws_fd       = new_fd;
+        s_stream.active      = true;
+        s_stream.frame_count = 0;
+
+        ESP_LOGI(TAG, "Stream session started (fd=%d)", new_fd);
+        const TickType_t frame_period = pdMS_TO_TICKS(1000 / STREAM_FPS);
+        TickType_t last_tick = xTaskGetTickCount();
+
+        while (s_stream.active && s_stream.ws_fd >= 0) {
+
+            /* Break early if handler posted a new session */
+            if (s_stream.pending_fd >= 0) break;
+
+            /* ── Audio: drain accumulated PCM ── */
+            if (av_pipeline_audio_enabled() && s_stream.ws_fd >= 0) {
                 const uint32_t max_bytes = STREAM_AUDIO_SAMPLES_MAX * 2 * sizeof(int16_t);
-                size_t bytes   = av_pipeline_stream_audio_read(s_stream.audio_buf, max_bytes);
+                size_t bytes = av_pipeline_stream_audio_read(s_stream.audio_buf, max_bytes);
                 uint32_t samples = bytes / (2 * sizeof(int16_t));
                 if (samples > 0) {
                     uint8_t *pkt = s_stream.aud_pkt_buf;
@@ -233,10 +265,15 @@ static void stream_task(void *arg)
                     stream_ws_send(pkt, 10 + pcm_bytes);
                 }
             }
-        }
 
-        /* --- EVEN: encode + send video --- */
-        if ((s_stream.frame_count & 1) == 0 && s_stream.ws_fd >= 0) {
+            /* ── Video: snapshot → PPA → H264 → send ── */
+            if (av_pipeline_snapshot_frame(s_stream.rgb_buf, rgb_frame_size) != ESP_OK) {
+                vTaskDelay(pdMS_TO_TICKS(8));
+                continue;
+            }
+
+            if (s_stream.ws_fd < 0) break;
+
             /* RGB565 → YUV420 via PPA */
             ppa_srm_oper_config_t srm_cfg = {
                 .in = {
@@ -301,47 +338,18 @@ static void stream_task(void *arg)
                 memcpy(&pkt[6], out_frame.raw_data.buffer, out_frame.length);
                 stream_ws_send(pkt, 6 + out_frame.length);
             }
+
+            s_stream.frame_count++;
+
+            /* ── Rate limit to STREAM_FPS ── */
+            vTaskDelayUntil(&last_tick, frame_period);
         }
 
-        s_stream.frame_count++;
-    }
-
-    ESP_LOGI(TAG, "Stream task ending");
-    av_pipeline_stream_audio_stop();
-    s_stream.active = false;
-    s_stream.task_done = true;
-    xSemaphoreGive(s_stream.done_sem);   /* wake whoever is waiting */
-    vTaskSuspend(NULL);  /* let handler reap us via vTaskDeleteWithCaps */
-}
-
-/* ================================================================
- * Start / stop helpers
- * ================================================================ */
-
-/* Reap a finished stream task (free its WithCaps stack+TCB). */
-static void stream_reap_task(void)
-{
-    if (s_stream.task && s_stream.task_done) {
-        vTaskDeleteWithCaps(s_stream.task);
-        s_stream.task = NULL;
-        s_stream.task_done = false;
-        ESP_LOGI(TAG, "Reaped stream task");
-    }
-}
-
-/* Stop the stream task and wait until it has fully exited.
- * Only then is it safe to free buffers or reap the task. */
-static void stream_stop_and_wait(void)
-{
-    if (!s_stream.task || s_stream.task_done) return;
-    s_stream.active = false;
-    /* Task may block up to 100 ms in snapshot + PPA + H264, give 500 ms. */
-    if (xSemaphoreTake(s_stream.done_sem, pdMS_TO_TICKS(500)) != pdTRUE) {
-        ESP_LOGW(TAG, "Stream task did not exit in 500 ms, force-deleting");
-        vTaskDeleteWithCaps(s_stream.task);
-        s_stream.task = NULL;
-        s_stream.task_done = false;
+        /* ── Session cleanup (runs in task context, httpd is NOT blocked) ── */
+        ESP_LOGI(TAG, "Stream session ending");
+        s_stream.active = false;
         av_pipeline_stream_audio_stop();
+        stream_free_buffers();
     }
 }
 
@@ -352,9 +360,7 @@ static void stream_stop_and_wait(void)
 void av_stream_set_server(httpd_handle_t server)
 {
     s_server = server;
-    if (!s_stream.done_sem) {
-        s_stream.done_sem = xSemaphoreCreateBinary();
-    }
+    s_stream.pending_fd = -1;
 }
 
 esp_err_t av_stream_ws_handler(httpd_req_t *req)
@@ -376,27 +382,23 @@ esp_err_t av_stream_ws_handler(httpd_req_t *req)
         int fd = httpd_req_to_sockfd(req);
         ESP_LOGI(TAG, "Stream WS recv failed on fd=%d", fd);
         if (s_stream.ws_fd == fd) {
-            s_stream.ws_fd = -1;
-            stream_stop_and_wait();
-            stream_reap_task();
-            stream_free_buffers();
+            s_stream.ws_fd = -1;   /* task will see this and exit */
         }
         return ESP_FAIL;
     }
 
-    /* 0x10 — stop streaming */
+    /* 0x10 — stop streaming (handler never blocks) */
     if (ws_pkt.len >= 1 && buf[0] == 0x10) {
         int fd = httpd_req_to_sockfd(req);
         if (s_stream.ws_fd == fd) {
             ESP_LOGI(TAG, "Stream stop requested by client");
-            s_stream.ws_fd = -1;
-            stream_stop_and_wait();
-            stream_reap_task();
-            stream_free_buffers();
+            s_stream.ws_fd = -1;   /* task will see this and exit */
         }
     }
 
-    /* 0x20 — reset / start streaming (client decoder ready) */
+    /* 0x20 — reset / start streaming (client decoder ready)
+     * Handler only sets pending_fd and notifies the task.
+     * The task handles all resource management. */
     if (ws_pkt.len >= 1 && buf[0] == 0x20) {
         int fd = httpd_req_to_sockfd(req);
         if (s_stream.ws_fd != fd) {
@@ -405,43 +407,27 @@ esp_err_t av_stream_ws_handler(httpd_req_t *req)
         }
         ESP_LOGI(TAG, "Stream reset requested by client (fd=%d)", fd);
 
-        /* Tear down any previous session */
-        stream_stop_and_wait();
-        stream_reap_task();
-        stream_free_buffers();
+        /* Signal current session to stop */
+        s_stream.ws_fd = -1;
 
-        if (!stream_alloc_buffers())
-            return ESP_OK;
-        if (stream_ensure_encoder() != ESP_OK) {
-            stream_free_buffers();
-            return ESP_OK;
+        /* Lazy one-time task creation */
+        if (!s_stream.task) {
+            BaseType_t core = (CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0;
+            BaseType_t xret = xTaskCreatePinnedToCoreWithCaps(
+                stream_task, "av_stream",
+                16384, NULL,
+                tskIDLE_PRIORITY + 3,
+                &s_stream.task, core,
+                MALLOC_CAP_SPIRAM);
+            if (xret != pdPASS) {
+                ESP_LOGE(TAG, "Stream task creation failed");
+                return ESP_OK;
+            }
         }
 
-        /* Reset encoder so first frame is IDR */
-        esp_h264_enc_close(s_stream.enc);
-        if (esp_h264_enc_open(s_stream.enc) != ESP_H264_ERR_OK) {
-            ESP_LOGE(TAG, "H264 encoder reopen failed");
-            stream_free_buffers();
-            return ESP_OK;
-        }
-        av_pipeline_stream_audio_start();
-
-        s_stream.active      = true;
-        s_stream.frame_count = 0;
-
-        BaseType_t core = (CONFIG_GPSP_EMULATION_CORE == 0) ? 1 : 0;
-        BaseType_t xret = xTaskCreatePinnedToCoreWithCaps(
-            stream_task, "av_stream",
-            8192, NULL,
-            tskIDLE_PRIORITY + 3,
-            &s_stream.task, core,
-            MALLOC_CAP_SPIRAM);
-        if (xret != pdPASS) {
-            ESP_LOGE(TAG, "Stream task creation failed");
-            av_pipeline_stream_audio_stop();
-            stream_free_buffers();
-            s_stream.active = false;
-        }
+        /* Post new session — task picks it up, sets up encoder, etc. */
+        s_stream.pending_fd = fd;
+        xTaskNotifyGive(s_stream.task);
     }
 
     return ESP_OK;

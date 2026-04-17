@@ -327,7 +327,11 @@ void av_pipeline_audio_buffered(uint32_t *out_queued, uint32_t *out_total)
 
 esp_err_t av_pipeline_stream_audio_start(void)
 {
-    if (s_stream_audio_sb) return ESP_OK;
+    if (s_stream_audio_sb) {
+        xStreamBufferReset(s_stream_audio_sb);
+        ESP_LOGI(TAG, "Stream audio tee reset");
+        return ESP_OK;
+    }
     s_stream_audio_sb = xStreamBufferCreateWithCaps(
         STREAM_AUDIO_SB_SIZE, 1, MALLOC_CAP_SPIRAM);
     if (!s_stream_audio_sb) {
@@ -342,6 +346,8 @@ void av_pipeline_stream_audio_stop(void)
     StreamBufferHandle_t sb = s_stream_audio_sb;
     s_stream_audio_sb = NULL;
     if (sb) {
+        /* Give av_output_task one frame period to see the NULL and stop writing */
+        vTaskDelay(pdMS_TO_TICKS(20));
         vStreamBufferDeleteWithCaps(sb);
         ESP_LOGI(TAG, "Stream audio tee disabled");
     }
