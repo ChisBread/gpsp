@@ -1013,10 +1013,13 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
 esp_err_t gba_session_init(const gba_session_boot_config_t *config)
 {
     gba_session_command_t command;
+    int64_t t0, t1;
 
     if (!config || !path_is_set(config->rom_path)) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    t0 = esp_timer_get_time();
 
     if (!s_session.control_queue) {
         s_session.control_queue = xQueueCreate(GBA_SESSION_QUEUE_LEN, sizeof(gba_session_command_t));
@@ -1046,17 +1049,26 @@ esp_err_t gba_session_init(const gba_session_boot_config_t *config)
         }
     }
 
+    t1 = esp_timer_get_time();
+    ESP_LOGI(TAG, "BOOT session queue+save_task: %lld us", (long long)(t1 - t0));
+
+    t0 = esp_timer_get_time();
     init_main();
     init_sound();
+    t1 = esp_timer_get_time();
+    ESP_LOGI(TAG, "BOOT init_main+init_sound: %lld us", (long long)(t1 - t0));
 
-    if (!gba_screen_pixels) {
-        gba_screen_pixels = av_pipeline_video_buffer();
-    }
+    /* Note: gba_screen_pixels is set by gba_emulation_task() via
+     * av_pipeline_video_buffer(), not here.  This allows session_init
+     * to run before the AV pipeline is ready (overlapped boot). */
 
+    t0 = esp_timer_get_time();
     {
         u32 rom_buf_count = init_gamepak_buffer();
         ESP_LOGI(TAG, "ROM buffers: %u MB in PSRAM", (unsigned)rom_buf_count);
     }
+    t1 = esp_timer_get_time();
+    ESP_LOGI(TAG, "BOOT init_gamepak_buffer: %lld us", (long long)(t1 - t0));
 
     memset(&command, 0, sizeof(command));
     command.type = GBA_SESSION_CMD_RELOAD;
@@ -1066,9 +1078,12 @@ esp_err_t gba_session_init(const gba_session_boot_config_t *config)
     copy_path(command.rom_path, sizeof(command.rom_path), config->rom_path);
     copy_path(command.bios_path, sizeof(command.bios_path), config->bios_path);
 
+    t0 = esp_timer_get_time();
     if (execute_reload(&command) != ESP_OK) {
         return ESP_FAIL;
     }
+    t1 = esp_timer_get_time();
+    ESP_LOGI(TAG, "BOOT execute_reload: %lld us", (long long)(t1 - t0));
 
     s_session.initialized = true;
     return ESP_OK;
@@ -1193,9 +1208,14 @@ void gba_emulation_task(void *param)
     s_session.emulation_task = xTaskGetCurrentTaskHandle();
 
 #ifdef HAVE_DYNAREC
-    /* init_emitter must run here (not in init_main on the main task)
-       because dynarec translation recurses and needs the large emu stack. */
-    init_emitter(gamepak_must_swap());
+    {
+        int64_t t_emit0 = esp_timer_get_time();
+        /* init_emitter must run here (not in init_main on the main task)
+           because dynarec translation recurses and needs the large emu stack. */
+        init_emitter(gamepak_must_swap());
+        int64_t t_emit1 = esp_timer_get_time();
+        ESP_LOGI(TAG, "BOOT init_emitter: %lld us", (long long)(t_emit1 - t_emit0));
+    }
 #endif
 
     s_fps_timer_us = esp_timer_get_time();

@@ -839,6 +839,110 @@ static esp_err_t states_delete_handler(httpd_req_t *req)
     }
 }
 
+/* ---- POST /api/upload → chunked file upload to SD card ----
+ *
+ * The frontend slices a file into small pieces (~64 KB) and sends
+ * each as a separate POST with query parameters:
+ *
+ *   POST /api/upload?name=<filename>&offset=<N>&total=<T>
+ *   Body: raw chunk bytes (application/octet-stream)
+ *
+ * offset=0 creates/truncates the file.  Subsequent requests append.
+ * This avoids holding large data in RAM and tolerates slow SD writes
+ * because each HTTP transaction is small and self-contained.
+ */
+
+#define UPLOAD_BUF_SIZE  4096  /* stack recv buffer per httpd_req_recv */
+
+static esp_err_t upload_post_handler(httpd_req_t *req)
+{
+    char qbuf[384], val[256];
+    char filename[128] = {0};
+    size_t offset = 0, total = 0;
+
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing query");
+        return ESP_FAIL;
+    }
+    if (httpd_query_key_value(qbuf, "name", val, sizeof(val)) != ESP_OK || val[0] == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing name");
+        return ESP_FAIL;
+    }
+
+    /* Sanitise: basename only, no ".." */
+    {
+        char *p = strrchr(val, '/');
+        if (!p) p = strrchr(val, '\\');
+        const char *base = p ? p + 1 : val;
+        if (base[0] == '\0' || strstr(base, "..")) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad name");
+            return ESP_FAIL;
+        }
+        strlcpy(filename, base, sizeof(filename));
+    }
+
+    if (httpd_query_key_value(qbuf, "offset", val, sizeof(val)) == ESP_OK)
+        offset = (size_t)strtoul(val, NULL, 10);
+    if (httpd_query_key_value(qbuf, "total", val, sizeof(val)) == ESP_OK)
+        total = (size_t)strtoul(val, NULL, 10);
+
+    char filepath[300];
+    snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_MOUNT_POINT, filename);
+
+    /* Open: truncate on first chunk, append on subsequent */
+    FILE *fp = fopen(filepath, offset == 0 ? "wb" : "ab");
+    if (!fp) {
+        ESP_LOGE(TAG, "Upload: cannot open %s", filepath);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "open failed");
+        return ESP_FAIL;
+    }
+
+    if (offset == 0) {
+        ESP_LOGI(TAG, "Upload start: %s (total %zu bytes)", filepath, total);
+    }
+
+    /* Receive body and write directly to SD */
+    char buf[UPLOAD_BUF_SIZE];
+    size_t remaining = req->content_len;
+    size_t written = 0;
+
+    while (remaining > 0) {
+        size_t to_read = remaining < sizeof(buf) ? remaining : sizeof(buf);
+        int got = httpd_req_recv(req, buf, to_read);
+        if (got <= 0) {
+            ESP_LOGE(TAG, "Upload recv error at offset %zu+%zu: %d",
+                     offset, written, got);
+            fclose(fp);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv failed");
+            return ESP_FAIL;
+        }
+        size_t w = fwrite(buf, 1, got, fp);
+        if (w != (size_t)got) {
+            ESP_LOGE(TAG, "Upload SD write error at offset %zu+%zu", offset, written);
+            fclose(fp);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "write failed");
+            return ESP_FAIL;
+        }
+        written += got;
+        remaining -= got;
+    }
+
+    fclose(fp);
+
+    bool is_last = (total > 0) && (offset + written >= total);
+    if (is_last) {
+        ESP_LOGI(TAG, "Upload done: %s (%zu bytes)", filepath, offset + written);
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    char resp[128];
+    snprintf(resp, sizeof(resp),
+             "{\"ok\":true,\"written\":%zu,\"offset\":%zu}", written, offset);
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
 /* ---- public API ---- */
 
 uint16_t web_server_input_read(void)
@@ -990,6 +1094,14 @@ esp_err_t web_server_start(void)
         .handler = frame_get_handler,
     };
     httpd_register_uri_handler(s_server, &frame_get_uri);
+
+    /* File upload to SD card */
+    const httpd_uri_t upload_uri = {
+        .uri = "/api/upload",
+        .method = HTTP_POST,
+        .handler = upload_post_handler,
+    };
+    httpd_register_uri_handler(s_server, &upload_uri);
 
     /* A/V stream WebSocket */
     const httpd_uri_t ws_stream_uri = {

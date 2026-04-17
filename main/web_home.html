@@ -354,6 +354,19 @@ btn:hover{background:#3a4a6a}
 <div class="card">
   <h2 data-i18n="games">游戏</h2>
   <div id="rom_list" class="rom-list"><div class="rom-loading" data-i18n="rom_loading">加载中...</div></div>
+  <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+    <label class="btn" style="cursor:pointer;padding:4px 14px;font-size:.85em;background:#2a3a50;border:1px solid #556;border-radius:4px;color:#e0e0e0">
+      <span data-i18n="upload_btn">上传文件</span>
+      <input type="file" id="upload_file" style="display:none" multiple>
+    </label>
+    <span id="upload_status" style="font-size:.8em;color:#aaa"></span>
+  </div>
+  <div id="upload_progress_wrap" style="display:none;margin-top:6px">
+    <div style="background:#1a2030;border-radius:4px;height:18px;overflow:hidden;position:relative">
+      <div id="upload_bar" style="background:#4a9;height:100%;width:0%;transition:width .2s;border-radius:4px"></div>
+      <span id="upload_pct" style="position:absolute;left:50%;top:0;transform:translateX(-50%);font-size:.75em;line-height:18px;color:#fff"></span>
+    </div>
+  </div>
   <div class="msg" id="rom_msg"></div>
 </div>
 
@@ -395,6 +408,7 @@ zh:{
   netplay:'联机',netplay_mode_lbl:'联机模式',np_off:'关闭',np_client:'客户端 (直连)',np_host:'主机 (等待连入)',np_tunnel:'隧道客户端',np_tunnel_host:'隧道主机 (创建房间)',netplay_host:'主机/隧道地址',netplay_port:'端口',netplay_nick:'昵称',netplay_tunnel_id:'隧道 Session ID',netplay_lobby_host:'Lobby 地址',netplay_lobby_port:'Lobby 端口',netplay_lobby_relay:'Relay 名称',netplay_room_id:'房间 ID',netplay_room_status:'房间状态',
   games:'游戏',rom_loading:'加载中...',rom_load_fail:'读取失败',rom_empty:'SD卡未找到 .gba 文件',
   rom_switching:'加载中: ',rom_switched:'已切换',rom_switch_fail:'切换失败',
+  upload_btn:'上传文件',upload_uploading:'上传中...',upload_done:'上传完成',upload_fail:'上传失败',upload_no_file:'请选择文件',
   savestates:'即时存档',save_slot:'存档槽:',save_btn:'保存',load_btn:'读取',
   saving:'保存中...',saved:'已保存',save_fail:'保存失败',
   loading_state:'读取中...',loaded:'已读取',load_state_fail:'读取失败',
@@ -487,6 +501,7 @@ en:{
   netplay:'Netplay',netplay_mode_lbl:'Netplay Mode',np_off:'Disabled',np_client:'Client (Direct)',np_host:'Host (Listen)',np_tunnel:'Tunnel Client',np_tunnel_host:'Tunnel Host (Create Room)',netplay_host:'Host/Tunnel Address',netplay_port:'Port',netplay_nick:'Nickname',netplay_tunnel_id:'Tunnel Session ID',netplay_lobby_host:'Lobby Host',netplay_lobby_port:'Lobby Port',netplay_lobby_relay:'Relay Name',netplay_room_id:'Room ID',netplay_room_status:'Room Status',
   games:'Games',rom_loading:'Loading...',rom_load_fail:'Load failed',rom_empty:'No .gba files on SD card',
   rom_switching:'Loading: ',rom_switched:'Switched',rom_switch_fail:'Switch failed',
+  upload_btn:'Upload File',upload_uploading:'Uploading...',upload_done:'Upload complete',upload_fail:'Upload failed',upload_no_file:'Please select a file',
   savestates:'Save States',save_slot:'Slot:',save_btn:'Save',load_btn:'Load',
   saving:'Saving...',saved:'Saved',save_fail:'Save failed',
   loading_state:'Loading...',loaded:'Loaded',load_state_fail:'Load failed',
@@ -1229,6 +1244,70 @@ async function loadRom(filename){
     else { m.textContent=j.error||t('rom_switch_fail'); m.className='msg err'; }
   } catch(e){ m.textContent=t('net_error'); m.className='msg err'; }
   setTimeout(()=>{ m.textContent=''; }, 3000);
+}
+
+/* ── File upload to SD card (chunked) ──────────────── */
+{
+  const CHUNK = 64 * 1024;  /* 64 KB per request */
+  const fileInput = $('upload_file');
+  const status = $('upload_status');
+  const wrap = $('upload_progress_wrap');
+  const bar = $('upload_bar');
+  const pct = $('upload_pct');
+
+  async function uploadFile(file) {
+    const total = file.size;
+    let offset = 0;
+    while (offset < total) {
+      const end = Math.min(offset + CHUNK, total);
+      const chunk = file.slice(offset, end);
+      const qs = `name=${encodeURIComponent(file.name)}&offset=${offset}&total=${total}`;
+      const r = await fetch('/api/upload?' + qs, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/octet-stream'},
+        body: chunk,
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || t('upload_fail'));
+      offset = end;
+      const p = Math.round(offset / total * 100);
+      bar.style.width = p + '%';
+      pct.textContent = p + '%';
+    }
+  }
+
+  fileInput.addEventListener('change', async () => {
+    const files = fileInput.files;
+    if (!files.length) return;
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      status.textContent = t('upload_uploading') + ` ${file.name} (${(file.size/1024/1024).toFixed(1)} MB)`;
+      status.style.color = '#aaa';
+      wrap.style.display = 'block';
+      bar.style.width = '0%';
+      pct.textContent = '0%';
+
+      try {
+        await uploadFile(file);
+        status.textContent = t('upload_done') + `: ${file.name}`;
+        status.style.color = '#4a9';
+      } catch(e) {
+        status.textContent = t('upload_fail') + `: ${e.message}`;
+        status.style.color = '#e55';
+      }
+    }
+
+    const anyGba = Array.from(files).some(f => /\.gba$/i.test(f.name));
+    if (anyGba) loadRomList();
+
+    fileInput.value = '';
+    setTimeout(() => {
+      wrap.style.display = 'none';
+      status.textContent = '';
+    }, 5000);
+  });
 }
 
 loadRomList();

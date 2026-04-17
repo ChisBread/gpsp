@@ -5,6 +5,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
@@ -22,9 +23,11 @@
 #include "esp_event.h"
 #include "esp_hosted.h"
 #include "esp_hosted_misc.h"
+#include "esp_hosted_ota.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
+#include "storage.h"
 
 #define C6_WIFI_CONNECTED_BIT BIT0
 #define C6_WIFI_FAILED_BIT    BIT1
@@ -69,7 +72,7 @@ static void c6_wifi_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-static esp_err_t init_c6_remote_transport(void)
+static esp_err_t init_c6_remote_transport(esp_hosted_coprocessor_fwver_t *out_ver)
 {
     esp_err_t err;
     esp_hosted_coprocessor_fwver_t fwver = {0};
@@ -93,6 +96,9 @@ static esp_err_t init_c6_remote_transport(void)
     ESP_LOGI(TAG, "ESP32-C6 hosted FW version: %" PRIu32 ".%" PRIu32 ".%" PRIu32,
              fwver.major1, fwver.minor1, fwver.patch1);
 
+    if (out_ver)
+        *out_ver = fwver;
+
     err = esp_hosted_get_coprocessor_app_desc(&app_desc);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "ESP32-C6 app: %s %s (%s %s)",
@@ -109,6 +115,141 @@ static esp_err_t init_c6_remote_transport(void)
     c6_wifi_connected = false;
 
     return ESP_OK;
+}
+
+/* ----------------------------------------------------------------
+ * C6 Slave OTA — push firmware from SD card via SDIO
+ *
+ * On boot, check if /sdcard/c6_firmware.bin exists.  Compare the
+ * running slave version with the version baked into the P4 build
+ * (from esp_hosted_coprocessor_fw_ver.h).  If the slave is older,
+ * push the bin and activate it.  The file is deleted after a
+ * successful update so the OTA only runs once.
+ * ---------------------------------------------------------------- */
+
+#define C6_FW_PATH  STORAGE_MOUNT_POINT "/c6_firmware.bin"
+#define C6_OTA_CHUNK_SIZE  1400   /* recommended by esp_hosted docs */
+
+/* Target version compiled into this P4 build (from esp_hosted slave header) */
+#define C6_TARGET_VER_MAJOR  2
+#define C6_TARGET_VER_MINOR  12
+#define C6_TARGET_VER_PATCH  3
+
+#ifndef ESP_HOSTED_VERSION_VAL
+#define ESP_HOSTED_VERSION_VAL(major, minor, patch) ((major << 16) | (minor << 8) | (patch))
+#endif
+
+#define C6_TARGET_VER  ESP_HOSTED_VERSION_VAL(C6_TARGET_VER_MAJOR, \
+                                              C6_TARGET_VER_MINOR, \
+                                              C6_TARGET_VER_PATCH)
+
+static esp_err_t c6_ota_from_sdcard(const esp_hosted_coprocessor_fwver_t *cur)
+{
+    uint32_t cur_ver = ESP_HOSTED_VERSION_VAL(cur->major1, cur->minor1, cur->patch1);
+
+    /* Skip if slave is already up-to-date */
+    if (cur_ver >= C6_TARGET_VER) {
+        ESP_LOGI(TAG, "C6 FW %" PRIu32 ".%" PRIu32 ".%" PRIu32 " — up-to-date",
+                 cur->major1, cur->minor1, cur->patch1);
+        return ESP_OK;
+    }
+
+    /* Check for firmware file on SD card */
+    struct stat st;
+    if (stat(C6_FW_PATH, &st) != 0 || st.st_size < 256) {
+        ESP_LOGW(TAG, "C6 FW %" PRIu32 ".%" PRIu32 ".%" PRIu32 " is outdated "
+                 "(target %d.%d.%d) but no firmware at %s — skipping OTA",
+                 cur->major1, cur->minor1, cur->patch1,
+                 C6_TARGET_VER_MAJOR, C6_TARGET_VER_MINOR, C6_TARGET_VER_PATCH,
+                 C6_FW_PATH);
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "C6 OTA: %" PRIu32 ".%" PRIu32 ".%" PRIu32 " → %d.%d.%d  (%ld bytes from %s)",
+             cur->major1, cur->minor1, cur->patch1,
+             C6_TARGET_VER_MAJOR, C6_TARGET_VER_MINOR, C6_TARGET_VER_PATCH,
+             (long)st.st_size, C6_FW_PATH);
+
+    FILE *f = fopen(C6_FW_PATH, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "C6 OTA: failed to open %s", C6_FW_PATH);
+        return ESP_FAIL;
+    }
+
+    uint8_t *chunk = malloc(C6_OTA_CHUNK_SIZE);
+    if (!chunk) {
+        fclose(f);
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = esp_hosted_slave_ota_begin();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "C6 OTA begin failed: %s", esp_err_to_name(ret));
+        goto cleanup;
+    }
+
+    size_t total_written = 0;
+    size_t bytes_read;
+    while ((bytes_read = fread(chunk, 1, C6_OTA_CHUNK_SIZE, f)) > 0) {
+        ret = esp_hosted_slave_ota_write(chunk, (uint32_t)bytes_read);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "C6 OTA write failed at %zu bytes: %s",
+                     total_written, esp_err_to_name(ret));
+            goto cleanup;
+        }
+        total_written += bytes_read;
+        if ((total_written % (100 * 1024)) < C6_OTA_CHUNK_SIZE) {
+            ESP_LOGI(TAG, "C6 OTA: %zu / %ld bytes", total_written, (long)st.st_size);
+        }
+    }
+
+    ret = esp_hosted_slave_ota_end();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "C6 OTA end/verify failed: %s", esp_err_to_name(ret));
+        goto cleanup;
+    }
+
+    ESP_LOGI(TAG, "C6 OTA: firmware verified, activating...");
+    ret = esp_hosted_slave_ota_activate();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "C6 OTA activate failed: %s", esp_err_to_name(ret));
+        goto cleanup;
+    }
+
+    ESP_LOGI(TAG, "C6 OTA: success! (%zu bytes written) — removing %s",
+             total_written, C6_FW_PATH);
+
+    /* Delete firmware file so we don't OTA every boot */
+    fclose(f);
+    f = NULL;
+    free(chunk);
+    chunk = NULL;
+    remove(C6_FW_PATH);
+
+    /* C6 reboots with new firmware; we need to reconnect transport */
+    ESP_LOGW(TAG, "C6 OTA: slave is rebooting, reconnecting transport...");
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    /* Re-establish transport to the now-updated C6 */
+    esp_err_t reconn = esp_hosted_connect_to_slave();
+    if (reconn != ESP_OK) {
+        ESP_LOGE(TAG, "C6 OTA: reconnect failed: %s — a full P4 reboot may be needed",
+                 esp_err_to_name(reconn));
+        return reconn;
+    }
+
+    esp_hosted_coprocessor_fwver_t new_ver = {0};
+    if (esp_hosted_get_coprocessor_fwversion(&new_ver) == ESP_OK) {
+        ESP_LOGI(TAG, "C6 OTA: new version %" PRIu32 ".%" PRIu32 ".%" PRIu32,
+                 new_ver.major1, new_ver.minor1, new_ver.patch1);
+    }
+
+    return ESP_OK;
+
+cleanup:
+    if (f) fclose(f);
+    free(chunk);
+    return ret;
 }
 
 static esp_err_t init_c6_remote_wifi(void)
@@ -281,6 +422,7 @@ static esp_err_t init_c6_remote_link(void)
 {
     esp_err_t err;
     uint8_t sta_mac[6] = {0};
+    esp_hosted_coprocessor_fwver_t c6_ver = {0};
 
     err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -291,10 +433,13 @@ static esp_err_t init_c6_remote_link(void)
         return err;
     }
 
-    err = init_c6_remote_transport();
+    err = init_c6_remote_transport(&c6_ver);
     if (err != ESP_OK) {
         return err;
     }
+
+    /* Check if C6 firmware needs updating from SD card */
+    c6_ota_from_sdcard(&c6_ver);
 
     err = init_c6_remote_wifi();
     if (err != ESP_OK) {
