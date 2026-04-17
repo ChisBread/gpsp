@@ -1558,6 +1558,8 @@ let streamActive = false;
 let streamFrames = 0;
 let streamStartTime = 0;
 let streamVidMsgs = 0;
+let streamBitrateAcc = 0;   /* accumulated NAL bytes since last kbps update */
+let streamBitrateTime = 0;  /* timestamp of last kbps update */
 let streamAudMsgs = 0;
 let streamDecErr = '';
 let streamAudioTime = 0;
@@ -1613,6 +1615,8 @@ function streamStart() {
   streamFrames = 0;
   streamVidMsgs = 0;
   streamAudMsgs = 0;
+  streamBitrateAcc = 0;
+  streamBitrateTime = performance.now();
   streamDecErr = '';
   streamAudioTime = 0;
   streamAudioQueue = [];
@@ -1767,11 +1771,18 @@ function onStreamMessage(evt) {
       return;
     }
 
+    /* Accumulate NAL bytes for rolling bitrate measurement */
+    streamBitrateAcc += nalData.length;
+
     /* Update info every 10 frames */
-    const elapsed = (performance.now() - streamStartTime) / 1000;
+    const now = performance.now();
+    const elapsed = (now - streamStartTime) / 1000;
     if (elapsed > 0 && (streamFrames % 10 === 0)) {
       const fps = (streamFrames / elapsed).toFixed(1);
-      const kbps = ((nalData.length * 8 * 30) / 1000).toFixed(0);
+      const dt = (now - streamBitrateTime) / 1000;  /* seconds since last update */
+      const kbps = dt > 0 ? ((streamBitrateAcc * 8) / (dt * 1000)).toFixed(0) : '0';
+      streamBitrateAcc = 0;
+      streamBitrateTime = now;
       $('stream_info').textContent = fps + ' fps | ' + kbps + ' kbps';
     }
     if (streamFrames % 10 === 0) {
