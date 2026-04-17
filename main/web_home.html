@@ -1485,11 +1485,11 @@ document.querySelectorAll('#ctrl_card [data-key]').forEach(el => {
 const ctrlCard = $('ctrl_card');
 ctrlCard.setAttribute('tabindex', '0');
 ctrlCard.addEventListener('keydown', e => {
+  /* Always suppress scroll for mapped keys, even on repeat */
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
   if (!$('ctrl_enable').checked || e.repeat) return;
   const bit = CTRL_KEY_MAP[e.code];
-  if (bit !== undefined){ e.preventDefault(); ctrlSetKey(parseInt(bit), true); }
-  /* Prevent arrow keys / space from scrolling */
-  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+  if (bit !== undefined) ctrlSetKey(parseInt(bit), true);
 });
 ctrlCard.addEventListener('keyup', e => {
   if (!$('ctrl_enable').checked) return;

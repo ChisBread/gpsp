@@ -44,10 +44,10 @@ static const char *TAG = "av_stream";
 
 /* ---- tunables ---- */
 #define STREAM_FPS              30
-#define STREAM_BITRATE          256000
+#define STREAM_BITRATE          384000
 #define STREAM_GOP              30
 #define STREAM_QP_MIN           18
-#define STREAM_QP_MAX           36
+#define STREAM_QP_MAX           28
 #define STREAM_AUDIO_SAMPLES_MAX 4400   /* drain buffer: up to ~4 GBA frames */
 
 /* ---- module state ---- */
@@ -103,9 +103,8 @@ static bool stream_alloc_buffers(void)
     const uint32_t align     = 64;
     const uint32_t caps      = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     const uint32_t rgb_sz    = ALIGN64(GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * 2);
-    /* Generous YUV buffer: PPA may use padded row strides internally */
-    const uint32_t yuv_sz    = ALIGN64(GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * 2);
-    const uint32_t h264_sz   = ALIGN64(rgb_sz);              /* 2x for encoder headroom */
+    const uint32_t yuv_sz    = ALIGN64(GBA_SCREEN_WIDTH * GBA_SCREEN_HEIGHT * 3 / 2);
+    const uint32_t h264_sz   = ALIGN64(rgb_sz);              /* generous encoder headroom */
     const uint32_t vid_pkt_sz = ALIGN64(h264_sz + 64);
     const uint32_t aud_pkt_sz = ALIGN64(STREAM_AUDIO_SAMPLES_MAX * 2 * sizeof(int16_t) + 64);
     const uint32_t aud_sz    = ALIGN64(STREAM_AUDIO_SAMPLES_MAX * 2 * sizeof(int16_t));
@@ -171,6 +170,12 @@ static esp_err_t stream_ensure_encoder(void)
         }
         ESP_LOGI(TAG, "H264 HW encoder ready (%ux%u, %ubps, GOP=%u)",
                  GBA_SCREEN_WIDTH, GBA_SCREEN_HEIGHT, STREAM_BITRATE, STREAM_GOP);
+
+        /* Bypass deblocking filter — preserves sharp pixel-art edges.
+         * db_bypass is ctrl[0] offset 0x18 in h264_ctrl_regs_t,
+         * ctrl[0] starts at h264_dev_t + 0x08.  Base = 0x50084000. */
+        volatile uint32_t *db_bypass = (volatile uint32_t *)0x50084020;
+        *db_bypass = 1;
     }
     return ESP_OK;
 }
