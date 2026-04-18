@@ -1566,6 +1566,34 @@ let streamAudioTime = 0;
 let streamAudioQueue = [];       /* buffered AudioBuffers before playback starts */
 let streamAudioPrimed = false;   /* true once initial buffer is drained */
 
+/* ── IMA-ADPCM decoder tables ── */
+const IMA_STEP = new Int16Array([
+  7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,
+  50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,
+  253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,
+  1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,
+  3327,3660,4026,4428,4871,5358,5894,6484,7132,7845,8630,9493,
+  10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,
+  27086,29794,32767
+]);
+const IMA_INDEX = new Int8Array([
+  -1,-1,-1,-1, 2,4,6,8,
+  -1,-1,-1,-1, 2,4,6,8
+]);
+function adpcmDecode(nibble, pred, stepIdx) {
+  const step = IMA_STEP[stepIdx];
+  let delta = step >> 3;
+  if (nibble & 4) delta += step;
+  if (nibble & 2) delta += step >> 1;
+  if (nibble & 1) delta += step >> 2;
+  if (nibble & 8) pred -= delta; else pred += delta;
+  if (pred > 32767) pred = 32767;
+  if (pred < -32768) pred = -32768;
+  let idx = stepIdx + IMA_INDEX[nibble];
+  if (idx < 0) idx = 0; if (idx > 88) idx = 88;
+  return [pred, idx];
+}
+
 /* Audio bus — all BufferSources connect here, then to destination.
  * Recording taps this node via MediaStreamDestination. */
 let audioGain = null;
@@ -1790,21 +1818,30 @@ function onStreamMessage(evt) {
         (useBroadway ? ' [Broadway]' : ' [WebCodecs]');
     }
   } else if (msgType === 0x02 && audioCtx) {
-    /* Audio: [0]=0x02 [1]=pad [2..5]=pts [6..9]=sample_count [10..]=s16 stereo */
+    /* Audio: [0]=0x02 [1]=subtype [2..5]=pts [6..9]=sample_count
+     * subtype 0x01 (ADPCM): [10..13]=stateL [14..17]=stateR [18..]=packed nibbles */
     streamAudMsgs++;
-    if (data.length < 11) return;
+    if (data.length < 19) return;
     const dv = new DataView(evt.data);
     const sampleCount = dv.getUint32(6, true);
-    if (sampleCount === 0 || data.length < 10 + sampleCount * 4) return;
+    if (sampleCount === 0 || data.length < 18 + sampleCount) return;
 
-    /* Convert s16 stereo to float32 AudioBuffer, schedule gaplessly */
+    /* Decode IMA-ADPCM header */
+    let predL = dv.getInt16(10, true), idxL = data[12];
+    let predR = dv.getInt16(14, true), idxR = data[16];
+
+    /* Decode packed nibbles → float32 stereo */
     const buf = audioCtx.createBuffer(2, sampleCount, 65536);
     const chL = buf.getChannelData(0);
     const chR = buf.getChannelData(1);
-    const pcm = new Int16Array(evt.data, 10, sampleCount * 2);
     for (let i = 0; i < sampleCount; i++) {
-      chL[i] = pcm[i * 2]     / 32768.0;
-      chR[i] = pcm[i * 2 + 1] / 32768.0;
+      const byte = data[18 + i];
+      const nL = byte & 0x0F;
+      const nR = byte >> 4;
+      [predL, idxL] = adpcmDecode(nL, predL, idxL);
+      [predR, idxR] = adpcmDecode(nR, predR, idxR);
+      chL[i] = predL / 32768.0;
+      chR[i] = predR / 32768.0;
     }
 
     /* Buffer 3 chunks (~100ms at 30 audio/sec) before starting playback.
