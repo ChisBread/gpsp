@@ -125,7 +125,38 @@ static uint32_t np_impl_magic(void)
     return magic;
 }
 
-static bool np_parse_tunnel_id(const char *hex, uint8_t out[12])
+static int base64_decode_char(char c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static bool np_parse_tunnel_id_base64(const char *b64, uint8_t out[12])
+{
+    /* 12 bytes = 16 base64 chars (no padding needed, 12 is multiple of 3) */
+    size_t len = strlen(b64);
+    /* Accept with or without trailing '=' padding */
+    while (len > 0 && b64[len - 1] == '=') len--;
+    if (len != 16) return false;
+
+    for (size_t i = 0; i < 4; i++) {
+        int a = base64_decode_char(b64[i * 4]);
+        int b = base64_decode_char(b64[i * 4 + 1]);
+        int c = base64_decode_char(b64[i * 4 + 2]);
+        int d = base64_decode_char(b64[i * 4 + 3]);
+        if (a < 0 || b < 0 || c < 0 || d < 0) return false;
+        out[i * 3]     = (uint8_t)((a << 2) | (b >> 4));
+        out[i * 3 + 1] = (uint8_t)(((b & 0x0f) << 4) | (c >> 2));
+        out[i * 3 + 2] = (uint8_t)(((c & 0x03) << 6) | d);
+    }
+    return true;
+}
+
+static bool np_parse_tunnel_id_hex(const char *hex, uint8_t out[12])
 {
     size_t len = strlen(hex);
     if (len != 24) return false;
@@ -137,6 +168,21 @@ static bool np_parse_tunnel_id(const char *hex, uint8_t out[12])
         out[i] = (uint8_t)v;
     }
     return true;
+}
+
+/* Auto-detect hex (24 chars) or base64 (16 chars) tunnel session id */
+static bool np_parse_tunnel_id(const char *id, uint8_t out[12])
+{
+    if (!id || !id[0]) return false;
+    size_t len = strlen(id);
+    /* Strip trailing '=' for length check */
+    size_t stripped = len;
+    while (stripped > 0 && id[stripped - 1] == '=') stripped--;
+    if (len == 24 && np_parse_tunnel_id_hex(id, out))
+        return true;
+    if (stripped == 16 && np_parse_tunnel_id_base64(id, out))
+        return true;
+    return false;
 }
 
 static bool np_resolve_server_addr(struct sockaddr_in *server_addr)
@@ -379,7 +425,8 @@ static bool np_check_connect(void)
         uint8_t rats_msg[16];
         uint8_t session_bytes[12];
         if (!np_parse_tunnel_id(gpsp_netplay_ra_tunnel_id, session_bytes)) {
-            ESP_LOGE(TAG, "Invalid tunnel_id hex: %s", gpsp_netplay_ra_tunnel_id);
+            ESP_LOGE(TAG, "Invalid tunnel_id (need 24-char hex or 16-char base64): %s",
+                     gpsp_netplay_ra_tunnel_id);
             np_disconnect();
             return false;
         }
