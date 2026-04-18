@@ -44,10 +44,10 @@
 static const char *TAG = "av_stream";
 
 /* ---- tunables ---- */
-#define STREAM_FPS              30
-#define STREAM_BITRATE          2000000
-#define STREAM_GOP              30
-#define STREAM_QP_MIN           18
+#define STREAM_FPS              20
+#define STREAM_BITRATE          1024000
+#define STREAM_GOP              40
+#define STREAM_QP_MIN           26
 #define STREAM_QP_MAX           26
 #define STREAM_AUDIO_SAMPLES_MAX 4400   /* drain buffer: up to ~4 GBA frames */
 
