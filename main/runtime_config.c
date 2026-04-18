@@ -30,6 +30,9 @@ char gpsp_netplay_ra_tunnel_id[25];
 char gpsp_netplay_lobby_host[64];
 uint16_t gpsp_netplay_lobby_port;
 char gpsp_netplay_lobby_relay[32];
+char gpsp_netplay_lobby_password[32];
+char gpsp_netplay_lobby_spectate_password[32];
+char gpsp_netplay_lobby_country[4];
 
 int gpsp_serial_setting;
 int gpsp_rtc_mode;
@@ -102,6 +105,9 @@ static void gpsp_runtime_config_set_defaults(void)
     gpsp_netplay_lobby_host[0] = '\0';
     gpsp_netplay_lobby_port = 7777;
     gpsp_netplay_lobby_relay[0] = '\0';
+    gpsp_netplay_lobby_password[0] = '\0';
+    gpsp_netplay_lobby_spectate_password[0] = '\0';
+    gpsp_netplay_lobby_country[0] = '\0';
 
     gpsp_serial_setting = SERIAL_MODE_AUTO;
     gpsp_rtc_mode = FEAT_AUTODETECT;
@@ -225,6 +231,21 @@ static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
         return;
     }
 
+    if (strcmp(key, "netplay_lobby_password") == 0) {
+        strlcpy(gpsp_netplay_lobby_password, value, sizeof(gpsp_netplay_lobby_password));
+        return;
+    }
+
+    if (strcmp(key, "netplay_lobby_spectate_password") == 0) {
+        strlcpy(gpsp_netplay_lobby_spectate_password, value, sizeof(gpsp_netplay_lobby_spectate_password));
+        return;
+    }
+
+    if (strcmp(key, "netplay_lobby_country") == 0) {
+        strlcpy(gpsp_netplay_lobby_country, value, sizeof(gpsp_netplay_lobby_country));
+        return;
+    }
+
     if (strcmp(key, "serial_mode") == 0) {
         if (strcasecmp(value, "auto") == 0)
             gpsp_serial_setting = SERIAL_MODE_AUTO;
@@ -333,6 +354,9 @@ esp_err_t gpsp_runtime_config_save(void)
             "netplay_lobby_host=%s\n"
             "netplay_lobby_port=%u\n"
             "netplay_lobby_relay=%s\n"
+            "netplay_lobby_password=%s\n"
+            "netplay_lobby_spectate_password=%s\n"
+            "netplay_lobby_country=%s\n"
             "frameskip_interval=%u\n"
             "frameskip_type=%u\n"
             "frameskip_threshold=%u\n",
@@ -351,6 +375,9 @@ esp_err_t gpsp_runtime_config_save(void)
             gpsp_netplay_lobby_host,
             gpsp_netplay_lobby_port,
             gpsp_netplay_lobby_relay,
+            gpsp_netplay_lobby_password,
+            gpsp_netplay_lobby_spectate_password,
+            gpsp_netplay_lobby_country,
             (unsigned)gpsp_frameskip_interval,
             (unsigned)gpsp_frameskip_type,
             (unsigned)gpsp_frameskip_threshold);

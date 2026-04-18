@@ -32,6 +32,9 @@ extern char gpsp_netplay_ra_tunnel_id[25]; /* 24 hex chars + NUL */
 extern char gpsp_netplay_lobby_host[64];
 extern uint16_t gpsp_netplay_lobby_port;
 extern char gpsp_netplay_lobby_relay[32];
+extern char gpsp_netplay_lobby_password[32];
+extern char gpsp_netplay_lobby_spectate_password[32];
+extern char gpsp_netplay_lobby_country[4];
 
 extern int gpsp_serial_setting;
 extern int gpsp_rtc_mode;

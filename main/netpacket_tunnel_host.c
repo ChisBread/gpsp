@@ -27,6 +27,15 @@
 #include "gpsp_config.h"
 #include "runtime_config.h"
 
+/* Lobby registration disguise — change these to impersonate another platform */
+#define LOBBY_CORE_NAME      "gpSP"
+#define LOBBY_CORE_VERSION   "v1.1.0-6373ff3"
+#define LOBBY_RA_VERSION     "1.22.2"
+#define LOBBY_FRONTEND       "unix x64"
+#define LOBBY_SUBSYSTEM      "N/A"
+#define LOBBY_GAME_NAME      "ChisGBA"
+#define LOBBY_GAME_CRC       "00000000"
+
 extern bool netpacket_host_attach_client(int fd, const char *peer_desc);
 
 #define TUNNEL_MAGIC_SESSION  "RATS"
@@ -183,14 +192,59 @@ static bool recv_status_200(int fd)
     return strstr(resp, " 200 ") != NULL;
 }
 
+static void bytes_to_base64(const uint8_t *src, size_t len,
+                           char *dst, size_t dst_len)
+{
+    static const char b64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t i, o = 0;
+    size_t full_triples = len / 3;
+    size_t remainder    = len % 3;
+    size_t need = full_triples * 4 + (remainder ? 4 : 0) + 1;
+
+    if (!dst || dst_len < need) {
+        if (dst && dst_len) dst[0] = '\0';
+        return;
+    }
+
+    for (i = 0; i < full_triples; i++) {
+        uint32_t v = ((uint32_t)src[i*3] << 16) |
+                     ((uint32_t)src[i*3+1] << 8) |
+                     (uint32_t)src[i*3+2];
+        dst[o++] = b64[(v >> 18) & 0x3f];
+        dst[o++] = b64[(v >> 12) & 0x3f];
+        dst[o++] = b64[(v >> 6)  & 0x3f];
+        dst[o++] = b64[v & 0x3f];
+    }
+
+    if (remainder == 1) {
+        uint32_t v = (uint32_t)src[i*3] << 16;
+        dst[o++] = b64[(v >> 18) & 0x3f];
+        dst[o++] = b64[(v >> 12) & 0x3f];
+        dst[o++] = '=';
+        dst[o++] = '=';
+    } else if (remainder == 2) {
+        uint32_t v = ((uint32_t)src[i*3] << 16) |
+                     ((uint32_t)src[i*3+1] << 8);
+        dst[o++] = b64[(v >> 18) & 0x3f];
+        dst[o++] = b64[(v >> 12) & 0x3f];
+        dst[o++] = b64[(v >> 6)  & 0x3f];
+        dst[o++] = '=';
+    }
+
+    dst[o] = '\0';
+}
+
 static bool lobby_post_add(void)
 {
     struct sockaddr_in addr;
     int fd;
     char encoded_nick[96];
+    char encoded_password[96];
+    char encoded_spectate_pw[96];
     size_t enc_off = 0;
-    char body[512];
-    char req[768];
+    char body[896];
+    char req[1152];
 
     if (!lobby_enabled())
         return false;
@@ -222,20 +276,71 @@ static bool lobby_post_add(void)
     }
 
     encoded_nick[0] = '\0';
+    enc_off = 0;
     percent_encode_append(encoded_nick, sizeof(encoded_nick), &enc_off,
                           gpsp_netplay_ra_nick);
 
+    encoded_password[0] = '\0';
+    enc_off = 0;
+    percent_encode_append(encoded_password, sizeof(encoded_password), &enc_off,
+                          gpsp_netplay_lobby_password);
+
+    encoded_spectate_pw[0] = '\0';
+    enc_off = 0;
+    percent_encode_append(encoded_spectate_pw, sizeof(encoded_spectate_pw), &enc_off,
+                          gpsp_netplay_lobby_spectate_password);
+
+    char encoded_frontend[64];
+    encoded_frontend[0] = '\0';
+    enc_off = 0;
+    percent_encode_append(encoded_frontend, sizeof(encoded_frontend), &enc_off,
+                          LOBBY_FRONTEND);
+
+    char encoded_session[64];
+    encoded_session[0] = '\0';
+    enc_off = 0;
+    percent_encode_append(encoded_session, sizeof(encoded_session), &enc_off,
+                          ctrl_room_id);
+
+    char encoded_relay[96];
+    encoded_relay[0] = '\0';
+    enc_off = 0;
+    percent_encode_append(encoded_relay, sizeof(encoded_relay), &enc_off,
+                          gpsp_netplay_ra_host);
+
     snprintf(body, sizeof(body),
-             "username=%s&core_name=%s&core_version=%s&game_name=GBA"
-             "&game_crc=00000000&port=%u&force_mitm=1&mitm_server=%s"
-             "&mitm_session=%s&has_password=0&has_spectate_password=0"
-             "&retroarch_version=ESP32-P4&frontend=ESP32-P4",
+             "username=%s"
+             "&country=%s"
+             "&core_name=%s"
+             "&core_version=%s"
+             "&game_name=%s"
+             "&game_crc=%s"
+             "&subsystem_name=%s"
+             "&port=%u"
+             "&force_mitm=1"
+             "&mitm_server=custom"
+             "&mitm_session=%s"
+             "&mitm_custom_addr=%s"
+             "&mitm_custom_port=%u"
+             "&has_password=%d"
+             "&has_spectate_password=%d"
+             "&retroarch_version=%s"
+             "&frontend=%s",
              encoded_nick,
-             GPSP_NAME,
-             GPSP_NETPACKET_VERSION,
+             gpsp_netplay_lobby_country,
+             LOBBY_CORE_NAME,
+             LOBBY_CORE_VERSION,
+             LOBBY_GAME_NAME,
+             LOBBY_GAME_CRC,
+             LOBBY_SUBSYSTEM,
              (unsigned)gpsp_netplay_ra_port,
-             gpsp_netplay_lobby_relay,
-             ctrl_room_id);
+             encoded_session,
+             encoded_relay,
+             (unsigned)gpsp_netplay_ra_port,
+             gpsp_netplay_lobby_password[0] ? 1 : 0,
+             gpsp_netplay_lobby_spectate_password[0] ? 1 : 0,
+             LOBBY_RA_VERSION,
+             encoded_frontend);
 
     snprintf(req, sizeof(req),
              "POST /add HTTP/1.1\r\n"
@@ -669,8 +774,8 @@ void netpacket_tunnel_host_poll(void)
             return;
         }
 
-        bytes_to_hex(ctrl_recv_buf + 4, TUNNEL_UNIQUE_SIZE,
-                     ctrl_room_id, sizeof(ctrl_room_id));
+        bytes_to_base64(ctrl_recv_buf + 4, TUNNEL_UNIQUE_SIZE,
+                        ctrl_room_id, sizeof(ctrl_room_id));
         ctrl_consume(TUNNEL_MSG_SIZE);
         ctrl_state = TUNNEL_CTRL_READY;
         set_status("room_ready");
