@@ -23,15 +23,18 @@ static const char *TAG = "gpsp_config";
 
 int  gpsp_netplay_ra_mode;
 bool gpsp_netplay_ra_enabled;
+int  gpsp_netplay_role;
+bool gpsp_netplay_use_tunnel;
+bool gpsp_netplay_use_lobby;
 char gpsp_netplay_ra_host[64];
 uint16_t gpsp_netplay_ra_port;
 char gpsp_netplay_ra_nick[32];
 char gpsp_netplay_ra_tunnel_id[25];
+char gpsp_netplay_host_password[32];
+char gpsp_netplay_client_password[32];
 char gpsp_netplay_lobby_host[64];
 uint16_t gpsp_netplay_lobby_port;
 char gpsp_netplay_lobby_relay[32];
-char gpsp_netplay_lobby_password[32];
-char gpsp_netplay_lobby_spectate_password[32];
 char gpsp_netplay_lobby_country[4];
 
 int gpsp_serial_setting;
@@ -86,6 +89,26 @@ static char *trim_whitespace(char *text)
     return text;
 }
 
+void gpsp_netplay_update_mode(void)
+{
+    switch (gpsp_netplay_role) {
+    case NETPLAY_ROLE_HOST:
+        gpsp_netplay_ra_mode = gpsp_netplay_use_tunnel
+                                   ? NETPLAY_MODE_TUNNEL_HOST
+                                   : NETPLAY_MODE_HOST;
+        break;
+    case NETPLAY_ROLE_CLIENT:
+        gpsp_netplay_ra_mode = gpsp_netplay_use_tunnel
+                                   ? NETPLAY_MODE_TUNNEL_CLIENT
+                                   : NETPLAY_MODE_CLIENT;
+        break;
+    default:
+        gpsp_netplay_ra_mode = NETPLAY_MODE_DISABLED;
+        break;
+    }
+    gpsp_netplay_ra_enabled = (gpsp_netplay_ra_mode != NETPLAY_MODE_DISABLED);
+}
+
 static void gpsp_runtime_config_set_defaults(void)
 {
 #ifdef HAVE_DYNAREC
@@ -98,15 +121,18 @@ static void gpsp_runtime_config_set_defaults(void)
 
     gpsp_netplay_ra_mode = NETPLAY_MODE_DISABLED;
     gpsp_netplay_ra_enabled = false;
+    gpsp_netplay_role = NETPLAY_ROLE_OFF;
+    gpsp_netplay_use_tunnel = false;
+    gpsp_netplay_use_lobby = false;
     gpsp_netplay_ra_host[0] = '\0';
     gpsp_netplay_ra_port = 55435;
     strlcpy(gpsp_netplay_ra_nick, "ESP32-P4", sizeof(gpsp_netplay_ra_nick));
     gpsp_netplay_ra_tunnel_id[0] = '\0';
+    gpsp_netplay_host_password[0] = '\0';
+    gpsp_netplay_client_password[0] = '\0';
     gpsp_netplay_lobby_host[0] = '\0';
     gpsp_netplay_lobby_port = 7777;
     gpsp_netplay_lobby_relay[0] = '\0';
-    gpsp_netplay_lobby_password[0] = '\0';
-    gpsp_netplay_lobby_spectate_password[0] = '\0';
     gpsp_netplay_lobby_country[0] = '\0';
 
     gpsp_serial_setting = SERIAL_MODE_AUTO;
@@ -171,22 +197,59 @@ static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
     long parsed_long;
 
     if (strcmp(key, "netplay_ra_enable") == 0) {
-        int enabled;
-        if (parse_bool_value(value, &enabled)) {
-            gpsp_netplay_ra_enabled = enabled;
-            /* Legacy: if enabled but mode is disabled, default to client */
-            if (enabled && gpsp_netplay_ra_mode == NETPLAY_MODE_DISABLED)
-                gpsp_netplay_ra_mode = NETPLAY_MODE_CLIENT;
-        }
+        /* Legacy key — ignored on load; mode derived from role + tunnel */
         return;
     }
 
     if (strcmp(key, "netplay_ra_mode") == 0) {
+        /* Legacy key — reverse-derive role + tunnel from mode value */
         parsed_long = strtol(value, &endptr, 10);
         if (endptr != value && parsed_long >= 0 && parsed_long <= 4) {
-            gpsp_netplay_ra_mode = (int)parsed_long;
-            gpsp_netplay_ra_enabled = (gpsp_netplay_ra_mode != NETPLAY_MODE_DISABLED);
+            switch ((int)parsed_long) {
+            case NETPLAY_MODE_HOST:
+                gpsp_netplay_role = NETPLAY_ROLE_HOST;
+                gpsp_netplay_use_tunnel = false;
+                break;
+            case NETPLAY_MODE_TUNNEL_HOST:
+                gpsp_netplay_role = NETPLAY_ROLE_HOST;
+                gpsp_netplay_use_tunnel = true;
+                break;
+            case NETPLAY_MODE_CLIENT:
+                gpsp_netplay_role = NETPLAY_ROLE_CLIENT;
+                gpsp_netplay_use_tunnel = false;
+                break;
+            case NETPLAY_MODE_TUNNEL_CLIENT:
+                gpsp_netplay_role = NETPLAY_ROLE_CLIENT;
+                gpsp_netplay_use_tunnel = true;
+                break;
+            default:
+                gpsp_netplay_role = NETPLAY_ROLE_OFF;
+                gpsp_netplay_use_tunnel = false;
+                break;
+            }
+            gpsp_netplay_update_mode();
         }
+        return;
+    }
+
+    if (strcmp(key, "netplay_role") == 0) {
+        parsed_long = strtol(value, &endptr, 10);
+        if (endptr != value && parsed_long >= 0 && parsed_long <= 2)
+            gpsp_netplay_role = (int)parsed_long;
+        return;
+    }
+
+    if (strcmp(key, "netplay_use_tunnel") == 0) {
+        int enabled;
+        if (parse_bool_value(value, &enabled))
+            gpsp_netplay_use_tunnel = enabled;
+        return;
+    }
+
+    if (strcmp(key, "netplay_use_lobby") == 0) {
+        int enabled;
+        if (parse_bool_value(value, &enabled))
+            gpsp_netplay_use_lobby = enabled;
         return;
     }
 
@@ -213,6 +276,16 @@ static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
         return;
     }
 
+    if (strcmp(key, "netplay_host_password") == 0) {
+        strlcpy(gpsp_netplay_host_password, value, sizeof(gpsp_netplay_host_password));
+        return;
+    }
+
+    if (strcmp(key, "netplay_client_password") == 0) {
+        strlcpy(gpsp_netplay_client_password, value, sizeof(gpsp_netplay_client_password));
+        return;
+    }
+
     if (strcmp(key, "netplay_lobby_host") == 0) {
         strlcpy(gpsp_netplay_lobby_host, value, sizeof(gpsp_netplay_lobby_host));
         return;
@@ -228,16 +301,6 @@ static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
 
     if (strcmp(key, "netplay_lobby_relay") == 0) {
         strlcpy(gpsp_netplay_lobby_relay, value, sizeof(gpsp_netplay_lobby_relay));
-        return;
-    }
-
-    if (strcmp(key, "netplay_lobby_password") == 0) {
-        strlcpy(gpsp_netplay_lobby_password, value, sizeof(gpsp_netplay_lobby_password));
-        return;
-    }
-
-    if (strcmp(key, "netplay_lobby_spectate_password") == 0) {
-        strlcpy(gpsp_netplay_lobby_spectate_password, value, sizeof(gpsp_netplay_lobby_spectate_password));
         return;
     }
 
@@ -345,17 +408,18 @@ esp_err_t gpsp_runtime_config_save(void)
             "serial_mode=%s\n"
             "rtc_mode=%s\n"
             "web_server_enable=%d\n"
-            "netplay_ra_enable=%d\n"
-            "netplay_ra_mode=%d\n"
+            "netplay_role=%d\n"
+            "netplay_use_tunnel=%d\n"
+            "netplay_use_lobby=%d\n"
             "netplay_ra_host=%s\n"
             "netplay_ra_port=%u\n"
             "netplay_ra_nick=%s\n"
             "netplay_ra_tunnel_id=%s\n"
+            "netplay_host_password=%s\n"
+            "netplay_client_password=%s\n"
             "netplay_lobby_host=%s\n"
             "netplay_lobby_port=%u\n"
             "netplay_lobby_relay=%s\n"
-            "netplay_lobby_password=%s\n"
-            "netplay_lobby_spectate_password=%s\n"
             "netplay_lobby_country=%s\n"
             "frameskip_interval=%u\n"
             "frameskip_type=%u\n"
@@ -366,17 +430,18 @@ esp_err_t gpsp_runtime_config_save(void)
             serial_setting_to_str(gpsp_serial_setting),
             rtc_mode_to_str(gpsp_rtc_mode),
             gpsp_web_server_enabled ? 1 : 0,
-            gpsp_netplay_ra_enabled ? 1 : 0,
-            gpsp_netplay_ra_mode,
+            gpsp_netplay_role,
+            gpsp_netplay_use_tunnel ? 1 : 0,
+            gpsp_netplay_use_lobby ? 1 : 0,
             gpsp_netplay_ra_host,
             gpsp_netplay_ra_port,
             gpsp_netplay_ra_nick,
             gpsp_netplay_ra_tunnel_id,
+            gpsp_netplay_host_password,
+            gpsp_netplay_client_password,
             gpsp_netplay_lobby_host,
             gpsp_netplay_lobby_port,
             gpsp_netplay_lobby_relay,
-            gpsp_netplay_lobby_password,
-            gpsp_netplay_lobby_spectate_password,
             gpsp_netplay_lobby_country,
             (unsigned)gpsp_frameskip_interval,
             (unsigned)gpsp_frameskip_type,
@@ -423,14 +488,21 @@ esp_err_t gpsp_runtime_config_init(void)
     }
 
     fclose(config_file);
+
+    /* Derive mode from role + tunnel flag */
+    gpsp_netplay_update_mode();
+
     ESP_LOGI(TAG,
              "Runtime config loaded: dynarec=%d sprite_limit=%d boot=%s",
              dynarec_enable ? 1 : 0,
              sprite_limit ? 1 : 0,
              selected_boot_mode == boot_bios ? "bios" : "game");
     ESP_LOGI(TAG,
-             "Runtime netplay: ra_enable=%d host=%s port=%u nick=%s",
-             gpsp_netplay_ra_enabled ? 1 : 0,
+             "Runtime netplay: role=%d tunnel=%d lobby=%d mode=%d host=%s port=%u nick=%s",
+             gpsp_netplay_role,
+             gpsp_netplay_use_tunnel ? 1 : 0,
+             gpsp_netplay_use_lobby ? 1 : 0,
+             gpsp_netplay_ra_mode,
              gpsp_netplay_ra_host,
              gpsp_netplay_ra_port,
              gpsp_netplay_ra_nick);

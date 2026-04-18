@@ -19,6 +19,7 @@ idf_component_register(
         lwip
         esp_http_server
         esp_driver_ppa
+        mbedtls
     EMBED_FILES
         "web_server.html"
         "web_home.html"

@@ -70,10 +70,11 @@ static const char *TAG = "gpsp_tunnel_host";
 static int ctrl_fd = -1;
 static tunnel_ctrl_state_t ctrl_state;
 static int64_t ctrl_last_connect_attempt_us;
-static char ctrl_room_id[TUNNEL_UNIQUE_SIZE * 2 + 1];
+static char ctrl_session_id[TUNNEL_UNIQUE_SIZE * 2 + 1];
 static char ctrl_status[32] = "idle";
 static uint8_t ctrl_recv_buf[64];
 static size_t ctrl_recv_len;
+static char lobby_room_id[24];
 static pending_link_t pending_links[TUNNEL_MAX_PENDING];
 static int64_t lobby_last_post_us;
 
@@ -121,7 +122,8 @@ static void percent_encode_append(char *dst, size_t dst_size,
 
 static bool lobby_enabled(void)
 {
-    return gpsp_netplay_lobby_host[0] != '\0' &&
+    return gpsp_netplay_use_lobby &&
+           gpsp_netplay_lobby_host[0] != '\0' &&
            gpsp_netplay_lobby_port != 0 &&
            gpsp_netplay_lobby_relay[0] != '\0';
 }
@@ -157,7 +159,7 @@ static bool send_with_timeout(int fd, const void *buf, size_t len, int timeout_m
 
 static bool recv_status_200(int fd)
 {
-    char resp[128];
+    char resp[768];
     size_t got = 0;
     int64_t deadline = esp_timer_get_time() + 2000000;
 
@@ -189,7 +191,31 @@ static bool recv_status_200(int fd)
 
     if (got == 0)
         return false;
-    return strstr(resp, " 200 ") != NULL;
+
+    /* Need success status line first. */
+    if (strstr(resp, " 200 ") == NULL)
+        return false;
+
+    /* Parse "id=<number>" from lobby response body (format: "status=OK\nid=N\n...") */
+    lobby_room_id[0] = '\0';
+    char *body = strstr(resp, "\r\n\r\n");
+    if (body) {
+        body += 4;
+        /* Response must start with "status=OK" */
+        char *id_tag = strstr(body, "id=");
+        if (id_tag) {
+            id_tag += 3; /* skip "id=" */
+            size_t n = 0;
+            while (id_tag[n] && id_tag[n] != '\r' && id_tag[n] != '\n'
+                   && n + 1 < sizeof(lobby_room_id)) {
+                lobby_room_id[n] = id_tag[n];
+                n++;
+            }
+            lobby_room_id[n] = '\0';
+        }
+    }
+
+    return true;
 }
 
 static void bytes_to_base64(const uint8_t *src, size_t len,
@@ -283,12 +309,12 @@ static bool lobby_post_add(void)
     encoded_password[0] = '\0';
     enc_off = 0;
     percent_encode_append(encoded_password, sizeof(encoded_password), &enc_off,
-                          gpsp_netplay_lobby_password);
+                          gpsp_netplay_host_password);
 
     encoded_spectate_pw[0] = '\0';
     enc_off = 0;
     percent_encode_append(encoded_spectate_pw, sizeof(encoded_spectate_pw), &enc_off,
-                          gpsp_netplay_lobby_spectate_password);
+                          gpsp_netplay_host_password);
 
     char encoded_frontend[64];
     encoded_frontend[0] = '\0';
@@ -300,7 +326,7 @@ static bool lobby_post_add(void)
     encoded_session[0] = '\0';
     enc_off = 0;
     percent_encode_append(encoded_session, sizeof(encoded_session), &enc_off,
-                          ctrl_room_id);
+                          ctrl_session_id);
 
     char encoded_relay[96];
     encoded_relay[0] = '\0';
@@ -337,8 +363,8 @@ static bool lobby_post_add(void)
              encoded_session,
              encoded_relay,
              (unsigned)gpsp_netplay_ra_port,
-             gpsp_netplay_lobby_password[0] ? 1 : 0,
-             gpsp_netplay_lobby_spectate_password[0] ? 1 : 0,
+             gpsp_netplay_host_password[0] ? 1 : 0,
+             gpsp_netplay_host_password[0] ? 1 : 0,
              LOBBY_RA_VERSION,
              encoded_frontend);
 
@@ -358,8 +384,9 @@ static bool lobby_post_add(void)
     close(fd);
 
     if (ok) {
-        ESP_LOGI(TAG, "Lobby publish OK: relay=%s room=%s",
-                 gpsp_netplay_lobby_relay, ctrl_room_id);
+        ESP_LOGI(TAG, "Lobby publish OK: relay=%s session=%s lobby_room=%s",
+                 gpsp_netplay_lobby_relay, ctrl_session_id,
+                 lobby_room_id[0] ? lobby_room_id : "(n/a)");
     } else {
         ESP_LOGW(TAG, "Lobby publish failed");
     }
@@ -368,7 +395,7 @@ static bool lobby_post_add(void)
 
 static void lobby_try_publish(bool force)
 {
-    if (!lobby_enabled() || ctrl_room_id[0] == '\0')
+    if (!lobby_enabled() || ctrl_session_id[0] == '\0')
         return;
 
     int64_t now_us = esp_timer_get_time();
@@ -552,7 +579,8 @@ static void stop_all(void)
 
     ctrl_state = TUNNEL_CTRL_DISCONNECTED;
     ctrl_recv_len = 0;
-    ctrl_room_id[0] = '\0';
+    ctrl_session_id[0] = '\0';
+    lobby_room_id[0] = '\0';
     lobby_last_post_us = 0;
     set_status("idle");
 }
@@ -597,7 +625,8 @@ static void drop_control(void)
     }
     ctrl_state = TUNNEL_CTRL_DISCONNECTED;
     ctrl_recv_len = 0;
-    ctrl_room_id[0] = '\0';
+    ctrl_session_id[0] = '\0';
+    lobby_room_id[0] = '\0';
 }
 
 static bool recv_into_ctrl(void)
@@ -775,11 +804,11 @@ void netpacket_tunnel_host_poll(void)
         }
 
         bytes_to_base64(ctrl_recv_buf + 4, TUNNEL_UNIQUE_SIZE,
-                        ctrl_room_id, sizeof(ctrl_room_id));
+                        ctrl_session_id, sizeof(ctrl_session_id));
         ctrl_consume(TUNNEL_MSG_SIZE);
         ctrl_state = TUNNEL_CTRL_READY;
         set_status("room_ready");
-        ESP_LOGI(TAG, "Tunnel room created: %s", ctrl_room_id);
+        ESP_LOGI(TAG, "Tunnel session created: %s", ctrl_session_id);
         lobby_try_publish(true);
         return;
     }
@@ -788,9 +817,14 @@ void netpacket_tunnel_host_poll(void)
     process_control_ready();
 }
 
+const char *netpacket_tunnel_host_session_id(void)
+{
+    return ctrl_session_id;
+}
+
 const char *netpacket_tunnel_host_room_id(void)
 {
-    return ctrl_room_id;
+    return lobby_room_id;
 }
 
 const char *netpacket_tunnel_host_status(void)
@@ -800,5 +834,5 @@ const char *netpacket_tunnel_host_status(void)
 
 bool netpacket_tunnel_host_room_ready(void)
 {
-    return ctrl_state == TUNNEL_CTRL_READY && ctrl_room_id[0] != '\0';
+    return ctrl_state == TUNNEL_CTRL_READY && ctrl_session_id[0] != '\0';
 }

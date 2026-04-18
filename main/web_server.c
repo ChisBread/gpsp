@@ -42,6 +42,8 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
+#include <lwip/sockets.h>
+#include <lwip/netdb.h>
 
 #include "av_pipeline.h"
 #include "common.h"
@@ -205,15 +207,20 @@ static const char *rtc_mode_str(int m)
 /* ---- GET /api/settings → current settings JSON ---- */
 static esp_err_t settings_get_handler(httpd_req_t *req)
 {
-    char buf[1024];
+    char buf[1536];
     int len = snprintf(buf, sizeof(buf),
         "{\"dynarec_enable\":%d,\"sprite_limit\":%d,\"boot_mode\":\"%s\""
         ",\"serial_mode\":\"%s\",\"rtc_mode\":\"%s\""
         ",\"frameskip_type\":%u,\"frameskip_interval\":%u,\"frameskip_threshold\":%u"
-        ",\"netplay_enable\":%d,\"netplay_mode\":%d,\"netplay_host\":\"%s\""
-        ",\"netplay_port\":%u,\"netplay_nick\":\"%s\",\"netplay_tunnel_id\":\"%s\""
-        ",\"netplay_lobby_host\":\"%s\",\"netplay_lobby_port\":%u,\"netplay_lobby_relay\":\"%s\""
-        ",\"netplay_tunnel_room_id\":\"%s\",\"netplay_tunnel_status\":\"%s\"}",
+        ",\"netplay_role\":%d,\"netplay_use_tunnel\":%d,\"netplay_use_lobby\":%d"
+        ",\"netplay_host\":\"%s\",\"netplay_port\":%u,\"netplay_nick\":\"%s\""
+        ",\"netplay_tunnel_id\":\"%s\""
+        ",\"netplay_host_password\":\"%s\",\"netplay_client_password\":\"%s\""
+        ",\"netplay_lobby_host\":\"%s\",\"netplay_lobby_port\":%u"
+        ",\"netplay_lobby_relay\":\"%s\",\"netplay_lobby_country\":\"%s\""
+        ",\"netplay_tunnel_session_id\":\"%s\",\"netplay_tunnel_status\":\"%s\""
+        ",\"netplay_lobby_room_id\":\"%s\""
+        ",\"netplay_enable\":%d,\"netplay_mode\":%d}",
         dynarec_enable ? 1 : 0,
         sprite_limit ? 1 : 0,
         selected_boot_mode == boot_bios ? "bios" : "game",
@@ -222,17 +229,24 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         (unsigned)gpsp_frameskip_type,
         (unsigned)gpsp_frameskip_interval,
         (unsigned)gpsp_frameskip_threshold,
-        gpsp_netplay_ra_enabled ? 1 : 0,
-        gpsp_netplay_ra_mode,
+        gpsp_netplay_role,
+        gpsp_netplay_use_tunnel ? 1 : 0,
+        gpsp_netplay_use_lobby ? 1 : 0,
         gpsp_netplay_ra_host,
         gpsp_netplay_ra_port,
         gpsp_netplay_ra_nick,
         gpsp_netplay_ra_tunnel_id,
+        gpsp_netplay_host_password,
+        gpsp_netplay_client_password,
         gpsp_netplay_lobby_host,
         gpsp_netplay_lobby_port,
         gpsp_netplay_lobby_relay,
+        gpsp_netplay_lobby_country,
+        netpacket_tunnel_host_session_id(),
+        netpacket_tunnel_host_status(),
         netpacket_tunnel_host_room_id(),
-        netpacket_tunnel_host_status());
+        gpsp_netplay_ra_enabled ? 1 : 0,
+        gpsp_netplay_ra_mode);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -340,12 +354,29 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         }
     }
 
-    p = strstr(body, "\"netplay_enable\"");
+    p = strstr(body, "\"netplay_role\"");
     if (p) {
-        p = strchr(p + 16, ':');
-        if (p) gpsp_netplay_ra_enabled = atoi(p + 1) ? true : false;
+        p = strchr(p + 14, ':');
+        if (p) {
+            int v = atoi(p + 1);
+            if (v >= 0 && v <= 2)
+                gpsp_netplay_role = v;
+        }
     }
 
+    p = strstr(body, "\"netplay_use_tunnel\"");
+    if (p) {
+        p = strchr(p + 20, ':');
+        if (p) gpsp_netplay_use_tunnel = atoi(p + 1) ? true : false;
+    }
+
+    p = strstr(body, "\"netplay_use_lobby\"");
+    if (p) {
+        p = strchr(p + 19, ':');
+        if (p) gpsp_netplay_use_lobby = atoi(p + 1) ? true : false;
+    }
+
+    /* Legacy: netplay_mode still accepted for backward compat */
     p = strstr(body, "\"netplay_mode\"");
     if (p) {
         p = strchr(p + 14, ':');
@@ -474,11 +505,58 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         }
     }
 
+    /* Extract string helper macro for password/country fields */
+#define EXTRACT_STR(json_key, dst, dst_size) do {                       \
+    p = strstr(body, "\"" json_key "\"");                               \
+    if (p) {                                                            \
+        p = strchr(p + sizeof(json_key) + 1, ':');                      \
+        if (p) {                                                        \
+            char *_q = strchr(p, '"');                                   \
+            if (_q) {                                                    \
+                _q++;                                                    \
+                char *_e = strchr(_q, '"');                              \
+                if (_e) {                                                \
+                    size_t _len = (size_t)(_e - _q);                    \
+                    if (_len >= (dst_size)) _len = (dst_size) - 1;      \
+                    memcpy((dst), _q, _len);                            \
+                    (dst)[_len] = '\0';                                  \
+                }                                                        \
+            }                                                            \
+        }                                                                \
+    }                                                                    \
+} while (0)
+
+    EXTRACT_STR("netplay_host_password",   gpsp_netplay_host_password,   sizeof(gpsp_netplay_host_password));
+    EXTRACT_STR("netplay_client_password", gpsp_netplay_client_password, sizeof(gpsp_netplay_client_password));
+    EXTRACT_STR("netplay_lobby_country",   gpsp_netplay_lobby_country,   sizeof(gpsp_netplay_lobby_country));
+
+#undef EXTRACT_STR
+
     gpsp_runtime_config_save();
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     return httpd_resp_send(req, "{\"ok\":true}", 11);
+}
+
+/* ---- POST /api/netplay/apply → derive mode from role+tunnel and activate ---- */
+static esp_err_t netplay_apply_handler(httpd_req_t *req)
+{
+    gpsp_netplay_update_mode();
+    gpsp_runtime_config_save();
+
+    char buf[256];
+    int len = snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"netplay_enable\":%d,\"netplay_mode\":%d"
+        ",\"netplay_tunnel_session_id\":\"%s\",\"netplay_tunnel_status\":\"%s\"}",
+        gpsp_netplay_ra_enabled ? 1 : 0,
+        gpsp_netplay_ra_mode,
+        netpacket_tunnel_host_session_id(),
+        netpacket_tunnel_host_status());
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, buf, len);
 }
 
 /* ---- GET /api/roms → list .gba files on SD ---- */
@@ -953,6 +1031,94 @@ uint16_t web_server_input_read(void)
     return keys;
 }
 
+/* ---- GET /api/lobby/room?id=<roomID>
+ *      Proxies GET /<roomID> to the lobby server and extracts mitm_session
+ *      (base64-encoded 12-byte session ID).
+ *      Returns: {"session_id":"<base64>"} or {"error":"..."} */
+static esp_err_t lobby_room_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+
+    if (!gpsp_netplay_lobby_host[0] || !gpsp_netplay_lobby_port) {
+        return httpd_resp_send(req, "{\"error\":\"lobby not configured\"}", HTTPD_RESP_USE_STRLEN);
+    }
+
+    /* Extract ?id= from query string */
+    char query[32];
+    char room_str[16] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "id", room_str, sizeof(room_str));
+    }
+    if (!room_str[0]) {
+        return httpd_resp_send(req, "{\"error\":\"missing id\"}", HTTPD_RESP_USE_STRLEN);
+    }
+
+    /* Resolve and connect to lobby */
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    struct hostent *he = gethostbyname(gpsp_netplay_lobby_host);
+    if (!he) {
+        return httpd_resp_send(req, "{\"error\":\"lobby dns failed\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(gpsp_netplay_lobby_port);
+    addr.sin_addr = *(struct in_addr *)he->h_addr;
+
+    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0) {
+        return httpd_resp_send(req, "{\"error\":\"socket failed\"}", HTTPD_RESP_USE_STRLEN);
+    }
+
+    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        return httpd_resp_send(req, "{\"error\":\"lobby connect failed\"}", HTTPD_RESP_USE_STRLEN);
+    }
+
+    char req_buf[128];
+    int req_len = snprintf(req_buf, sizeof(req_buf),
+        "GET /%s HTTP/1.0\r\nHost: %s:%u\r\nConnection: close\r\n\r\n",
+        room_str, gpsp_netplay_lobby_host, (unsigned)gpsp_netplay_lobby_port);
+    send(fd, req_buf, req_len, 0);
+
+    /* Read full response */
+    char resp[2048];
+    size_t got = 0;
+    ssize_t n;
+    while (got + 1 < sizeof(resp) && (n = recv(fd, resp + got, sizeof(resp) - got - 1, 0)) > 0)
+        got += (size_t)n;
+    resp[got] = '\0';
+    close(fd);
+
+    if (!strstr(resp, " 200 ")) {
+        return httpd_resp_send(req, "{\"error\":\"lobby returned non-200\"}", HTTPD_RESP_USE_STRLEN);
+    }
+
+    /* Find "mitm_session":"<base64>" in the JSON body */
+    char *tag = strstr(resp, "\"mitm_session\"");
+    if (!tag) {
+        return httpd_resp_send(req, "{\"error\":\"no mitm_session field\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    char *p = strchr(tag + 14, '"');
+    if (!p) {
+        return httpd_resp_send(req, "{\"error\":\"bad mitm_session format\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    p++; /* skip opening quote */
+    char *e = strchr(p, '"');
+    if (!e || e - p < 1 || e - p > 64) {
+        return httpd_resp_send(req, "{\"error\":\"bad mitm_session value\"}", HTTPD_RESP_USE_STRLEN);
+    }
+    *e = '\0';
+
+    char out[128];
+    snprintf(out, sizeof(out), "{\"session_id\":\"%s\"}", p);
+    return httpd_resp_send(req, out, HTTPD_RESP_USE_STRLEN);
+}
+
 esp_err_t web_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -1030,6 +1196,22 @@ esp_err_t web_server_start(void)
         .handler = settings_post_handler,
     };
     httpd_register_uri_handler(s_server, &settings_post_uri);
+
+    /* Netplay apply */
+    const httpd_uri_t netplay_apply_uri = {
+        .uri = "/api/netplay/apply",
+        .method = HTTP_POST,
+        .handler = netplay_apply_handler,
+    };
+    httpd_register_uri_handler(s_server, &netplay_apply_uri);
+
+    /* Lobby room lookup proxy */
+    const httpd_uri_t lobby_room_uri = {
+        .uri = "/api/lobby/room",
+        .method = HTTP_GET,
+        .handler = lobby_room_get_handler,
+    };
+    httpd_register_uri_handler(s_server, &lobby_room_uri);
 
     /* ROM list */
     const httpd_uri_t roms_get_uri = {

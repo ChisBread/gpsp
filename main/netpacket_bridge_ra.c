@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -29,6 +30,8 @@
 #include "runtime_config.h"
 #include "serial.h"
 
+#include "mbedtls/md.h"
+
 /* Host mode (netpacket_host.c) */
 extern void netpacket_host_poll(void);
 extern void netpacket_host_send(uint16_t client_id, const void *buf, size_t len);
@@ -38,6 +41,7 @@ extern void netpacket_host_send(uint16_t client_id, const void *buf, size_t len)
 #define RA_NETPLAY_MAGIC             0x52414E50u  /* "RANP" */
 #define RA_NETPLAY_PROTOCOL_VERSION  7u
 #define RA_NICK_LEN                  32
+#define RA_PASS_HASH_LEN             64
 #define RA_MAX_INPUT_DEVICES         16
 
 /* Commands */
@@ -123,6 +127,33 @@ static uint32_t np_impl_magic(void)
     magic ^= RA_NETPLAY_PROTOCOL_VERSION << (i & 0xf);
 
     return magic;
+}
+
+static void ra_password_hash_hex(uint32_t salt, const char *password,
+                                 char out_hex[RA_PASS_HASH_LEN + 1])
+{
+    uint8_t digest[32];
+    char salted[8 + 128 + 1];
+    size_t pw_len;
+
+    if (!password)
+        password = "";
+
+    pw_len = strlen(password);
+    if (pw_len > 128)
+        pw_len = 128;
+
+    /* RetroArch format: "%08X" (uppercase salt text) + password */
+    snprintf(salted, sizeof(salted), "%08X", (unsigned)salt);
+    memcpy(salted + 8, password, pw_len);
+    salted[8 + pw_len] = '\0';
+
+    mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+               (const unsigned char *)salted, 8 + pw_len, digest);
+
+    for (size_t i = 0; i < sizeof(digest); i++)
+        snprintf(out_hex + i * 2, 3, "%02x", (unsigned)digest[i]);
+    out_hex[RA_PASS_HASH_LEN] = '\0';
 }
 
 static int base64_decode_char(char c)
@@ -478,9 +509,21 @@ static bool np_handle_server_header(void)
 
     uint32_t salt = ntohl(header[3]);
     if (salt != 0) {
-        ESP_LOGE(TAG, "Server requires password — not supported on ESP32-P4");
-        np_disconnect();
-        return false;
+        if (gpsp_netplay_client_password[0] == '\0') {
+            ESP_LOGE(TAG, "Server requires password but none configured");
+            np_disconnect();
+            return false;
+        }
+
+        /* RetroArch format: SHA256("%08X" + password), sent as 64-byte hex */
+        char hash[RA_PASS_HASH_LEN + 1];
+        ra_password_hash_hex(salt, gpsp_netplay_client_password, hash);
+
+        if (!np_send_all(hash, RA_PASS_HASH_LEN)) {
+            np_disconnect();
+            return false;
+        }
+        ESP_LOGI(TAG, "Password hash sent");
     }
 
     ESP_LOGI(TAG, "Server protocol version: %u", (unsigned)np_server_protocol);

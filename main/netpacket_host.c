@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -28,11 +29,14 @@
 #include "runtime_config.h"
 #include "serial.h"
 
+#include "mbedtls/md.h"
+
 /* ── RetroArch Netplay protocol constants ─────────────────────────── */
 
 #define RA_NETPLAY_MAGIC             0x52414E50u  /* "RANP" */
 #define RA_NETPLAY_PROTOCOL_VERSION  7u
 #define RA_NICK_LEN                  32
+#define RA_PASS_HASH_LEN             64
 #define RA_MAX_INPUT_DEVICES         16
 
 #define RA_CMD_NICK                  0x0020u
@@ -55,6 +59,7 @@
 typedef enum {
     CLIENT_STATE_EMPTY = 0,
     CLIENT_STATE_WAIT_HEADER,
+    CLIENT_STATE_WAIT_PASSWORD,
     CLIENT_STATE_WAIT_NICK,
     CLIENT_STATE_WAIT_INFO,
     CLIENT_STATE_WAIT_PLAY,
@@ -71,6 +76,7 @@ typedef struct {
     client_state_t state;
     uint32_t       protocol;       /* negotiated version */
     uint32_t       assigned_id;    /* 1-based */
+    uint32_t       password_salt;  /* non-zero if password required */
     char           nick[RA_NICK_LEN];
     size_t         recv_len;
     uint32_t       tx_packets, tx_bytes;
@@ -80,9 +86,37 @@ typedef struct {
 
 /* Forward declarations for handlers used by host_service_clients() */
 static bool host_handle_client_header(host_client_t *c);
+static bool host_handle_client_password(host_client_t *c);
 static bool host_handle_client_nick(host_client_t *c);
 static bool host_handle_client_info(host_client_t *c);
 static bool host_handle_play(host_client_t *c);
+
+static void ra_password_hash_hex(uint32_t salt, const char *password,
+                                 char out_hex[RA_PASS_HASH_LEN + 1])
+{
+    uint8_t digest[32];
+    char salted[8 + 128 + 1];
+    size_t pw_len;
+
+    if (!password)
+        password = "";
+
+    pw_len = strlen(password);
+    if (pw_len > 128)
+        pw_len = 128;
+
+    /* RetroArch format: "%08X" (uppercase salt text) + password */
+    snprintf(salted, sizeof(salted), "%08X", (unsigned)salt);
+    memcpy(salted + 8, password, pw_len);
+    salted[8 + pw_len] = '\0';
+
+    mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+               (const unsigned char *)salted, 8 + pw_len, digest);
+
+    for (size_t i = 0; i < sizeof(digest); i++)
+        snprintf(out_hex + i * 2, 3, "%02x", (unsigned)digest[i]);
+    out_hex[RA_PASS_HASH_LEN] = '\0';
+}
 static void host_process_commands(host_client_t *c);
 
 /* ── Module state ─────────────────────────────────────────────────── */
@@ -449,6 +483,9 @@ static void host_service_clients(void)
         case CLIENT_STATE_WAIT_HEADER:
             host_handle_client_header(c);
             break;
+        case CLIENT_STATE_WAIT_PASSWORD:
+            host_handle_client_password(c);
+            break;
         case CLIENT_STATE_WAIT_NICK:
             host_handle_client_nick(c);
             break;
@@ -524,15 +561,46 @@ static bool host_handle_client_header(host_client_t *c)
     response[0] = htonl(RA_NETPLAY_MAGIC);
     response[1] = htonl(host_platform_magic());
     response[2] = htonl(0);                    /* No compression */
-    response[3] = htonl(0);                    /* No password */
     response[4] = htonl(c->protocol);          /* Negotiated version */
     response[5] = htonl(host_impl_magic());
+
+    /* Password: generate random salt if host password is configured */
+    if (gpsp_netplay_host_password[0] != '\0') {
+        uint32_t salt = esp_random();
+        if (salt == 0) salt = 1;  /* ensure non-zero */
+        c->password_salt = salt;
+        response[3] = htonl(salt);
+    } else {
+        c->password_salt = 0;
+        response[3] = htonl(0);
+    }
 
     if (!client_send_all(c, response, sizeof(response))) {
         host_disconnect_client(c);
         return false;
     }
 
+    c->state = (c->password_salt != 0) ? CLIENT_STATE_WAIT_PASSWORD
+                                        : CLIENT_STATE_WAIT_NICK;
+    return true;
+}
+
+static bool host_handle_client_password(host_client_t *c)
+{
+    char recv_hash[RA_PASS_HASH_LEN];
+    if (!client_try_read(c, recv_hash, sizeof(recv_hash))) return false;
+
+    /* RetroArch format: SHA256("%08X" + password) as 64-byte lowercase hex */
+    char expected[RA_PASS_HASH_LEN + 1];
+    ra_password_hash_hex(c->password_salt, gpsp_netplay_host_password, expected);
+
+    if (memcmp(recv_hash, expected, RA_PASS_HASH_LEN) != 0) {
+        ESP_LOGE(TAG, "Client %u: password mismatch", c->assigned_id);
+        host_disconnect_client(c);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Client %u: password OK", c->assigned_id);
     c->state = CLIENT_STATE_WAIT_NICK;
     return true;
 }
