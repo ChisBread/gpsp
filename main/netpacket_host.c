@@ -40,6 +40,7 @@
 #define RA_MAX_INPUT_DEVICES         16
 
 #define RA_CMD_NICK                  0x0020u
+#define RA_CMD_PASSWORD              0x0021u
 #define RA_CMD_INFO                  0x0022u
 #define RA_CMD_SYNC                  0x0023u
 #define RA_CMD_PLAY                  0x0025u
@@ -88,6 +89,7 @@ typedef struct {
 static bool host_handle_client_header(host_client_t *c);
 static bool host_handle_client_password(host_client_t *c);
 static bool host_handle_client_nick(host_client_t *c);
+static bool host_send_info(host_client_t *c);
 static bool host_handle_client_info(host_client_t *c);
 static bool host_handle_play(host_client_t *c);
 
@@ -580,14 +582,25 @@ static bool host_handle_client_header(host_client_t *c)
         return false;
     }
 
-    c->state = (c->password_salt != 0) ? CLIENT_STATE_WAIT_PASSWORD
-                                        : CLIENT_STATE_WAIT_NICK;
+    /* RetroArch handshake order is: HEADER -> NICK -> (optional PASSWORD) -> INFO */
+    c->state = CLIENT_STATE_WAIT_NICK;
     return true;
 }
 
 static bool host_handle_client_password(host_client_t *c)
 {
+    uint32_t cmd[2];
     char recv_hash[RA_PASS_HASH_LEN];
+
+    if (!client_try_read(c, cmd, sizeof(cmd))) return false;
+
+    if (ntohl(cmd[0]) != RA_CMD_PASSWORD || ntohl(cmd[1]) != RA_PASS_HASH_LEN) {
+        ESP_LOGE(TAG, "Client %u: expected PASSWORD, got 0x%04x size=%u",
+                 c->assigned_id, ntohl(cmd[0]), (unsigned)ntohl(cmd[1]));
+        host_disconnect_client(c);
+        return false;
+    }
+
     if (!client_try_read(c, recv_hash, sizeof(recv_hash))) return false;
 
     /* RetroArch format: SHA256("%08X" + password) as 64-byte lowercase hex */
@@ -601,8 +614,7 @@ static bool host_handle_client_password(host_client_t *c)
     }
 
     ESP_LOGI(TAG, "Client %u: password OK", c->assigned_id);
-    c->state = CLIENT_STATE_WAIT_NICK;
-    return true;
+    return host_send_info(c);
 }
 
 static bool host_handle_client_nick(host_client_t *c)
@@ -639,7 +651,17 @@ static bool host_handle_client_nick(host_client_t *c)
         return false;
     }
 
-    /* Send INFO immediately after NICK (RA client expects this order) */
+    if (c->password_salt != 0) {
+        c->state = CLIENT_STATE_WAIT_PASSWORD;
+        return true;
+    }
+
+    return host_send_info(c);
+}
+
+static bool host_send_info(host_client_t *c)
+{
+    /* Send INFO after password phase (or immediately if no password required). */
     struct {
         uint32_t cmd[2];
         uint32_t content_crc;

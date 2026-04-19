@@ -46,6 +46,7 @@ extern void netpacket_host_send(uint16_t client_id, const void *buf, size_t len)
 
 /* Commands */
 #define RA_CMD_NICK                  0x0020u
+#define RA_CMD_PASSWORD              0x0021u
 #define RA_CMD_INFO                  0x0022u
 #define RA_CMD_SYNC                  0x0023u
 #define RA_CMD_SPECTATE              0x0024u
@@ -90,6 +91,7 @@ static netpacket_state_t np_state = STATE_DISCONNECTED;
 static int64_t np_last_connect_attempt_us;
 static int64_t np_last_ping_us;
 static uint32_t np_server_protocol;
+static uint32_t np_password_salt;
 
 /* Debug counters */
 static uint32_t np_tx_packets, np_tx_bytes;
@@ -252,6 +254,7 @@ static void np_disconnect(void)
     }
     np_state = STATE_DISCONNECTED;
     np_recv_len = 0;
+    np_password_salt = 0;
     netplay_num_clients = 0;
     netplay_client_id = 0;
 
@@ -508,6 +511,7 @@ static bool np_handle_server_header(void)
     }
 
     uint32_t salt = ntohl(header[3]);
+    np_password_salt = 0;
     if (salt != 0) {
         if (gpsp_netplay_client_password[0] == '\0') {
             ESP_LOGE(TAG, "Server requires password but none configured");
@@ -515,15 +519,7 @@ static bool np_handle_server_header(void)
             return false;
         }
 
-        /* RetroArch format: SHA256("%08X" + password), sent as 64-byte hex */
-        char hash[RA_PASS_HASH_LEN + 1];
-        ra_password_hash_hex(salt, gpsp_netplay_client_password, hash);
-
-        if (!np_send_all(hash, RA_PASS_HASH_LEN)) {
-            np_disconnect();
-            return false;
-        }
-        ESP_LOGI(TAG, "Password hash sent");
+        np_password_salt = salt;
     }
 
     ESP_LOGI(TAG, "Server protocol version: %u", (unsigned)np_server_protocol);
@@ -548,6 +544,24 @@ static bool np_send_nick(void)
 
     if (!np_send_all(cmd, sizeof(cmd)) || !np_send_all(nick, sizeof(nick))) {
         return false;
+    }
+
+    if (np_password_salt != 0) {
+        /* RetroArch order: send NICK first, then NETPLAY_CMD_PASSWORD. */
+        uint32_t pass_cmd[2];
+        char hash[RA_PASS_HASH_LEN + 1];
+
+        ra_password_hash_hex(np_password_salt, gpsp_netplay_client_password, hash);
+
+        pass_cmd[0] = htonl(RA_CMD_PASSWORD);
+        pass_cmd[1] = htonl(RA_PASS_HASH_LEN);
+
+        if (!np_send_all(pass_cmd, sizeof(pass_cmd)) ||
+            !np_send_all(hash, RA_PASS_HASH_LEN)) {
+            np_disconnect();
+            return false;
+        }
+        ESP_LOGI(TAG, "Password hash sent");
     }
 
     np_state = STATE_WAIT_SERVER_NICK;
