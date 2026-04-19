@@ -165,6 +165,12 @@ static GPSP_EXTRAM_BSS host_client_t host_clients[HOST_MAX_CLIENTS];
 
 static void host_io_task(void *param);
 
+void netpacket_host_notify_io_task(void)
+{
+    if (host_io_task_handle)
+        xTaskNotifyGive(host_io_task_handle);
+}
+
 static bool host_pending_accept_push(int fd)
 {
     if (host_pending_accept_count >= HOST_PENDING_ACCEPT_MAX)
@@ -1170,6 +1176,12 @@ static void host_io_task(void *param)
     for (;;) {
         bool did_work = false;
 
+        if (gpsp_netplay_ra_mode != NETPLAY_MODE_HOST &&
+            gpsp_netplay_ra_mode != NETPLAY_MODE_TUNNEL_HOST) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+
         if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST && host_listen_fd >= 0) {
             struct sockaddr_in client_addr;
             socklen_t addr_len = sizeof(client_addr);
@@ -1222,7 +1234,7 @@ static void host_io_task(void *param)
         }
 
         if (!did_work)
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
         else
             taskYIELD();
     }

@@ -43,6 +43,7 @@ extern void netpacket_host_send(uint16_t client_id, const void *buf, size_t len)
 extern size_t netpacket_host_flush_queued(void);
 extern bool netpacket_host_has_pending_io(void);
 extern esp_err_t netpacket_host_background_start(BaseType_t core_id, UBaseType_t priority);
+extern void netpacket_host_notify_io_task(void);
 extern esp_err_t netpacket_tunnel_host_background_start(BaseType_t core_id, UBaseType_t priority);
 
 /* ── RetroArch Netplay protocol constants ─────────────────────────── */
@@ -148,11 +149,21 @@ static TaskHandle_t np_flush_task_handle = NULL;
 
 static void np_flush_task(void *param);
 static void np_shadow_recv_task(void *param);
+void netpacket_notify_flush_task(void);
 static bool np_ensure_send_queue(void);
 static void np_free_send_queue(void);
 static bool np_queue_packet_wait(const void *part1, size_t part1_len,
                                  const void *part2, size_t part2_len);
 static bool np_queue_control_packet(const void *data, size_t len);
+
+static void np_notify_background_tasks(void)
+{
+    netpacket_notify_flush_task();
+    if (np_recv_task_handle)
+        xTaskNotifyGive(np_recv_task_handle);
+    netpacket_host_notify_io_task();
+    netpacket_tunnel_host_notify_io_task();
+}
 
 static bool np_mode_is_client(int mode)
 {
@@ -443,6 +454,11 @@ static void np_flush_task(void *param)
     for (;;) {
         bool did_work = false;
 
+        if (gpsp_netplay_ra_mode == NETPLAY_MODE_DISABLED) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+
         if (c6_remote_network_ready()) {
             did_work = (np_flush_pending() != 0);
             if (netpacket_host_flush_queued() != 0)
@@ -527,6 +543,11 @@ static void np_shadow_recv_task(void *param)
     uint8_t tmp[512];
 
     for (;;) {
+        if (gpsp_netplay_ra_mode == NETPLAY_MODE_DISABLED) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+
         /* Wait for notification (from connect/disconnect) or 1ms timeout */
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
 
@@ -1213,6 +1234,13 @@ void netpacket_poll_receive(void)
     int64_t now_us;
 
     np_client_cfg_snapshot(&current_cfg);
+
+    if (gpsp_netplay_ra_mode == NETPLAY_MODE_DISABLED) {
+        return;
+    }
+
+    np_notify_background_tasks();
+
     if (!np_client_cfg_valid) {
         np_client_cfg_applied = current_cfg;
         np_client_cfg_valid = true;

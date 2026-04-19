@@ -18,6 +18,7 @@ const char *netpacket_tunnel_host_status(void);
 bool netpacket_tunnel_host_room_ready(void);
 bool netpacket_tunnel_host_has_pending_io(void);
 esp_err_t netpacket_tunnel_host_background_start(BaseType_t core_id, UBaseType_t priority);
+void netpacket_tunnel_host_notify_io_task(void);
 
 #ifdef __cplusplus
 }

@@ -90,6 +90,12 @@ static TaskHandle_t tunnel_io_task_handle;
 
 static void tunnel_ctrl_io_task(void *param);
 
+void netpacket_tunnel_host_notify_io_task(void)
+{
+    if (tunnel_io_task_handle)
+        xTaskNotifyGive(tunnel_io_task_handle);
+}
+
 /* Forward declarations for helpers referenced before their definitions */
 static bool set_nonblocking_nodelay(int fd);
 static bool resolve_host_addr(const char *host, uint16_t port,
@@ -729,7 +735,12 @@ static void tunnel_ctrl_io_task(void *param)
     for (;;) {
         bool did_work = false;
 
-        if (gpsp_netplay_ra_mode == NETPLAY_MODE_TUNNEL_HOST && ctrl_fd >= 0) {
+        if (gpsp_netplay_ra_mode != NETPLAY_MODE_TUNNEL_HOST || ctrl_fd < 0) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+
+        {
             size_t space = 0;
             size_t want = 0;
             ssize_t n;
@@ -762,7 +773,7 @@ static void tunnel_ctrl_io_task(void *param)
         }
 
         if (!did_work)
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
         else
             taskYIELD();
     }
