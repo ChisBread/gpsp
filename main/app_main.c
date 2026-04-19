@@ -27,6 +27,8 @@
 #include "gba_memory.h"
 #include "sound.h"
 
+extern esp_err_t netpacket_background_start(BaseType_t core_id, UBaseType_t priority);
+
 /* ESP32-P4 platform drivers (JC4880) */
 #include "video_driver.h"
 #include "audio_driver.h"
@@ -306,6 +308,11 @@ void app_main(void)
     err = c6_remote_start_task(SERVICE_CORE, configMAX_PRIORITIES - 3);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "C6 remote task failed: %s", esp_err_to_name(err));
+        return;
+    }
+    err = netpacket_background_start(SERVICE_CORE, configMAX_PRIORITIES - 4);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Netpacket task failed: %s", esp_err_to_name(err));
         return;
     }
     if (gpsp_web_server_enabled)

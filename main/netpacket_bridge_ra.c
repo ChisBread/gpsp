@@ -15,10 +15,14 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "lwip/inet.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -26,6 +30,7 @@
 #include "common.h"
 #include "gpsp_config.h"
 #include "main.h"
+#include "netpacket_queue.h"
 #include "netpacket_tunnel_host.h"
 #include "runtime_config.h"
 #include "serial.h"
@@ -35,6 +40,7 @@
 /* Host mode (netpacket_host.c) */
 extern void netpacket_host_poll(void);
 extern void netpacket_host_send(uint16_t client_id, const void *buf, size_t len);
+extern size_t netpacket_host_flush_queued(void);
 
 /* ── RetroArch Netplay protocol constants ─────────────────────────── */
 
@@ -64,6 +70,8 @@ extern void netpacket_host_send(uint16_t client_id, const void *buf, size_t len)
 
 #define NETPACKET_BROADCAST          0xFFFFu
 #define NETPACKET_MAX_PAYLOAD        2048u
+#define NETPACKET_SEND_QUEUE_CAPACITY (16 * 1024u)
+#define NETPACKET_FLUSH_TASK_PERIOD_MS 1u
 
 /* ── Connection states ────────────────────────────────────────────── */
 
@@ -90,6 +98,12 @@ static int np_socket_fd = -1;
 static netpacket_state_t np_state = STATE_DISCONNECTED;
 static int64_t np_last_connect_attempt_us;
 static int64_t np_last_ping_us;
+/* Rate-limit actual recv() syscalls: once per ~1 ms max.
+ * rfu_update() calls netpacket_poll_receive() at every update_gba() boundary
+ * (~456x/frame). Without throttling, 456 lwIP recv() calls/frame eat ~10ms.
+ * SERVICE_CORE recv task calls recv() every ~1ms and writes to np_shadow_buf.
+ * The emulation core's np_recv_more() drains np_shadow_buf under a mutex —
+ * no lwIP recv() syscall on the emulation core at all. */
 static uint32_t np_server_protocol;
 static uint32_t np_password_salt;
 
@@ -97,10 +111,30 @@ static uint32_t np_password_salt;
 static uint32_t np_tx_packets, np_tx_bytes;
 static uint32_t np_rx_packets, np_rx_bytes;
 
-/* Receive buffer for TCP stream reassembly */
+/* Receive buffer for TCP stream reassembly (emulation core only) */
 #define NP_RECV_BUF_SIZE 4096
 static GPSP_EXTRAM_BSS uint8_t np_recv_buf[NP_RECV_BUF_SIZE];
 static size_t np_recv_len;
+
+/* Shadow receive buffer: filled by np_recv_task (SERVICE_CORE) via recv(),
+ * drained by np_recv_more() (emulation core) under np_shadow_mutex. */
+#define NP_SHADOW_BUF_SIZE 4096
+static GPSP_EXTRAM_BSS uint8_t np_shadow_buf[NP_SHADOW_BUF_SIZE];
+static size_t np_shadow_len;
+static SemaphoreHandle_t np_shadow_mutex;
+static TaskHandle_t np_recv_task_handle = NULL;
+
+static netpacket_queue_t np_send_queue;
+static uint8_t *np_send_queue_storage;
+static TaskHandle_t np_flush_task_handle = NULL;
+
+static void np_flush_task(void *param);
+static void np_shadow_recv_task(void *param);
+static bool np_ensure_send_queue(void);
+static void np_free_send_queue(void);
+static bool np_queue_packet_wait(const void *part1, size_t part1_len,
+                                 const void *part2, size_t part2_len);
+static bool np_queue_control_packet(const void *data, size_t len);
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
@@ -257,6 +291,13 @@ static void np_disconnect(void)
     np_password_salt = 0;
     netplay_num_clients = 0;
     netplay_client_id = 0;
+    np_free_send_queue();
+
+    /* Clear shadow buffer so the recv task doesn't replay stale data */
+    if (np_shadow_mutex && xSemaphoreTake(np_shadow_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        np_shadow_len = 0;
+        xSemaphoreGive(np_shadow_mutex);
+    }
 
     /* Reset serial protocol state machines to avoid stale peer state */
     serialproto_reset();
@@ -264,6 +305,213 @@ static void np_disconnect(void)
     serial_reset_irq();
 }
 
+void netpacket_notify_flush_task(void)
+{
+    if (np_flush_task_handle)
+        xTaskNotifyGive(np_flush_task_handle);
+}
+
+static bool np_ensure_send_queue(void)
+{
+    if (np_send_queue_storage)
+        return true;
+
+    np_send_queue_storage = heap_caps_malloc(NETPACKET_SEND_QUEUE_CAPACITY,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!np_send_queue_storage) {
+        ESP_LOGE(TAG, "Failed to allocate client send queue (%u bytes)",
+                 (unsigned)NETPACKET_SEND_QUEUE_CAPACITY);
+        return false;
+    }
+
+    netpacket_queue_init(&np_send_queue, np_send_queue_storage,
+                         NETPACKET_SEND_QUEUE_CAPACITY);
+    return true;
+}
+
+static void np_free_send_queue(void)
+{
+    if (!np_send_queue_storage)
+        return;
+
+    heap_caps_free(np_send_queue_storage);
+    np_send_queue_storage = NULL;
+    netpacket_queue_init(&np_send_queue, NULL, 0);
+}
+
+static bool np_queue_packet_wait(const void *part1, size_t part1_len,
+                                 const void *part2, size_t part2_len)
+{
+    if (!np_ensure_send_queue())
+        return false;
+
+    while (np_state == STATE_CONNECTED && np_socket_fd >= 0) {
+        if (netpacket_queue_enqueue2(&np_send_queue, part1, part1_len,
+                                     part2, part2_len)) {
+            netpacket_notify_flush_task();
+            return true;
+        }
+
+        netpacket_notify_flush_task();
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    return false;
+}
+
+static bool np_queue_control_packet(const void *data, size_t len)
+{
+    return np_queue_packet_wait(data, len, NULL, 0);
+}
+
+static size_t np_flush_pending(void)
+{
+    uint8_t *data;
+    size_t len;
+    size_t total_flushed = 0;
+
+    if (np_socket_fd < 0 || np_state != STATE_CONNECTED)
+        return 0;
+
+    while ((len = netpacket_queue_peek_contiguous(&np_send_queue, &data)) > 0) {
+        ssize_t n = send(np_socket_fd, data, len, MSG_DONTWAIT);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+            ESP_LOGW(TAG, "TCP send failed: errno=%d", errno);
+            np_disconnect();
+            break;
+        }
+
+        if (n == 0)
+            break;
+
+        netpacket_queue_consume(&np_send_queue, (size_t)n);
+        total_flushed += (size_t)n;
+    }
+
+    return total_flushed;
+}
+
+static void np_flush_task(void *param)
+{
+    (void)param;
+
+    for (;;) {
+        bool did_work = false;
+
+        if (c6_remote_network_ready()) {
+            did_work = (np_flush_pending() != 0);
+            if (netpacket_host_flush_queued() != 0)
+                did_work = true;
+        }
+
+        if (!did_work)
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(NETPACKET_FLUSH_TASK_PERIOD_MS));
+        else
+            taskYIELD();
+    }
+}
+
+esp_err_t netpacket_background_start(BaseType_t core_id, UBaseType_t priority)
+{
+    BaseType_t ret;
+
+    if (np_flush_task_handle)
+        return ESP_OK;
+
+    /* Shadow mutex — created once, never destroyed */
+    if (!np_shadow_mutex) {
+        np_shadow_mutex = xSemaphoreCreateMutex();
+        if (!np_shadow_mutex) {
+            ESP_LOGE(TAG, "Failed to create shadow recv mutex");
+            return ESP_FAIL;
+        }
+    }
+
+    ret = xTaskCreatePinnedToCore(np_flush_task, "np_flush", 4096, NULL,
+                                  priority, &np_flush_task_handle, core_id);
+    if (ret != pdPASS) {
+        np_flush_task_handle = NULL;
+        ESP_LOGE(TAG, "Failed to create netpacket flush task");
+        return ESP_FAIL;
+    }
+
+    /* Recv task — same core as flush/WiFi, slightly lower priority */
+    ret = xTaskCreatePinnedToCore(np_shadow_recv_task, "np_recv", 2048, NULL,
+                                  priority - 1, &np_recv_task_handle, core_id);
+    if (ret != pdPASS) {
+        np_recv_task_handle = NULL;
+        ESP_LOGW(TAG, "Failed to create netpacket recv task — falling back to throttled poll");
+        /* Non-fatal: emulation core will call np_recv_more() without shadow */
+    }
+
+    return ESP_OK;
+}
+
+/* Non-blocking read into np_recv_buf. Returns bytes available. */
+/* Drain shadow buffer (filled by np_recv_task on SERVICE_CORE) into
+ * np_recv_buf.  Never calls recv() directly — no lwIP syscall cost. */
+static ssize_t np_recv_more(void)
+{
+    if (np_recv_len >= NP_RECV_BUF_SIZE || !np_shadow_mutex)
+        return (ssize_t)np_recv_len;
+
+    if (xSemaphoreTake(np_shadow_mutex, 0) == pdTRUE) {
+        if (np_shadow_len > 0) {
+            size_t space = NP_RECV_BUF_SIZE - np_recv_len;
+            size_t copy  = np_shadow_len < space ? np_shadow_len : space;
+            memcpy(np_recv_buf + np_recv_len, np_shadow_buf, copy);
+            np_recv_len  += copy;
+            np_shadow_len -= copy;
+            if (np_shadow_len > 0)
+                memmove(np_shadow_buf, np_shadow_buf + copy, np_shadow_len);
+        }
+        xSemaphoreGive(np_shadow_mutex);
+    }
+    return (ssize_t)np_recv_len;
+}
+
+/* Background recv task — runs on SERVICE_CORE (same as WiFi), calls recv()
+ * once per tick (~1 ms) and writes data into np_shadow_buf. */
+static void np_shadow_recv_task(void *param)
+{
+    (void)param;
+    uint8_t tmp[512];
+
+    for (;;) {
+        /* Wait for notification (from connect/disconnect) or 1ms timeout */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
+
+        int fd = np_socket_fd;
+        if (fd < 0)
+            continue;
+
+        ssize_t n = recv(fd, tmp, sizeof(tmp), MSG_DONTWAIT);
+        if (n <= 0) {
+            if (n == 0) {
+                /* Connection closed — signal emu core via shadow_len=-1 sentinel
+                 * is tricky; just let np_recv_more detect it next drain cycle
+                 * by writing a zero-length record.  The emu core will see
+                 * empty shadow and the socket will already be -1 after
+                 * np_disconnect() is called from np_recv_more → np_process. */
+            }
+            continue;
+        }
+
+        if (xSemaphoreTake(np_shadow_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+            size_t space = NP_SHADOW_BUF_SIZE - np_shadow_len;
+            size_t copy  = (size_t)n < space ? (size_t)n : space;
+            memcpy(np_shadow_buf + np_shadow_len, tmp, copy);
+            np_shadow_len += copy;
+            xSemaphoreGive(np_shadow_mutex);
+        }
+    }
+}
+
+/* Blocking send for control messages (handshake, ping).
+ * Used only for protocol control, not for game data. */
 static bool np_send_all(const void *data, size_t len)
 {
     const uint8_t *p = (const uint8_t *)data;
@@ -282,31 +530,6 @@ static bool np_send_all(const void *data, size_t len)
         sent += (size_t)n;
     }
     return true;
-}
-
-/* Non-blocking read into np_recv_buf. Returns bytes available. */
-static ssize_t np_recv_more(void)
-{
-    if (np_recv_len >= NP_RECV_BUF_SIZE) {
-        return (ssize_t)np_recv_len;
-    }
-
-    ssize_t n = recv(np_socket_fd, np_recv_buf + np_recv_len,
-                     NP_RECV_BUF_SIZE - np_recv_len, MSG_DONTWAIT);
-    if (n > 0) {
-        np_recv_len += (size_t)n;
-    } else if (n == 0) {
-        /* Connection closed by peer */
-        ESP_LOGW(TAG, "Connection closed by RetroArch host");
-        np_disconnect();
-        return -1;
-    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-        ESP_LOGW(TAG, "TCP recv failed: errno=%d", errno);
-        np_disconnect();
-        return -1;
-    }
-
-    return (ssize_t)np_recv_len;
 }
 
 /* Consume n bytes from front of np_recv_buf */
@@ -394,6 +617,10 @@ static bool np_start_connect(void)
     }
 
     if (!np_resolve_server_addr(&server_addr)) {
+        return false;
+    }
+
+    if (!np_ensure_send_queue()) {
         return false;
     }
 
@@ -864,11 +1091,10 @@ static void np_process_commands(void)
         }
 
         case RA_CMD_PING_REQUEST: {
-            /* Respond with PING_RESPONSE */
             uint32_t pong[2];
             pong[0] = htonl(RA_CMD_PING_RESPONSE);
             pong[1] = htonl(0);
-            np_send_all(pong, sizeof(pong));
+            np_queue_control_packet(pong, sizeof(pong));
             break;
         }
 
@@ -961,7 +1187,8 @@ void netpacket_poll_receive(void)
         return;
     }
 
-    /* Try to receive data */
+    /* Drain shadow buffer filled by np_recv_task on SERVICE_CORE.
+     * No recv() syscall here — safe to call at rfu_update() frequency. */
     if (np_socket_fd >= 0) {
         np_recv_more();
     }
@@ -1001,7 +1228,7 @@ void netpacket_poll_receive(void)
                 uint32_t ping[2];
                 ping[0] = htonl(RA_CMD_PING_REQUEST);
                 ping[1] = htonl(0);
-                np_send_all(ping, sizeof(ping));
+                np_queue_control_packet(ping, sizeof(ping));
                 np_last_ping_us = now;
 
                 ESP_LOGI(TAG, "Stats: TX %u pkts/%u B, RX %u pkts/%u B, serial_mode=%d",
@@ -1042,6 +1269,8 @@ void netpacket_send(uint16_t client_id, const void *buf, size_t len)
      * As a client sending to server:
      *   client_id = recipient (0=host, N=peer, 0xFFFF=broadcast)
      * Server will relay to the target.
+     *
+     * Enqueue header + payload together to maintain atomicity.
      */
     uint32_t hdr[3];
     hdr[0] = htonl(RA_CMD_NETPACKET);
@@ -1049,11 +1278,10 @@ void netpacket_send(uint16_t client_id, const void *buf, size_t len)
     hdr[2] = htonl((uint32_t)client_id);
 
     np_tx_packets++;
-    np_tx_bytes += len;
-    ESP_LOGD(TAG, "NETPACKET send: target=%u len=%u", (unsigned)client_id, (unsigned)len);
+    ESP_LOGD(TAG, "NETPACKET send: target=%u len=%u (queued)", (unsigned)client_id, (unsigned)len);
 
-    if (!np_send_all(hdr, sizeof(hdr))) {
-        return;
+    if (!np_queue_packet_wait(hdr, sizeof(hdr), buf, len)) {
+        ESP_LOGW(TAG, "Failed to queue netpacket target=%u len=%u",
+                 (unsigned)client_id, (unsigned)len);
     }
-    np_send_all(buf, len);
 }

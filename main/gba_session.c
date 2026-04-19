@@ -96,6 +96,9 @@ typedef struct {
     frame_stat_window_t render_us;
     frame_stat_window_t submit_us;
     frame_stat_window_t acquire_us;
+    frame_stat_window_t rfu_frame_us;
+    frame_stat_window_t poke_frame_us;
+    frame_stat_window_t netpoll_post_us;
 } gba_session_perf_stats_t;
 
 #ifdef CPU_PROFILE_STATS
@@ -271,12 +274,18 @@ static void gba_session_perf_reset(void)
 static void gba_session_perf_push_single_core(int64_t cpu_us,
                                               int64_t render_us,
                                               int64_t submit_us,
-                                              int64_t acquire_us)
+                                              int64_t acquire_us,
+                                              int64_t rfu_frame_us,
+                                              int64_t poke_frame_us,
+                                              int64_t netpoll_post_us)
 {
     frame_stat_window_push(&s_perf_stats.cpu_us, cpu_us);
     frame_stat_window_push(&s_perf_stats.render_us, render_us);
     frame_stat_window_push(&s_perf_stats.submit_us, submit_us);
     frame_stat_window_push(&s_perf_stats.acquire_us, acquire_us);
+    frame_stat_window_push(&s_perf_stats.rfu_frame_us, rfu_frame_us);
+    frame_stat_window_push(&s_perf_stats.poke_frame_us, poke_frame_us);
+    frame_stat_window_push(&s_perf_stats.netpoll_post_us, netpoll_post_us);
 }
 
 static void gba_session_perf_log_single_core(void)
@@ -1226,6 +1235,10 @@ void gba_emulation_task(void *param)
     while (1) {
         s_frame_start_us = esp_timer_get_time();
         int64_t t0, t1, t_acq0, t_acq1;
+        int64_t t_hk0;
+        int64_t rfu_frame_us = 0;
+        int64_t poke_frame_us = 0;
+        int64_t netpoll_post_us = 0;
 
         if (s_session.control_queue &&
             uxQueueMessagesWaiting(s_session.control_queue) > 0) {
@@ -1361,6 +1374,8 @@ void gba_emulation_task(void *param)
             execute_arm(execute_cycles);
         }
 
+    t1 = esp_timer_get_time();
+
         /* ── Per-frame serial / netplay housekeeping ──
          * Mirrors what libretro's retro_run() does after execute_arm.
          * rfu_frame_update  : peer broadcast TTL, host re-announce, client timeouts
@@ -1373,10 +1388,14 @@ void gba_emulation_task(void *param)
             extern void netpacket_poll_receive(void);
             switch (serial_mode) {
             case SERIAL_MODE_RFU:
+                t_hk0 = esp_timer_get_time();
                 rfu_frame_update();
+                rfu_frame_us = esp_timer_get_time() - t_hk0;
                 break;
             case SERIAL_MODE_SERIAL_POKE:
+                t_hk0 = esp_timer_get_time();
                 serialpoke_frame_update();
+                poke_frame_us = esp_timer_get_time() - t_hk0;
                 break;
             default:
                 break;
@@ -1384,11 +1403,11 @@ void gba_emulation_task(void *param)
             /* Always tick netplay connection management regardless of serial_mode,
              * so listen/connect/handshake can proceed before the game activates RFU. */
             if (gpsp_netplay_ra_mode != NETPLAY_MODE_DISABLED) {
+                t_hk0 = esp_timer_get_time();
                 netpacket_poll_receive();
+                netpoll_post_us = esp_timer_get_time() - t_hk0;
             }
         }
-
-        t1 = esp_timer_get_time();
 
         {
             int64_t t_sub;
@@ -1422,7 +1441,10 @@ void gba_emulation_task(void *param)
                 gba_session_perf_push_single_core(t1 - t0,
                                                   render_frame_us,
                                                   submit_frame_us,
-                                                  t_acq1 - t_acq0);
+                                                  t_acq1 - t_acq0,
+                                                  rfu_frame_us,
+                                                  poke_frame_us,
+                                                  netpoll_post_us);
             }
 
             s_fps_counter++;
@@ -1508,6 +1530,9 @@ int gba_session_stats_json(char *buf, size_t buf_size)
     p += json_stat(p, end, "cpu",     &s_perf_stats.cpu_us);
     p += json_stat(p, end, "render",  &s_perf_stats.render_us);
     p += json_stat(p, end, "acquire", &s_perf_stats.acquire_us);
+    p += json_stat(p, end, "rfu_frame", &s_perf_stats.rfu_frame_us);
+    p += json_stat(p, end, "poke_frame", &s_perf_stats.poke_frame_us);
+    p += json_stat(p, end, "np_post", &s_perf_stats.netpoll_post_us);
 
 #ifdef CPU_PROFILE_STATS
     if (s_prof_snap.frames > 0 && s_prof_snap.total > 0) {

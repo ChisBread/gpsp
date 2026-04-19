@@ -16,9 +16,13 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -26,6 +30,7 @@
 #include "common.h"
 #include "gpsp_config.h"
 #include "main.h"
+#include "netpacket_queue.h"
 #include "runtime_config.h"
 #include "serial.h"
 
@@ -54,6 +59,7 @@
 
 #define NETPACKET_BROADCAST          0xFFFFu
 #define NETPACKET_MAX_PAYLOAD        2048u
+#define NETPACKET_SEND_QUEUE_CAPACITY (16 * 1024u)
 
 /* ── Per-client states ────────────────────────────────────────────── */
 
@@ -83,7 +89,11 @@ typedef struct {
     uint32_t       tx_packets, tx_bytes;
     uint32_t       rx_packets, rx_bytes;
     uint8_t        recv_buf[HOST_RECV_BUF_SIZE];
+    netpacket_queue_t send_queue;
+    uint8_t        *send_queue_storage;
 } host_client_t;
+
+extern void netpacket_notify_flush_task(void);
 
 /* Forward declarations for handlers used by host_service_clients() */
 static bool host_handle_client_header(host_client_t *c);
@@ -92,6 +102,12 @@ static bool host_handle_client_nick(host_client_t *c);
 static bool host_send_info(host_client_t *c);
 static bool host_handle_client_info(host_client_t *c);
 static bool host_handle_play(host_client_t *c);
+static bool host_client_alloc_queue(host_client_t *c);
+static void host_client_free_queue(host_client_t *c);
+static bool host_client_queue_packet_wait(host_client_t *c,
+                                          const void *part1, size_t part1_len,
+                                          const void *part2, size_t part2_len);
+static size_t host_client_flush(host_client_t *c);
 
 static void ra_password_hash_hex(uint32_t salt, const char *password,
                                  char out_hex[RA_PASS_HASH_LEN + 1])
@@ -214,6 +230,10 @@ static host_client_t *host_alloc_client_slot(uint32_t *assigned_id)
     memset(c, 0, sizeof(*c));
     c->fd = -1;
     c->assigned_id = id;
+    netpacket_queue_init(&c->send_queue, NULL, 0);
+
+    if (!host_client_alloc_queue(c))
+        return NULL;
 
     if (assigned_id)
         *assigned_id = id;
@@ -233,6 +253,88 @@ static bool host_prepare_client_socket(int fd)
 }
 
 /* ── Per-client TCP helpers ───────────────────────────────────────── */
+
+static bool host_client_alloc_queue(host_client_t *c)
+{
+    if (!c)
+        return false;
+
+    if (c->send_queue_storage)
+        return true;
+
+    c->send_queue_storage = heap_caps_malloc(NETPACKET_SEND_QUEUE_CAPACITY,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!c->send_queue_storage) {
+        ESP_LOGE(TAG, "Client %u: failed to allocate send queue (%u bytes)",
+                 c->assigned_id, (unsigned)NETPACKET_SEND_QUEUE_CAPACITY);
+        return false;
+    }
+
+    netpacket_queue_init(&c->send_queue, c->send_queue_storage,
+                         NETPACKET_SEND_QUEUE_CAPACITY);
+    return true;
+}
+
+static void host_client_free_queue(host_client_t *c)
+{
+    if (!c || !c->send_queue_storage)
+        return;
+
+    heap_caps_free(c->send_queue_storage);
+    c->send_queue_storage = NULL;
+    netpacket_queue_init(&c->send_queue, NULL, 0);
+}
+
+static bool host_client_queue_packet_wait(host_client_t *c,
+                                          const void *part1, size_t part1_len,
+                                          const void *part2, size_t part2_len)
+{
+    if (!host_client_alloc_queue(c))
+        return false;
+
+    while (c->fd >= 0 && c->state == CLIENT_STATE_CONNECTED) {
+        if (netpacket_queue_enqueue2(&c->send_queue, part1, part1_len,
+                                     part2, part2_len)) {
+            netpacket_notify_flush_task();
+            return true;
+        }
+
+        netpacket_notify_flush_task();
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    return false;
+}
+
+static size_t host_client_flush(host_client_t *c)
+{
+    uint8_t *data;
+    size_t len;
+    size_t total_flushed = 0;
+
+    if (!c || c->fd < 0 || c->state != CLIENT_STATE_CONNECTED)
+        return 0;
+
+    while ((len = netpacket_queue_peek_contiguous(&c->send_queue, &data)) > 0) {
+        ssize_t n = send(c->fd, data, len, MSG_DONTWAIT);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
+            ESP_LOGW(TAG, "Client %u: send failed errno=%d",
+                     c->assigned_id, errno);
+            break;
+        }
+
+        if (n == 0)
+            break;
+
+        netpacket_queue_consume(&c->send_queue, (size_t)n);
+        total_flushed += (size_t)n;
+    }
+
+    return total_flushed;
+}
 
 static bool client_send_all(host_client_t *c, const void *data, size_t len)
 {
@@ -306,6 +408,7 @@ static void host_disconnect_client(host_client_t *c)
     bool was_connected = (c->state == CLIENT_STATE_CONNECTED);
     c->state    = CLIENT_STATE_EMPTY;
     c->recv_len = 0;
+    host_client_free_queue(c);
 
     if (was_connected) {
         host_update_num_clients();
@@ -328,6 +431,7 @@ static void host_stop(void)
         }
         host_clients[i].state    = CLIENT_STATE_EMPTY;
         host_clients[i].recv_len = 0;
+        host_client_free_queue(&host_clients[i]);
     }
     if (host_listen_fd >= 0) {
         close(host_listen_fd);
@@ -503,6 +607,7 @@ static void host_service_clients(void)
         default:
             break;
         }
+
     }
 
     /* Periodic ping + stats (every 5 seconds) */
@@ -518,7 +623,7 @@ static void host_service_clients(void)
             host_client_t *c = &host_clients[i];
             if (c->state != CLIENT_STATE_CONNECTED) continue;
 
-            client_send_all(c, ping, sizeof(ping));
+            host_client_queue_packet_wait(c, ping, sizeof(ping), NULL, 0);
 
             if (c->tx_packets || c->rx_packets) {
                 ESP_LOGI(TAG, "Client %u: TX %u pkts/%u B, RX %u pkts/%u B",
@@ -876,7 +981,7 @@ static void host_process_commands(host_client_t *c)
             uint32_t pong[2];
             pong[0] = htonl(RA_CMD_PING_RESPONSE);
             pong[1] = htonl(0);
-            client_send_all(c, pong, sizeof(pong));
+            host_client_queue_packet_wait(c, pong, sizeof(pong), NULL, 0);
             break;
         }
 
@@ -927,6 +1032,20 @@ void netpacket_host_poll(void)
     host_service_clients();
 }
 
+size_t netpacket_host_flush_queued(void)
+{
+    size_t total_flushed = 0;
+
+    for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
+        host_client_t *c = &host_clients[i];
+        if (c->state != CLIENT_STATE_CONNECTED)
+            continue;
+        total_flushed += host_client_flush(c);
+    }
+
+    return total_flushed;
+}
+
 void netpacket_host_send(uint16_t client_id, const void *buf, size_t len)
 {
     if (!buf || len == 0) return;
@@ -945,24 +1064,20 @@ void netpacket_host_send(uint16_t client_id, const void *buf, size_t len)
     hdr[2] = htonl(0);  /* sender = host */
 
     if (client_id == NETPACKET_BROADCAST) {
-        /* Send to all connected clients */
         for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
             host_client_t *c = &host_clients[i];
             if (c->state != CLIENT_STATE_CONNECTED) continue;
 
             c->tx_packets++;
-            c->tx_bytes += len;
-            if (client_send_all(c, hdr, sizeof(hdr)))
-                client_send_all(c, buf, len);
+            if (!host_client_queue_packet_wait(c, hdr, sizeof(hdr), buf, len))
+                ESP_LOGW(TAG, "Failed to queue packet for client %u", c->assigned_id);
         }
     } else {
-        /* Unicast to specific client */
         host_client_t *c = host_find_by_id(client_id);
         if (!c || c->state != CLIENT_STATE_CONNECTED) return;
 
         c->tx_packets++;
-        c->tx_bytes += len;
-        if (client_send_all(c, hdr, sizeof(hdr)))
-            client_send_all(c, buf, len);
+        if (!host_client_queue_packet_wait(c, hdr, sizeof(hdr), buf, len))
+            ESP_LOGW(TAG, "Failed to queue packet for client %u", c->assigned_id);
     }
 }

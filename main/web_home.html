@@ -204,6 +204,7 @@ btn:hover{background:#3a4a6a}
   <div class="hdr">
     <div><span class="fps" id="fps">--</span> <span class="sub">FPS</span></div>
     <div class="sub"><span data-i18n="free_mem">空闲内存</span>: <span id="heap">--</span> KB | <span data-i18n="frame_sync">帧同步</span>: <span id="acq">--</span> us | <span data-i18n="audio_prod">音频产出(GBA侧)</span>: <span id="snd">--</span> us | <span data-i18n="audio_cons">音频消费(I2S)</span>: <span id="i2s_buf">--</span></div>
+    <div class="sub">HK RFU: <span id="rfu_frame">--</span> us | Poke: <span id="poke_frame">--</span> us | NP: <span id="np_post">--</span> us</div>
   </div>
   <div class="chart-wrap">
     <canvas id="chart"></canvas>
@@ -1113,6 +1114,12 @@ async function poll(){
       ? d.i2s_queued + '/' + d.i2s_total
       : '--';
     $('acq').textContent = d.acquire && d.acquire.avg != null ? d.acquire.avg : '--';
+    $('rfu_frame').textContent = d.rfu_frame && d.rfu_frame.avg != null
+      ? (d.rfu_frame.avg + ' (p99 ' + (d.rfu_frame.p99 ?? '--') + ')') : '--';
+    $('poke_frame').textContent = d.poke_frame && d.poke_frame.avg != null
+      ? (d.poke_frame.avg + ' (p99 ' + (d.poke_frame.p99 ?? '--') + ')') : '--';
+    $('np_post').textContent = d.np_post && d.np_post.avg != null
+      ? (d.np_post.avg + ' (p99 ' + (d.np_post.p99 ?? '--') + ')') : '--';
 
     /* Synthesize cpu_only = cpu - render */
     if (d.cpu && d.cpu.avg !== undefined) {
@@ -1359,12 +1366,13 @@ function updateNetplayUI(){
   /* Client password */
   $('row_np_client_pw').style.display = isClient ? '' : 'none';
 
-  /* Lobby: tunnel host only */
+  /* Lobby config: needed for tunnel host publish and tunnel client room lookup */
   $('row_np_use_lobby').style.display = (isHost && useTunnel) ? '' : 'none';
   var showLobby = isHost && useTunnel && useLobby;
-  $('row_np_lobby_host').style.display = showLobby ? '' : 'none';
-  $('row_np_lobby_port').style.display = showLobby ? '' : 'none';
-  $('row_np_lobby_relay').style.display = showLobby ? '' : 'none';
+  var showLobbyLookupCfg = isClient && useTunnel;
+  $('row_np_lobby_host').style.display = (showLobby || showLobbyLookupCfg) ? '' : 'none';
+  $('row_np_lobby_port').style.display = (showLobby || showLobbyLookupCfg) ? '' : 'none';
+  $('row_np_lobby_relay').style.display = (showLobby || showLobbyLookupCfg) ? '' : 'none';
   $('row_np_lobby_country').style.display = showLobby ? '' : 'none';
 
   /* Status: tunnel host */
