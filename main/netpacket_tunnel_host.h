@@ -16,6 +16,7 @@ const char *netpacket_tunnel_host_session_id(void);    /* tunnel session ID (24 
 const char *netpacket_tunnel_host_room_id(void);       /* numeric lobby room ID string */
 const char *netpacket_tunnel_host_status(void);
 bool netpacket_tunnel_host_room_ready(void);
+bool netpacket_tunnel_host_has_pending_io(void);
 esp_err_t netpacket_tunnel_host_background_start(BaseType_t core_id, UBaseType_t priority);
 
 #ifdef __cplusplus

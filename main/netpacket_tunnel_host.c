@@ -948,3 +948,23 @@ bool netpacket_tunnel_host_room_ready(void)
 {
     return ctrl_state == TUNNEL_CTRL_READY && ctrl_session_id[0] != '\0';
 }
+
+bool netpacket_tunnel_host_has_pending_io(void)
+{
+    bool pending = false;
+
+    /* Fallback path: without async IO task we cannot know pending status,
+     * so report busy to preserve previous synchronous behavior. */
+    if (!tunnel_io_task_handle)
+        return true;
+
+    if (!ctrl_shadow_mutex)
+        return false;
+
+    if (xSemaphoreTake(ctrl_shadow_mutex, 0) != pdTRUE)
+        return true;
+
+    pending = (ctrl_shadow_len > 0 || ctrl_shadow_closed);
+    xSemaphoreGive(ctrl_shadow_mutex);
+    return pending;
+}

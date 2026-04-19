@@ -1228,6 +1228,38 @@ static void host_io_task(void *param)
     }
 }
 
+bool netpacket_host_has_pending_io(void)
+{
+    bool pending = false;
+
+    /* Without async IO task, keep previous synchronous behavior. */
+    if (!host_io_task_handle)
+        return true;
+
+    if (!host_io_mutex)
+        return false;
+
+    if (xSemaphoreTake(host_io_mutex, 0) != pdTRUE)
+        return true;
+
+    if (host_pending_accept_count > 0) {
+        pending = true;
+    } else {
+        for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
+            host_client_t *c = &host_clients[i];
+            if (c->state == CLIENT_STATE_EMPTY)
+                continue;
+            if (c->shadow_len > 0 || c->shadow_closed) {
+                pending = true;
+                break;
+            }
+        }
+    }
+
+    xSemaphoreGive(host_io_mutex);
+    return pending;
+}
+
 size_t netpacket_host_flush_queued(void)
 {
     size_t total_flushed = 0;

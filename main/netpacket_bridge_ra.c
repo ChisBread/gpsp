@@ -41,6 +41,7 @@
 extern void netpacket_host_poll(void);
 extern void netpacket_host_send(uint16_t client_id, const void *buf, size_t len);
 extern size_t netpacket_host_flush_queued(void);
+extern bool netpacket_host_has_pending_io(void);
 extern esp_err_t netpacket_host_background_start(BaseType_t core_id, UBaseType_t priority);
 extern esp_err_t netpacket_tunnel_host_background_start(BaseType_t core_id, UBaseType_t priority);
 
@@ -100,6 +101,9 @@ static int np_socket_fd = -1;
 static netpacket_state_t np_state = STATE_DISCONNECTED;
 static int64_t np_last_connect_attempt_us;
 static int64_t np_last_ping_us;
+#define NP_HOST_POLL_BUSY_INTERVAL_US 1000
+#define NP_HOST_POLL_IDLE_INTERVAL_US 4000
+static int64_t np_last_host_poll_us;
 /* Rate-limit actual recv() syscalls: once per ~1 ms max.
  * rfu_update() calls netpacket_poll_receive() at every update_gba() boundary
  * (~456x/frame). Without throttling, 456 lwIP recv() calls/frame eat ~10ms.
@@ -1202,6 +1206,11 @@ static void np_process_commands(void)
 void netpacket_poll_receive(void)
 {
     np_client_cfg_t current_cfg;
+    bool host_mode;
+    bool host_busy;
+    bool host_pending_io;
+    int64_t min_interval_us;
+    int64_t now_us;
 
     np_client_cfg_snapshot(&current_cfg);
     if (!np_client_cfg_valid) {
@@ -1215,19 +1224,52 @@ void netpacket_poll_receive(void)
         np_client_cfg_applied = current_cfg;
     }
 
-    netpacket_tunnel_host_poll();
+    host_mode = (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST ||
+                 gpsp_netplay_ra_mode == NETPLAY_MODE_TUNNEL_HOST);
 
-    /* Host mode management (also handles cleanup on mode change) */
-    netpacket_host_poll();
-    if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST ||
-        gpsp_netplay_ra_mode == NETPLAY_MODE_TUNNEL_HOST) {
-        /* Tear down any leftover client connection when switching to host */
+    if (host_mode) {
+        /* Tear down leftover client connection immediately when entering host mode. */
         if (np_state != STATE_DISCONNECTED) {
             ESP_LOGI(TAG, "Switching to host mode, disconnecting client");
             np_disconnect();
         }
+
+        /* Busy if we already have peers, or tunnel room/session is not ready yet. */
+        host_busy = (netplay_num_clients > 0);
+        if (gpsp_netplay_ra_mode == NETPLAY_MODE_TUNNEL_HOST &&
+            !netpacket_tunnel_host_room_ready()) {
+            host_busy = true;
+        }
+
+        host_pending_io = netpacket_host_has_pending_io() ||
+                          netpacket_tunnel_host_has_pending_io();
+
+        now_us = esp_timer_get_time();
+        if (host_pending_io) {
+            np_last_host_poll_us = now_us;
+            netpacket_tunnel_host_poll();
+            netpacket_host_poll();
+            return;
+        }
+
+        min_interval_us = host_busy
+                              ? NP_HOST_POLL_BUSY_INTERVAL_US
+                              : NP_HOST_POLL_IDLE_INTERVAL_US;
+
+        if (now_us - np_last_host_poll_us < min_interval_us) {
+            return;
+        }
+        np_last_host_poll_us = now_us;
+
+        netpacket_tunnel_host_poll();
+        netpacket_host_poll();
         return;
     }
+
+    netpacket_tunnel_host_poll();
+
+    /* Host mode management (also handles cleanup on mode change) */
+    netpacket_host_poll();
 
     /* Tear down client connection if netplay was disabled */
     if (!gpsp_netplay_ra_enabled && np_state != STATE_DISCONNECTED) {
