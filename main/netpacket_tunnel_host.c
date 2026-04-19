@@ -16,11 +16,16 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+
 #include "lwip/inet.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 
 #include "esp_log.h"
+#include "esp_err.h"
 #include "esp_timer.h"
 
 #include "c6_remote.h"
@@ -74,9 +79,16 @@ static char ctrl_session_id[TUNNEL_UNIQUE_SIZE * 2 + 1];
 static char ctrl_status[32] = "idle";
 static uint8_t ctrl_recv_buf[64];
 static size_t ctrl_recv_len;
+static uint8_t ctrl_shadow_buf[64];
+static size_t ctrl_shadow_len;
+static bool ctrl_shadow_closed;
 static char lobby_room_id[24];
 static pending_link_t pending_links[TUNNEL_MAX_PENDING];
 static int64_t lobby_last_post_us;
+static SemaphoreHandle_t ctrl_shadow_mutex;
+static TaskHandle_t tunnel_io_task_handle;
+
+static void tunnel_ctrl_io_task(void *param);
 
 /* Forward declarations for helpers referenced before their definitions */
 static bool set_nonblocking_nodelay(int fd);
@@ -625,6 +637,8 @@ static void drop_control(void)
     }
     ctrl_state = TUNNEL_CTRL_DISCONNECTED;
     ctrl_recv_len = 0;
+    ctrl_shadow_len = 0;
+    ctrl_shadow_closed = false;
     ctrl_session_id[0] = '\0';
     lobby_room_id[0] = '\0';
 }
@@ -632,6 +646,33 @@ static void drop_control(void)
 static bool recv_into_ctrl(void)
 {
     if (ctrl_fd < 0 || ctrl_recv_len >= sizeof(ctrl_recv_buf))
+        return false;
+
+    if (ctrl_shadow_mutex && xSemaphoreTake(ctrl_shadow_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+        if (ctrl_shadow_closed) {
+            ctrl_shadow_closed = false;
+            xSemaphoreGive(ctrl_shadow_mutex);
+            ESP_LOGW(TAG, "Tunnel control closed by relay");
+            drop_control();
+            set_status("closed");
+            return false;
+        }
+
+        if (ctrl_shadow_len > 0) {
+            size_t space = sizeof(ctrl_recv_buf) - ctrl_recv_len;
+            size_t copy = ctrl_shadow_len < space ? ctrl_shadow_len : space;
+            memcpy(ctrl_recv_buf + ctrl_recv_len, ctrl_shadow_buf, copy);
+            ctrl_recv_len += copy;
+            ctrl_shadow_len -= copy;
+            if (ctrl_shadow_len > 0)
+                memmove(ctrl_shadow_buf, ctrl_shadow_buf + copy, ctrl_shadow_len);
+            xSemaphoreGive(ctrl_shadow_mutex);
+            return true;
+        }
+        xSemaphoreGive(ctrl_shadow_mutex);
+    }
+
+    if (tunnel_io_task_handle)
         return false;
 
     ssize_t n = recv(ctrl_fd, ctrl_recv_buf + ctrl_recv_len,
@@ -654,6 +695,77 @@ static bool recv_into_ctrl(void)
         set_status("recv_fail");
     }
     return false;
+}
+
+esp_err_t netpacket_tunnel_host_background_start(BaseType_t core_id, UBaseType_t priority)
+{
+    BaseType_t ret;
+
+    if (tunnel_io_task_handle)
+        return ESP_OK;
+
+    if (!ctrl_shadow_mutex) {
+        ctrl_shadow_mutex = xSemaphoreCreateMutex();
+        if (!ctrl_shadow_mutex)
+            return ESP_FAIL;
+    }
+
+    ret = xTaskCreatePinnedToCore(tunnel_ctrl_io_task, "np_tunnel_io", 2048,
+                                  NULL, priority, &tunnel_io_task_handle, core_id);
+    if (ret != pdPASS) {
+        tunnel_io_task_handle = NULL;
+        ESP_LOGW(TAG, "Failed to create tunnel IO task; fallback to sync recv");
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+static void tunnel_ctrl_io_task(void *param)
+{
+    (void)param;
+    uint8_t tmp[32];
+
+    for (;;) {
+        bool did_work = false;
+
+        if (gpsp_netplay_ra_mode == NETPLAY_MODE_TUNNEL_HOST && ctrl_fd >= 0) {
+            size_t space = 0;
+            size_t want = 0;
+            ssize_t n;
+
+            if (ctrl_shadow_mutex && xSemaphoreTake(ctrl_shadow_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+                space = sizeof(ctrl_shadow_buf) - ctrl_shadow_len;
+                xSemaphoreGive(ctrl_shadow_mutex);
+            }
+
+            if (space == 0) {
+                n = -1;
+            } else {
+                want = space < sizeof(tmp) ? space : sizeof(tmp);
+                n = recv(ctrl_fd, tmp, want, MSG_DONTWAIT);
+            }
+
+            if (n > 0) {
+                if (ctrl_shadow_mutex && xSemaphoreTake(ctrl_shadow_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+                    memcpy(ctrl_shadow_buf + ctrl_shadow_len, tmp, (size_t)n);
+                    ctrl_shadow_len += (size_t)n;
+                    did_work = true;
+                    xSemaphoreGive(ctrl_shadow_mutex);
+                }
+            } else if (n == 0) {
+                if (ctrl_shadow_mutex && xSemaphoreTake(ctrl_shadow_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+                    ctrl_shadow_closed = true;
+                    xSemaphoreGive(ctrl_shadow_mutex);
+                }
+            }
+        }
+
+        if (!did_work)
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
+        else
+            taskYIELD();
+    }
 }
 
 static void ctrl_consume(size_t n)

@@ -17,6 +17,7 @@ tests/harness/frames_*/
 tests/harness/*.bin
 tests/harness/*.pcm
 tests/harness/*.wav
+tests/harness/*.log
 bios/game*.gba
 bios/gba_bios.bin
 *.mp4

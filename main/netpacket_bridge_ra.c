@@ -41,6 +41,8 @@
 extern void netpacket_host_poll(void);
 extern void netpacket_host_send(uint16_t client_id, const void *buf, size_t len);
 extern size_t netpacket_host_flush_queued(void);
+extern esp_err_t netpacket_host_background_start(BaseType_t core_id, UBaseType_t priority);
+extern esp_err_t netpacket_tunnel_host_background_start(BaseType_t core_id, UBaseType_t priority);
 
 /* ── RetroArch Netplay protocol constants ─────────────────────────── */
 
@@ -107,6 +109,18 @@ static int64_t np_last_ping_us;
 static uint32_t np_server_protocol;
 static uint32_t np_password_salt;
 
+typedef struct {
+    int mode;
+    uint16_t port;
+    char host[sizeof(gpsp_netplay_ra_host)];
+    char tunnel_id[sizeof(gpsp_netplay_ra_tunnel_id)];
+    char nick[sizeof(gpsp_netplay_ra_nick)];
+    char password[sizeof(gpsp_netplay_client_password)];
+} np_client_cfg_t;
+
+static np_client_cfg_t np_client_cfg_applied;
+static bool np_client_cfg_valid;
+
 /* Debug counters */
 static uint32_t np_tx_packets, np_tx_bytes;
 static uint32_t np_rx_packets, np_rx_bytes;
@@ -136,6 +150,30 @@ static bool np_queue_packet_wait(const void *part1, size_t part1_len,
                                  const void *part2, size_t part2_len);
 static bool np_queue_control_packet(const void *data, size_t len);
 
+static bool np_mode_is_client(int mode)
+{
+    return (mode == NETPLAY_MODE_CLIENT || mode == NETPLAY_MODE_TUNNEL_CLIENT);
+}
+
+static void np_client_cfg_snapshot(np_client_cfg_t *cfg)
+{
+    cfg->mode = gpsp_netplay_ra_mode;
+    cfg->port = gpsp_netplay_ra_port;
+    strlcpy(cfg->host, gpsp_netplay_ra_host, sizeof(cfg->host));
+    strlcpy(cfg->tunnel_id, gpsp_netplay_ra_tunnel_id, sizeof(cfg->tunnel_id));
+    strlcpy(cfg->nick, gpsp_netplay_ra_nick, sizeof(cfg->nick));
+    strlcpy(cfg->password, gpsp_netplay_client_password, sizeof(cfg->password));
+}
+
+static bool np_client_cfg_equals(const np_client_cfg_t *a, const np_client_cfg_t *b)
+{
+    return a->mode == b->mode &&
+           a->port == b->port &&
+           strcmp(a->host, b->host) == 0 &&
+           strcmp(a->tunnel_id, b->tunnel_id) == 0 &&
+           strcmp(a->nick, b->nick) == 0 &&
+           strcmp(a->password, b->password) == 0;
+}
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
 static uint32_t np_platform_magic(void)
@@ -446,6 +484,10 @@ esp_err_t netpacket_background_start(BaseType_t core_id, UBaseType_t priority)
         ESP_LOGW(TAG, "Failed to create netpacket recv task — falling back to throttled poll");
         /* Non-fatal: emulation core will call np_recv_more() without shadow */
     }
+
+    /* Host/tunnel host RX+accept offload tasks (best-effort). */
+    (void)netpacket_host_background_start(core_id, priority - 1);
+    (void)netpacket_tunnel_host_background_start(core_id, priority - 1);
 
     return ESP_OK;
 }
@@ -1159,6 +1201,20 @@ static void np_process_commands(void)
 
 void netpacket_poll_receive(void)
 {
+    np_client_cfg_t current_cfg;
+
+    np_client_cfg_snapshot(&current_cfg);
+    if (!np_client_cfg_valid) {
+        np_client_cfg_applied = current_cfg;
+        np_client_cfg_valid = true;
+    } else if (!np_client_cfg_equals(&np_client_cfg_applied, &current_cfg)) {
+        if (np_mode_is_client(np_client_cfg_applied.mode) && np_state != STATE_DISCONNECTED) {
+            ESP_LOGI(TAG, "Client netplay settings changed, reconnecting");
+            np_disconnect();
+        }
+        np_client_cfg_applied = current_cfg;
+    }
+
     netpacket_tunnel_host_poll();
 
     /* Host mode management (also handles cleanup on mode change) */

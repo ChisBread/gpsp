@@ -17,12 +17,14 @@
 #include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 
 #include "esp_heap_caps.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -77,6 +79,8 @@ typedef enum {
 
 #define HOST_MAX_CLIENTS   3   /* host + 3 = 4-player GBA max */
 #define HOST_RECV_BUF_SIZE 4096
+#define HOST_SHADOW_BUF_SIZE 2048
+#define HOST_PENDING_ACCEPT_MAX (HOST_MAX_CLIENTS + 1)
 
 typedef struct {
     int            fd;
@@ -88,6 +92,9 @@ typedef struct {
     size_t         recv_len;
     uint32_t       tx_packets, tx_bytes;
     uint32_t       rx_packets, rx_bytes;
+    size_t         shadow_len;
+    bool           shadow_closed;
+    uint8_t        shadow_buf[HOST_SHADOW_BUF_SIZE];
     uint8_t        recv_buf[HOST_RECV_BUF_SIZE];
     netpacket_queue_t send_queue;
     uint8_t        *send_queue_storage;
@@ -147,7 +154,39 @@ static const char *TAG = "gpsp_host";
 static int host_listen_fd = -1;
 static int64_t host_last_ping_us;
 
+static SemaphoreHandle_t host_io_mutex;
+static TaskHandle_t host_io_task_handle;
+static int host_pending_accept_fd[HOST_PENDING_ACCEPT_MAX];
+static uint8_t host_pending_accept_head;
+static uint8_t host_pending_accept_tail;
+static uint8_t host_pending_accept_count;
+
 static GPSP_EXTRAM_BSS host_client_t host_clients[HOST_MAX_CLIENTS];
+
+static void host_io_task(void *param);
+
+static bool host_pending_accept_push(int fd)
+{
+    if (host_pending_accept_count >= HOST_PENDING_ACCEPT_MAX)
+        return false;
+
+    host_pending_accept_fd[host_pending_accept_tail] = fd;
+    host_pending_accept_tail = (uint8_t)((host_pending_accept_tail + 1) % HOST_PENDING_ACCEPT_MAX);
+    host_pending_accept_count++;
+    return true;
+}
+
+static int host_pending_accept_pop(void)
+{
+    int fd;
+    if (host_pending_accept_count == 0)
+        return -1;
+
+    fd = host_pending_accept_fd[host_pending_accept_head];
+    host_pending_accept_head = (uint8_t)((host_pending_accept_head + 1) % HOST_PENDING_ACCEPT_MAX);
+    host_pending_accept_count--;
+    return fd;
+}
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
@@ -357,7 +396,29 @@ static bool client_send_all(host_client_t *c, const void *data, size_t len)
 
 static ssize_t client_recv_more(host_client_t *c)
 {
+    if (host_io_mutex && xSemaphoreTake(host_io_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+        if (c->shadow_closed) {
+            c->shadow_closed = false;
+            xSemaphoreGive(host_io_mutex);
+            return -1;
+        }
+
+        if (c->shadow_len > 0 && c->recv_len < HOST_RECV_BUF_SIZE) {
+            size_t space = HOST_RECV_BUF_SIZE - c->recv_len;
+            size_t copy = c->shadow_len < space ? c->shadow_len : space;
+            memcpy(c->recv_buf + c->recv_len, c->shadow_buf, copy);
+            c->recv_len += copy;
+            c->shadow_len -= copy;
+            if (c->shadow_len > 0)
+                memmove(c->shadow_buf, c->shadow_buf + copy, c->shadow_len);
+        }
+        xSemaphoreGive(host_io_mutex);
+    }
+
     if (c->recv_len >= HOST_RECV_BUF_SIZE)
+        return (ssize_t)c->recv_len;
+
+    if (host_io_task_handle)
         return (ssize_t)c->recv_len;
 
     ssize_t n = recv(c->fd, c->recv_buf + c->recv_len,
@@ -408,6 +469,8 @@ static void host_disconnect_client(host_client_t *c)
     bool was_connected = (c->state == CLIENT_STATE_CONNECTED);
     c->state    = CLIENT_STATE_EMPTY;
     c->recv_len = 0;
+    c->shadow_len = 0;
+    c->shadow_closed = false;
     host_client_free_queue(c);
 
     if (was_connected) {
@@ -431,6 +494,8 @@ static void host_stop(void)
         }
         host_clients[i].state    = CLIENT_STATE_EMPTY;
         host_clients[i].recv_len = 0;
+        host_clients[i].shadow_len = 0;
+        host_clients[i].shadow_closed = false;
         host_client_free_queue(&host_clients[i]);
     }
     if (host_listen_fd >= 0) {
@@ -439,6 +504,12 @@ static void host_stop(void)
     }
     netplay_num_clients = 0;
     netplay_client_id   = 0;
+    if (host_io_mutex && xSemaphoreTake(host_io_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        host_pending_accept_count = 0;
+        host_pending_accept_head = 0;
+        host_pending_accept_tail = 0;
+        xSemaphoreGive(host_io_mutex);
+    }
 
     serialproto_reset();
     rfu_reset();
@@ -543,6 +614,37 @@ static void host_check_accept(void)
     inet_ntoa_r(client_addr.sin_addr, addr_str, sizeof(addr_str));
     ESP_LOGI(TAG, "Client %u connected from %s:%u",
              id, addr_str, ntohs(client_addr.sin_port));
+}
+
+static void host_drain_pending_accept(void)
+{
+    for (;;) {
+        int fd = -1;
+        uint32_t id = 0;
+        host_client_t *c;
+
+        if (host_io_mutex && xSemaphoreTake(host_io_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+            fd = host_pending_accept_pop();
+            xSemaphoreGive(host_io_mutex);
+        }
+
+        if (fd < 0)
+            break;
+
+        c = host_alloc_client_slot(&id);
+        if (!c) {
+            ESP_LOGW(TAG, "No free client slots, rejecting connection");
+            close(fd);
+            continue;
+        }
+
+        host_prepare_client_socket(fd);
+        c->fd          = fd;
+        c->state       = CLIENT_STATE_WAIT_HEADER;
+        c->assigned_id = id;
+
+        ESP_LOGI(TAG, "Client %u connected", id);
+    }
 }
 
 bool netpacket_host_attach_client(int fd, const char *peer_desc)
@@ -1022,14 +1124,108 @@ void netpacket_host_poll(void)
             return;
         }
 
-        /* Accept new connections */
-        host_check_accept();
+        if (!host_io_task_handle) {
+            /* Accept new connections (fallback path without background IO) */
+            host_check_accept();
+        } else {
+            host_drain_pending_accept();
+        }
     } else if (host_listen_fd >= 0) {
         close(host_listen_fd);
         host_listen_fd = -1;
     }
 
     host_service_clients();
+}
+
+esp_err_t netpacket_host_background_start(BaseType_t core_id, UBaseType_t priority)
+{
+    BaseType_t ret;
+
+    if (host_io_task_handle)
+        return ESP_OK;
+
+    if (!host_io_mutex) {
+        host_io_mutex = xSemaphoreCreateMutex();
+        if (!host_io_mutex)
+            return ESP_FAIL;
+    }
+
+    ret = xTaskCreatePinnedToCore(host_io_task, "np_host_io", 2048, NULL,
+                                  priority, &host_io_task_handle, core_id);
+    if (ret != pdPASS) {
+        host_io_task_handle = NULL;
+        ESP_LOGW(TAG, "Failed to create host IO task; fallback to sync host poll");
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+static void host_io_task(void *param)
+{
+    (void)param;
+    uint8_t tmp[256];
+
+    for (;;) {
+        bool did_work = false;
+
+        if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST && host_listen_fd >= 0) {
+            struct sockaddr_in client_addr;
+            socklen_t addr_len = sizeof(client_addr);
+            int fd = accept(host_listen_fd, (struct sockaddr *)&client_addr, &addr_len);
+            if (fd >= 0) {
+                if (host_io_mutex && xSemaphoreTake(host_io_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+                    if (!host_pending_accept_push(fd)) {
+                        close(fd);
+                    } else {
+                        did_work = true;
+                    }
+                    xSemaphoreGive(host_io_mutex);
+                } else {
+                    close(fd);
+                }
+            }
+        }
+
+        for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
+            host_client_t *c = &host_clients[i];
+            size_t space = 0;
+            size_t want = 0;
+            if (c->state == CLIENT_STATE_EMPTY || c->fd < 0)
+                continue;
+
+            if (host_io_mutex && xSemaphoreTake(host_io_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+                space = HOST_SHADOW_BUF_SIZE - c->shadow_len;
+                xSemaphoreGive(host_io_mutex);
+            }
+
+            if (space == 0)
+                continue;
+
+            want = space < sizeof(tmp) ? space : sizeof(tmp);
+            ssize_t n = recv(c->fd, tmp, want, MSG_DONTWAIT);
+            if (n > 0) {
+                if (host_io_mutex && xSemaphoreTake(host_io_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+                    size_t copy = (size_t)n;
+                    memcpy(c->shadow_buf + c->shadow_len, tmp, copy);
+                    c->shadow_len += copy;
+                    did_work = true;
+                    xSemaphoreGive(host_io_mutex);
+                }
+            } else if (n == 0) {
+                if (host_io_mutex && xSemaphoreTake(host_io_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+                    c->shadow_closed = true;
+                    xSemaphoreGive(host_io_mutex);
+                }
+            }
+        }
+
+        if (!did_work)
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
+        else
+            taskYIELD();
+    }
 }
 
 size_t netpacket_host_flush_queued(void)
