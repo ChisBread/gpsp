@@ -8,6 +8,7 @@ idf_component_register(
         "netpacket_bridge_ra.c"
         "netpacket_host.c"
         "netpacket_tunnel_host.c"
+        "ra_protocol.c"
         "runtime_config.c"
         "web_server.c"
     INCLUDE_DIRS "."

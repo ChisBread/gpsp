@@ -33,35 +33,9 @@
 #include "gpsp_config.h"
 #include "main.h"
 #include "netpacket_queue.h"
+#include "ra_protocol.h"
 #include "runtime_config.h"
 #include "serial.h"
-
-#include "mbedtls/md.h"
-
-/* ── RetroArch Netplay protocol constants ─────────────────────────── */
-
-#define RA_NETPLAY_MAGIC             0x52414E50u  /* "RANP" */
-#define RA_NETPLAY_PROTOCOL_VERSION  7u
-#define RA_NICK_LEN                  32
-#define RA_PASS_HASH_LEN             64
-#define RA_MAX_INPUT_DEVICES         16
-
-#define RA_CMD_NICK                  0x0020u
-#define RA_CMD_PASSWORD              0x0021u
-#define RA_CMD_INFO                  0x0022u
-#define RA_CMD_SYNC                  0x0023u
-#define RA_CMD_PLAY                  0x0025u
-#define RA_CMD_MODE                  0x0026u
-#define RA_CMD_DISCONNECT            0x000Au
-#define RA_CMD_NETPACKET             0x0048u
-#define RA_CMD_PING_REQUEST          0x1100u
-#define RA_CMD_PING_RESPONSE         0x1101u
-#define RA_CMD_SETTING_ALLOW_PAUSE   0x2000u
-#define RA_CMD_SETTING_INPUT_LATENCY 0x2001u
-
-#define NETPACKET_BROADCAST          0xFFFFu
-#define NETPACKET_MAX_PAYLOAD        2048u
-#define NETPACKET_SEND_QUEUE_CAPACITY (16 * 1024u)
 
 /* ── Per-client states ────────────────────────────────────────────── */
 
@@ -115,33 +89,6 @@ static bool host_client_queue_packet_wait(host_client_t *c,
                                           const void *part1, size_t part1_len,
                                           const void *part2, size_t part2_len);
 static size_t host_client_flush(host_client_t *c);
-
-static void ra_password_hash_hex(uint32_t salt, const char *password,
-                                 char out_hex[RA_PASS_HASH_LEN + 1])
-{
-    uint8_t digest[32];
-    char salted[8 + 128 + 1];
-    size_t pw_len;
-
-    if (!password)
-        password = "";
-
-    pw_len = strlen(password);
-    if (pw_len > 128)
-        pw_len = 128;
-
-    /* RetroArch format: "%08X" (uppercase salt text) + password */
-    snprintf(salted, sizeof(salted), "%08X", (unsigned)salt);
-    memcpy(salted + 8, password, pw_len);
-    salted[8 + pw_len] = '\0';
-
-    mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
-               (const unsigned char *)salted, 8 + pw_len, digest);
-
-    for (size_t i = 0; i < sizeof(digest); i++)
-        snprintf(out_hex + i * 2, 3, "%02x", (unsigned)digest[i]);
-    out_hex[RA_PASS_HASH_LEN] = '\0';
-}
 static void host_process_commands(host_client_t *c);
 
 /* ── Module state ─────────────────────────────────────────────────── */
@@ -195,24 +142,6 @@ static int host_pending_accept_pop(void)
 }
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
-
-static uint32_t host_platform_magic(void)
-{
-    return (0u << 30) | (sizeof(size_t) << 15) | sizeof(long);
-}
-
-static uint32_t host_impl_magic(void)
-{
-    const char *ver = GPSP_VERSION;
-    uint32_t magic = 0;
-    size_t i;
-
-    for (i = 0; ver[i]; i++)
-        magic ^= (uint32_t)ver[i] << (i & 0xf);
-    magic ^= RA_NETPLAY_PROTOCOL_VERSION << (i & 0xf);
-
-    return magic;
-}
 
 static int host_count_connected(void)
 {
@@ -288,12 +217,7 @@ static host_client_t *host_alloc_client_slot(uint32_t *assigned_id)
 
 static bool host_prepare_client_socket(int fd)
 {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0)
-        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-
-    int one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    ra_socket_prepare(fd);
     return true;
 }
 
@@ -383,21 +307,10 @@ static size_t host_client_flush(host_client_t *c)
 
 static bool client_send_all(host_client_t *c, const void *data, size_t len)
 {
-    const uint8_t *p = (const uint8_t *)data;
-    size_t sent = 0;
-
-    while (sent < len) {
-        ssize_t n = send(c->fd, p + sent, len - sent, 0);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                continue;
-            ESP_LOGW(TAG, "Client %u: send failed errno=%d",
-                     c->assigned_id, errno);
-            return false;
-        }
-        sent += (size_t)n;
-    }
-    return true;
+    if (ra_send_all(c->fd, data, len))
+        return true;
+    ESP_LOGW(TAG, "Client %u: send failed errno=%d", c->assigned_id, errno);
+    return false;
 }
 
 static ssize_t client_recv_more(host_client_t *c)
@@ -441,12 +354,7 @@ static ssize_t client_recv_more(host_client_t *c)
 
 static void client_recv_consume(host_client_t *c, size_t n)
 {
-    if (n >= c->recv_len)
-        c->recv_len = 0;
-    else {
-        memmove(c->recv_buf, c->recv_buf + n, c->recv_len - n);
-        c->recv_len -= n;
-    }
+    ra_buf_consume(c->recv_buf, &c->recv_len, n);
 }
 
 static bool client_try_read(host_client_t *c, void *out, size_t needed)
@@ -524,23 +432,10 @@ static void host_stop(void)
 
 /* ── Receive dispatch ─────────────────────────────────────────────── */
 
-static void host_receive_dispatch(const void *buf, size_t len,
-                                  uint16_t client_id)
+static inline void host_receive_dispatch(const void *buf, size_t len,
+                                         uint16_t client_id)
 {
-    switch (serial_mode) {
-    case SERIAL_MODE_RFU:
-        rfu_net_receive(buf, len, client_id);
-        break;
-    case SERIAL_MODE_SERIAL_POKE:
-        serialpoke_net_receive(buf, len, client_id);
-        break;
-    case SERIAL_MODE_SERIAL_AW1:
-    case SERIAL_MODE_SERIAL_AW2:
-        serialaw_net_receive(buf, len, client_id);
-        break;
-    default:
-        break;
-    }
+    ra_receive_dispatch(buf, len, client_id);
 }
 
 /* ── Listener ─────────────────────────────────────────────────────── */
@@ -774,10 +669,10 @@ static bool host_handle_client_header(host_client_t *c)
 
     uint32_t response[6];
     response[0] = htonl(RA_NETPLAY_MAGIC);
-    response[1] = htonl(host_platform_magic());
+    response[1] = htonl(ra_platform_magic());
     response[2] = htonl(0);                    /* No compression */
     response[4] = htonl(c->protocol);          /* Negotiated version */
-    response[5] = htonl(host_impl_magic());
+    response[5] = htonl(ra_impl_magic());
 
     /* Password: generate random salt if host password is configured */
     if (gpsp_netplay_host_password[0] != '\0') {
@@ -1171,10 +1066,12 @@ esp_err_t netpacket_host_background_start(BaseType_t core_id, UBaseType_t priori
 static void host_io_task(void *param)
 {
     (void)param;
-    uint8_t tmp[256];
 
     for (;;) {
         bool did_work = false;
+        fd_set rfds;
+        int maxfd = -1;
+        struct timeval tv;
 
         if (gpsp_netplay_ra_mode != NETPLAY_MODE_HOST &&
             gpsp_netplay_ra_mode != NETPLAY_MODE_TUNNEL_HOST) {
@@ -1182,10 +1079,40 @@ static void host_io_task(void *param)
             continue;
         }
 
+        /* Build fd_set of listen fd + active client fds. */
+        FD_ZERO(&rfds);
         if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST && host_listen_fd >= 0) {
+            FD_SET(host_listen_fd, &rfds);
+            if (host_listen_fd > maxfd) maxfd = host_listen_fd;
+        }
+        for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
+            host_client_t *c = &host_clients[i];
+            if (c->state == CLIENT_STATE_EMPTY || c->fd < 0)
+                continue;
+            FD_SET(c->fd, &rfds);
+            if (c->fd > maxfd) maxfd = c->fd;
+        }
+
+        if (maxfd < 0) {
+            /* Nothing to wait on — sleep on notify (accept/close events). */
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        /* Cap wait at 20 ms so we notice fd list changes (client join/leave). */
+        tv.tv_sec = 0;
+        tv.tv_usec = 20000;
+        int sel = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+        if (sel <= 0)
+            continue;
+
+        /* Accept new connections. */
+        if (gpsp_netplay_ra_mode == NETPLAY_MODE_HOST &&
+            host_listen_fd >= 0 && FD_ISSET(host_listen_fd, &rfds)) {
             struct sockaddr_in client_addr;
             socklen_t addr_len = sizeof(client_addr);
-            int fd = accept(host_listen_fd, (struct sockaddr *)&client_addr, &addr_len);
+            int fd = accept(host_listen_fd,
+                            (struct sockaddr *)&client_addr, &addr_len);
             if (fd >= 0) {
                 if (host_io_mutex && xSemaphoreTake(host_io_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
                     if (!host_pending_accept_push(fd)) {
@@ -1200,42 +1127,43 @@ static void host_io_task(void *param)
             }
         }
 
+        /* Drain readable client sockets.  Hold the shadow mutex once per
+         * client and do both the space check and copy under it. */
         for (int i = 0; i < HOST_MAX_CLIENTS; i++) {
             host_client_t *c = &host_clients[i];
-            size_t space = 0;
-            size_t want = 0;
             if (c->state == CLIENT_STATE_EMPTY || c->fd < 0)
                 continue;
-
-            if (host_io_mutex && xSemaphoreTake(host_io_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
-                space = HOST_SHADOW_BUF_SIZE - c->shadow_len;
-                xSemaphoreGive(host_io_mutex);
-            }
-
-            if (space == 0)
+            if (!FD_ISSET(c->fd, &rfds))
                 continue;
 
-            want = space < sizeof(tmp) ? space : sizeof(tmp);
-            ssize_t n = recv(c->fd, tmp, want, MSG_DONTWAIT);
-            if (n > 0) {
-                if (host_io_mutex && xSemaphoreTake(host_io_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
-                    size_t copy = (size_t)n;
-                    memcpy(c->shadow_buf + c->shadow_len, tmp, copy);
-                    c->shadow_len += copy;
-                    did_work = true;
-                    xSemaphoreGive(host_io_mutex);
-                }
-            } else if (n == 0) {
-                if (host_io_mutex && xSemaphoreTake(host_io_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
-                    c->shadow_closed = true;
-                    xSemaphoreGive(host_io_mutex);
-                }
+            if (!host_io_mutex ||
+                xSemaphoreTake(host_io_mutex, pdMS_TO_TICKS(2)) != pdTRUE)
+                continue;
+
+            size_t space = HOST_SHADOW_BUF_SIZE - c->shadow_len;
+            if (space == 0) {
+                xSemaphoreGive(host_io_mutex);
+                continue;
             }
+            size_t want = space < 256 ? space : 256;
+            /* Keep the recv() inside the critical section so the writer
+             * and reader never race on shadow_len / shadow_closed. */
+            ssize_t n = recv(c->fd, c->shadow_buf + c->shadow_len,
+                             want, MSG_DONTWAIT);
+            if (n > 0) {
+                c->shadow_len += (size_t)n;
+                did_work = true;
+            } else if (n == 0) {
+                c->shadow_closed = true;
+                did_work = true;
+            } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                c->shadow_closed = true;
+                did_work = true;
+            }
+            xSemaphoreGive(host_io_mutex);
         }
 
         if (!did_work)
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
-        else
             taskYIELD();
     }
 }

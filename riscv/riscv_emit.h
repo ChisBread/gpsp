@@ -454,6 +454,19 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
         u32 inst = *(u32 *)(code + off);
         if ((inst & 0x7F) == 0x17) {  /* AUIPC opcode */
             u32 next = *(u32 *)(code + off + 4);
+            u32 next_op = next & 0x7F;
+            /* We only know how to fix up AUIPC paired with an I-type that
+             * uses imm[31:20]: ADDI (OP_IMM=0x13), JALR (0x67), or LOAD
+             * (0x03). Anything else (S-type store, B-type branch, new U/J
+             * instructions) would silently corrupt the pair.  Abort loudly
+             * so regressions are caught at init instead of producing a
+             * random bad jump at runtime. */
+            if (next_op != 0x13 && next_op != 0x67 && next_op != 0x03) {
+                printf("fixup_auipc_relocations: unexpected pair opcode "
+                       "0x%02x at offset %u (inst=0x%08x next=0x%08x)\n",
+                       (unsigned)next_op, off, inst, next);
+                abort();
+            }
             /* Extract original hi20 (already in upper 20 bits position) */
             s32 hi20 = (s32)(inst & 0xFFFFF000);
             /* Extract lo12 from the paired I-type instruction (bits[31:20]) */
@@ -467,7 +480,7 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
             s32 new_lo12 = new_offset - new_hi20;
             /* Patch AUIPC: replace imm[31:12], keep rd and opcode */
             *(u32 *)(code + off) = (inst & 0xFFF) | (u32)new_hi20;
-            /* Patch paired instruction: replace imm[31:20], keep rest */
+            /* Patch paired I-type: replace imm[31:20], keep rest */
             *(u32 *)(code + off + 4) = (next & 0x000FFFFF) | ((u32)new_lo12 << 20);
             off += 8;
         } else {
@@ -566,11 +579,10 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
     else                                                                      \
     {                                                                         \
         /* If cycles >= 0, skip the update_gba() call and jump to target. */  \
-        u8 *_bge_ptr = translation_ptr;                                       \
-        rv_bge(reg_cycles, reg_zero, 0);       /* placeholder offset */       \
+        u32 *_bge_ptr = rv_fwd_bge_slot(reg_cycles, reg_zero);                \
         generate_load_pc(reg_a0, new_pc);                                     \
         generate_function_call(rv_update_gba);                                \
-        rv_patch_branch((u32 *)_bge_ptr, translation_ptr);                    \
+        rv_patch_branch(_bge_ptr, translation_ptr);                           \
         emit_branch_filler(writeback_location);                               \
     }
 
@@ -759,14 +771,12 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     generate_load_imm(reg_temp2, 32);                                          \
-    u8 *_sr1 = translation_ptr;                                                \
-    rv_bgeu(reg_a1, reg_temp2, 0);                                             \
+    u32 *_sr1 = rv_fwd_bgeu_slot(reg_a1, reg_temp2);                           \
     rv_sll(reg_a0, reg_a0, reg_a1);                                            \
-    u8 *_sr2 = translation_ptr;                                                \
-    rv_j(0);                                                                   \
-    rv_patch_branch((u32 *)_sr1, translation_ptr);                             \
+    u32 *_sr2 = rv_fwd_j_slot();                                               \
+    rv_patch_branch(_sr1, translation_ptr);                                    \
     rv_mv(reg_a0, reg_zero);                                                   \
-    rv_patch_jal((u32 *)_sr2, translation_ptr);                                \
+    rv_patch_jal(_sr2, translation_ptr);                                       \
 }                                                                             \
 
 #define generate_shift_reg_lsr_no_flags(_rm, _rs)                             \
@@ -775,14 +785,12 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     generate_load_imm(reg_temp2, 32);                                          \
-    u8 *_sr1 = translation_ptr;                                                \
-    rv_bgeu(reg_a1, reg_temp2, 0);                                             \
+    u32 *_sr1 = rv_fwd_bgeu_slot(reg_a1, reg_temp2);                           \
     rv_srl(reg_a0, reg_a0, reg_a1);                                            \
-    u8 *_sr2 = translation_ptr;                                                \
-    rv_j(0);                                                                   \
-    rv_patch_branch((u32 *)_sr1, translation_ptr);                             \
+    u32 *_sr2 = rv_fwd_j_slot();                                               \
+    rv_patch_branch(_sr1, translation_ptr);                                    \
     rv_mv(reg_a0, reg_zero);                                                   \
-    rv_patch_jal((u32 *)_sr2, translation_ptr);                                \
+    rv_patch_jal(_sr2, translation_ptr);                                       \
 }                                                                             \
 
 #define generate_shift_reg_asr_no_flags(_rm, _rs)                             \
@@ -791,14 +799,12 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
     generate_load_imm(reg_temp2, 32);                                          \
-    u8 *_sr1 = translation_ptr;                                                \
-    rv_bltu(reg_a1, reg_temp2, 0);                                             \
+    u32 *_sr1 = rv_fwd_bltu_slot(reg_a1, reg_temp2);                           \
     rv_srai(reg_a0, reg_a0, 31);                                               \
-    u8 *_sr2 = translation_ptr;                                                \
-    rv_j(0);                                                                   \
-    rv_patch_branch((u32 *)_sr1, translation_ptr);                             \
+    u32 *_sr2 = rv_fwd_j_slot();                                               \
+    rv_patch_branch(_sr1, translation_ptr);                                    \
     rv_sra(reg_a0, reg_a0, reg_a1);                                            \
-    rv_patch_jal((u32 *)_sr2, translation_ptr);                                \
+    rv_patch_jal(_sr2, translation_ptr);                                       \
 }                                                                             \
 
 #define generate_shift_reg_ror_no_flags(_rm, _rs)                             \
@@ -814,27 +820,23 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
-    u8 *_sr0 = translation_ptr;                                                \
-    rv_beqz(reg_a1, 0);                                                        \
+    u32 *_sr0 = rv_fwd_beqz_slot(reg_a1);                                      \
     rv_addi(reg_temp2, rv_zero, 32);                                           \
-    u8 *_sr1 = translation_ptr;                                                \
-    rv_bgeu(reg_a1, reg_temp2, 0);                                             \
+    u32 *_sr1 = rv_fwd_bgeu_slot(reg_a1, reg_temp2);                           \
     rv_addi(reg_temp, reg_a1, -1);                                             \
     rv_sll(reg_c_cache, reg_a0, reg_temp);                                     \
     rv_srli(reg_c_cache, reg_c_cache, 31);                                     \
     rv_sll(reg_a0, reg_a0, reg_a1);                                            \
-    u8 *_sr2 = translation_ptr;                                                \
-    rv_j(0);                                                                   \
+    u32 *_sr2 = rv_fwd_j_slot();                                               \
     /* amt >= 32: C = bit0(Rm) if amt==32, else 0 */                           \
-    rv_patch_branch((u32 *)_sr1, translation_ptr);                             \
+    rv_patch_branch(_sr1, translation_ptr);                                    \
     rv_andi(reg_c_cache, reg_a0, 1);                                           \
-    u8 *_sr3 = translation_ptr;                                                \
-    rv_beq(reg_a1, reg_temp2, 0);                                              \
+    u32 *_sr3 = rv_fwd_beq_slot(reg_a1, reg_temp2);                            \
     rv_mv(reg_c_cache, reg_zero);                                              \
-    rv_patch_branch((u32 *)_sr3, translation_ptr);                             \
+    rv_patch_branch(_sr3, translation_ptr);                                    \
     rv_mv(reg_a0, reg_zero);                                                   \
-    rv_patch_jal((u32 *)_sr2, translation_ptr);                                \
-    rv_patch_branch((u32 *)_sr0, translation_ptr);                             \
+    rv_patch_jal(_sr2, translation_ptr);                                       \
+    rv_patch_branch(_sr0, translation_ptr);                                    \
 }                                                                             \
 
 #define generate_shift_reg_lsr_flags(_rm, _rs)                                \
@@ -842,27 +844,23 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
-    u8 *_sr0 = translation_ptr;                                                \
-    rv_beqz(reg_a1, 0);                                                        \
+    u32 *_sr0 = rv_fwd_beqz_slot(reg_a1);                                      \
     rv_addi(reg_temp2, rv_zero, 32);                                           \
-    u8 *_sr1 = translation_ptr;                                                \
-    rv_bgeu(reg_a1, reg_temp2, 0);                                             \
+    u32 *_sr1 = rv_fwd_bgeu_slot(reg_a1, reg_temp2);                           \
     rv_addi(reg_temp, reg_a1, -1);                                             \
     rv_srl(reg_c_cache, reg_a0, reg_temp);                                     \
     rv_andi(reg_c_cache, reg_c_cache, 1);                                      \
     rv_srl(reg_a0, reg_a0, reg_a1);                                            \
-    u8 *_sr2 = translation_ptr;                                                \
-    rv_j(0);                                                                   \
+    u32 *_sr2 = rv_fwd_j_slot();                                               \
     /* amt >= 32: C = bit31(Rm) if amt==32, else 0 */                          \
-    rv_patch_branch((u32 *)_sr1, translation_ptr);                             \
+    rv_patch_branch(_sr1, translation_ptr);                                    \
     rv_srli(reg_c_cache, reg_a0, 31);                                          \
-    u8 *_sr3 = translation_ptr;                                                \
-    rv_beq(reg_a1, reg_temp2, 0);                                              \
+    u32 *_sr3 = rv_fwd_beq_slot(reg_a1, reg_temp2);                            \
     rv_mv(reg_c_cache, reg_zero);                                              \
-    rv_patch_branch((u32 *)_sr3, translation_ptr);                             \
+    rv_patch_branch(_sr3, translation_ptr);                                    \
     rv_mv(reg_a0, reg_zero);                                                   \
-    rv_patch_jal((u32 *)_sr2, translation_ptr);                                \
-    rv_patch_branch((u32 *)_sr0, translation_ptr);                             \
+    rv_patch_jal(_sr2, translation_ptr);                                       \
+    rv_patch_branch(_sr0, translation_ptr);                                    \
 }                                                                             \
 
 #define generate_shift_reg_asr_flags(_rm, _rs)                                \
@@ -870,22 +868,19 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
-    u8 *_sr0 = translation_ptr;                                                \
-    rv_beqz(reg_a1, 0);                                                        \
+    u32 *_sr0 = rv_fwd_beqz_slot(reg_a1);                                      \
     rv_addi(reg_temp2, rv_zero, 32);                                           \
-    u8 *_sr1 = translation_ptr;                                                \
-    rv_bltu(reg_a1, reg_temp2, 0);                                             \
+    u32 *_sr1 = rv_fwd_bltu_slot(reg_a1, reg_temp2);                           \
     rv_srli(reg_c_cache, reg_a0, 31);                                          \
     rv_srai(reg_a0, reg_a0, 31);                                               \
-    u8 *_sr2 = translation_ptr;                                                \
-    rv_j(0);                                                                   \
-    rv_patch_branch((u32 *)_sr1, translation_ptr);                             \
+    u32 *_sr2 = rv_fwd_j_slot();                                               \
+    rv_patch_branch(_sr1, translation_ptr);                                    \
     rv_addi(reg_temp, reg_a1, -1);                                             \
     rv_srl(reg_c_cache, reg_a0, reg_temp);                                     \
     rv_andi(reg_c_cache, reg_c_cache, 1);                                      \
     rv_sra(reg_a0, reg_a0, reg_a1);                                            \
-    rv_patch_jal((u32 *)_sr2, translation_ptr);                                \
-    rv_patch_branch((u32 *)_sr0, translation_ptr);                             \
+    rv_patch_jal(_sr2, translation_ptr);                                       \
+    rv_patch_branch(_sr0, translation_ptr);                                    \
 }                                                                             \
 
 #define generate_shift_reg_ror_flags(_rm, _rs)                                \
@@ -893,21 +888,19 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
     generate_load_reg_pc(reg_a1, _rs, 8);                                      \
     rv_andi(reg_a1, reg_a1, 0xFF);                                             \
     generate_load_reg_pc(reg_a0, _rm, 12);                                     \
-    u8 *_sr0 = translation_ptr;                                                \
-    rv_beqz(reg_a1, 0);                                                        \
+    u32 *_sr0 = rv_fwd_beqz_slot(reg_a1);                                      \
     rv_addi(reg_temp, reg_a1, -1);                                             \
     rv_srl(reg_c_cache, reg_a0, reg_temp);                                     \
     rv_andi(reg_c_cache, reg_c_cache, 1);                                      \
     rv_ror(reg_a0, reg_a0, reg_a1, reg_temp, reg_temp2);                      \
-    u8 *_sr1 = translation_ptr;                                                \
-    rv_j(0);                                                                   \
+    u32 *_sr1 = rv_fwd_j_slot();                                               \
     /* amt == 0: RRX (rotate right extended) */                                \
     rv_andi(reg_c_cache, reg_a0, 1);                                           \
     rv_srli(reg_a0, reg_a0, 1);                                                \
     rv_slli(reg_temp, reg_c_cache, 31);                                        \
     rv_or(reg_a0, reg_a0, reg_temp);                                           \
-    rv_patch_jal((u32 *)_sr1, translation_ptr);                                \
-    rv_patch_branch((u32 *)_sr0, translation_ptr);                             \
+    rv_patch_jal(_sr1, translation_ptr);                                       \
+    rv_patch_branch(_sr0, translation_ptr);                                    \
 }                                                                             \
 
 #define generate_shift_imm(arm_reg, name, flags_op)                           \
@@ -2219,31 +2212,25 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
     generate_condition();                                                     \
 
 /* Fused condition macros: emit direct RISC-V comparison branch using
- * saved CMP operands.  The branch sense is INVERTED (skip logic). */
+ * saved CMP operands.  The branch sense is INVERTED (skip logic).
+ * All use rv_fwd_*_slot to guarantee a 32-bit patchable instruction. */
 #define generate_fused_condition_eq()                                         \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bne(cmp_fuse_rn_rv, cmp_fuse_rm_rv, 0)                                \
+    (backpatch_address) = (u8 *)rv_fwd_bne_slot(cmp_fuse_rn_rv, cmp_fuse_rm_rv)
 
 #define generate_fused_condition_ne()                                         \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_beq(cmp_fuse_rn_rv, cmp_fuse_rm_rv, 0)                                \
+    (backpatch_address) = (u8 *)rv_fwd_beq_slot(cmp_fuse_rn_rv, cmp_fuse_rm_rv)
 
 #define generate_fused_condition_cs()                                         \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bltu(cmp_fuse_rn_rv, cmp_fuse_rm_rv, 0)                               \
+    (backpatch_address) = (u8 *)rv_fwd_bltu_slot(cmp_fuse_rn_rv, cmp_fuse_rm_rv)
 
 #define generate_fused_condition_cc()                                         \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bgeu(cmp_fuse_rn_rv, cmp_fuse_rm_rv, 0)                               \
+    (backpatch_address) = (u8 *)rv_fwd_bgeu_slot(cmp_fuse_rn_rv, cmp_fuse_rm_rv)
 
 #define generate_fused_condition_ge()                                         \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_blt(cmp_fuse_rn_rv, cmp_fuse_rm_rv, 0)                                \
+    (backpatch_address) = (u8 *)rv_fwd_blt_slot(cmp_fuse_rn_rv, cmp_fuse_rm_rv)
 
 #define generate_fused_condition_lt()                                         \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bge(cmp_fuse_rn_rv, cmp_fuse_rm_rv, 0)                                \
-
+    (backpatch_address) = (u8 *)rv_fwd_bge_slot(cmp_fuse_rn_rv, cmp_fuse_rm_rv)
 /* Non-fusable conditions: fallback to normal flag-based branch */
 #define generate_fused_condition_mi()    generate_condition_mi()
 #define generate_fused_condition_pl()    generate_condition_pl()
@@ -2251,34 +2238,27 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
 #define generate_fused_condition_vc()    generate_condition_vc()
 /* HI = unsigned rn > rm → skip if NOT HI = LS = rm >= rn unsigned */
 #define generate_fused_condition_hi()                                         \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bgeu(cmp_fuse_rm_rv, cmp_fuse_rn_rv, 0)                               \
+    (backpatch_address) = (u8 *)rv_fwd_bgeu_slot(cmp_fuse_rm_rv, cmp_fuse_rn_rv)
 
 /* LS = unsigned rn <= rm → skip if NOT LS = HI = rm < rn unsigned */
 #define generate_fused_condition_ls()                                         \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bltu(cmp_fuse_rm_rv, cmp_fuse_rn_rv, 0)                               \
+    (backpatch_address) = (u8 *)rv_fwd_bltu_slot(cmp_fuse_rm_rv, cmp_fuse_rn_rv)
 
 /* GT = signed rn > rm → skip if NOT GT = LE = rm >= rn signed */
 #define generate_fused_condition_gt()                                         \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bge(cmp_fuse_rm_rv, cmp_fuse_rn_rv, 0)                                \
+    (backpatch_address) = (u8 *)rv_fwd_bge_slot(cmp_fuse_rm_rv, cmp_fuse_rn_rv)
 
 /* LE = signed rn <= rm → skip if NOT LE = GT = rm < rn signed */
 #define generate_fused_condition_le()                                         \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_blt(cmp_fuse_rm_rv, cmp_fuse_rn_rv, 0)
+    (backpatch_address) = (u8 *)rv_fwd_blt_slot(cmp_fuse_rm_rv, cmp_fuse_rn_rv)
 
 /* TST-fused conditions: branch on AND result register directly.
  * Only EQ/NE are valid for TST fusion. */
 #define generate_tst_fused_condition_eq()                                     \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bnez(cmp_fuse_rn_rv, 0)                                                \
+    (backpatch_address) = (u8 *)rv_fwd_bnez_slot(cmp_fuse_rn_rv)
 
 #define generate_tst_fused_condition_ne()                                     \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_beqz(cmp_fuse_rn_rv, 0)                                                \
-
+    (backpatch_address) = (u8 *)rv_fwd_beqz_slot(cmp_fuse_rn_rv)
 /* Non-fusable via TST: fallback */
 #define generate_tst_fused_condition_cs()    generate_condition_cs()
 #define generate_tst_fused_condition_cc()    generate_condition_cc()
@@ -2345,67 +2325,53 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
     block_exit_position++;                                                    \
 }
 
-/* Generate the opposite condition to skip the block. */
+/* Generate the opposite condition to skip the block.
+ * All use rv_fwd_*_slot for patchable 32-bit branch emission. */
 #define generate_condition_eq()                                               \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_beqz(reg_z_cache, 0)                                                   \
+    (backpatch_address) = (u8 *)rv_fwd_beqz_slot(reg_z_cache)
 
 #define generate_condition_ne()                                               \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bnez(reg_z_cache, 0)                                                   \
+    (backpatch_address) = (u8 *)rv_fwd_bnez_slot(reg_z_cache)
 
 #define generate_condition_cs()                                               \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_beqz(reg_c_cache, 0)                                                   \
+    (backpatch_address) = (u8 *)rv_fwd_beqz_slot(reg_c_cache)
 
 #define generate_condition_cc()                                               \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bnez(reg_c_cache, 0)                                                   \
+    (backpatch_address) = (u8 *)rv_fwd_bnez_slot(reg_c_cache)
 
 #define generate_condition_mi()                                               \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_beqz(reg_n_cache, 0)                                                   \
+    (backpatch_address) = (u8 *)rv_fwd_beqz_slot(reg_n_cache)
 
 #define generate_condition_pl()                                               \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bnez(reg_n_cache, 0)                                                   \
+    (backpatch_address) = (u8 *)rv_fwd_bnez_slot(reg_n_cache)
 
 #define generate_condition_vs()                                               \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_beqz(reg_v_cache, 0)                                                   \
+    (backpatch_address) = (u8 *)rv_fwd_beqz_slot(reg_v_cache)
 
 #define generate_condition_vc()                                               \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bnez(reg_v_cache, 0)                                                   \
+    (backpatch_address) = (u8 *)rv_fwd_bnez_slot(reg_v_cache)
 
 #define generate_condition_hi()                                               \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bgeu(reg_z_cache, reg_c_cache, 0)                                      \
+    (backpatch_address) = (u8 *)rv_fwd_bgeu_slot(reg_z_cache, reg_c_cache)
 
 #define generate_condition_ls()                                               \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bltu(reg_z_cache, reg_c_cache, 0)                                      \
+    (backpatch_address) = (u8 *)rv_fwd_bltu_slot(reg_z_cache, reg_c_cache)
 
 #define generate_condition_ge()                                               \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bne(reg_n_cache, reg_v_cache, 0)                                       \
+    (backpatch_address) = (u8 *)rv_fwd_bne_slot(reg_n_cache, reg_v_cache)
 
 #define generate_condition_lt()                                               \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_beq(reg_n_cache, reg_v_cache, 0)                                       \
+    (backpatch_address) = (u8 *)rv_fwd_beq_slot(reg_n_cache, reg_v_cache)
 
 #define generate_condition_gt()                                               \
     rv_xor(reg_temp, reg_n_cache, reg_v_cache);                               \
     rv_or(reg_temp, reg_temp, reg_z_cache);                                   \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_bnez(reg_temp, 0)                                                      \
+    (backpatch_address) = (u8 *)rv_fwd_bnez_slot(reg_temp)
 
 #define generate_condition_le()                                               \
     rv_xor(reg_temp, reg_n_cache, reg_v_cache);                               \
     rv_or(reg_temp, reg_temp, reg_z_cache);                                   \
-    (backpatch_address) = translation_ptr;                                    \
-    rv_beqz(reg_temp, 0)                                                      \
-
+    (backpatch_address) = (u8 *)rv_fwd_beqz_slot(reg_temp)
 #define generate_condition()                                                  \
     switch (condition)                                                        \
     {                                                                         \
@@ -2426,8 +2392,7 @@ static void fixup_auipc_relocations(u8 *code, u32 old_base, u32 new_base, u32 si
         case 0xE: break;                                                      \
         case 0xF:                                                             \
             /* NV condition (ARMv4: never execute) — emit unconditional skip */\
-            (backpatch_address) = translation_ptr;                            \
-            rv_beqz(reg_zero, 0);                                             \
+            (backpatch_address) = (u8 *)rv_fwd_beqz_slot(reg_zero);           \
             break;                                                           \
     }
 

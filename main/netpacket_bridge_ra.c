@@ -32,10 +32,9 @@
 #include "main.h"
 #include "netpacket_queue.h"
 #include "netpacket_tunnel_host.h"
+#include "ra_protocol.h"
 #include "runtime_config.h"
 #include "serial.h"
-
-#include "mbedtls/md.h"
 
 /* Host mode (netpacket_host.c) */
 extern void netpacket_host_poll(void);
@@ -45,37 +44,6 @@ extern bool netpacket_host_has_pending_io(void);
 extern esp_err_t netpacket_host_background_start(BaseType_t core_id, UBaseType_t priority);
 extern void netpacket_host_notify_io_task(void);
 extern esp_err_t netpacket_tunnel_host_background_start(BaseType_t core_id, UBaseType_t priority);
-
-/* ── RetroArch Netplay protocol constants ─────────────────────────── */
-
-#define RA_NETPLAY_MAGIC             0x52414E50u  /* "RANP" */
-#define RA_NETPLAY_PROTOCOL_VERSION  7u
-#define RA_NICK_LEN                  32
-#define RA_PASS_HASH_LEN             64
-#define RA_MAX_INPUT_DEVICES         16
-
-/* Commands */
-#define RA_CMD_NICK                  0x0020u
-#define RA_CMD_PASSWORD              0x0021u
-#define RA_CMD_INFO                  0x0022u
-#define RA_CMD_SYNC                  0x0023u
-#define RA_CMD_SPECTATE              0x0024u
-#define RA_CMD_PLAY                  0x0025u
-#define RA_CMD_MODE                  0x0026u
-#define RA_CMD_MODE_REFUSED          0x0027u
-#define RA_CMD_DISCONNECT            0x000Au
-#define RA_CMD_NETPACKET             0x0048u
-#define RA_CMD_PING_REQUEST          0x1100u
-#define RA_CMD_PING_RESPONSE         0x1101u
-#define RA_CMD_SETTING_ALLOW_PAUSE   0x2000u
-#define RA_CMD_SETTING_INPUT_LATENCY 0x2001u
-
-#define RA_SYNC_BIT_PAUSED           (1u << 31)
-
-#define NETPACKET_BROADCAST          0xFFFFu
-#define NETPACKET_MAX_PAYLOAD        2048u
-#define NETPACKET_SEND_QUEUE_CAPACITY (16 * 1024u)
-#define NETPACKET_FLUSH_TASK_PERIOD_MS 1u
 
 /* ── Connection states ────────────────────────────────────────────── */
 
@@ -156,15 +124,6 @@ static bool np_queue_packet_wait(const void *part1, size_t part1_len,
                                  const void *part2, size_t part2_len);
 static bool np_queue_control_packet(const void *data, size_t len);
 
-static void np_notify_background_tasks(void)
-{
-    netpacket_notify_flush_task();
-    if (np_recv_task_handle)
-        xTaskNotifyGive(np_recv_task_handle);
-    netpacket_host_notify_io_task();
-    netpacket_tunnel_host_notify_io_task();
-}
-
 static bool np_mode_is_client(int mode)
 {
     return (mode == NETPLAY_MODE_CLIENT || mode == NETPLAY_MODE_TUNNEL_CLIENT);
@@ -190,60 +149,6 @@ static bool np_client_cfg_equals(const np_client_cfg_t *a, const np_client_cfg_t
            strcmp(a->password, b->password) == 0;
 }
 /* ── Helpers ──────────────────────────────────────────────────────── */
-
-static uint32_t np_platform_magic(void)
-{
-    /*
-     * Matches RetroArch's netplay_platform_magic():
-     *   ((1 == htonl(1)) << 30) | (sizeof(size_t) << 15) | sizeof(long)
-     *
-     * ESP32-P4 (RISC-V 32-bit, little-endian):
-     *   htonl(1) != 1  → bit 30 = 0
-     *   sizeof(size_t) = 4
-     *   sizeof(long)   = 4
-     */
-    return (0u << 30) | (sizeof(size_t) << 15) | sizeof(long);
-}
-
-static uint32_t np_impl_magic(void)
-{
-    const char *ver = GPSP_VERSION;
-    uint32_t magic = 0;
-    size_t i;
-
-    for (i = 0; ver[i]; i++)
-        magic ^= (uint32_t)ver[i] << (i & 0xf);
-    magic ^= RA_NETPLAY_PROTOCOL_VERSION << (i & 0xf);
-
-    return magic;
-}
-
-static void ra_password_hash_hex(uint32_t salt, const char *password,
-                                 char out_hex[RA_PASS_HASH_LEN + 1])
-{
-    uint8_t digest[32];
-    char salted[8 + 128 + 1];
-    size_t pw_len;
-
-    if (!password)
-        password = "";
-
-    pw_len = strlen(password);
-    if (pw_len > 128)
-        pw_len = 128;
-
-    /* RetroArch format: "%08X" (uppercase salt text) + password */
-    snprintf(salted, sizeof(salted), "%08X", (unsigned)salt);
-    memcpy(salted + 8, password, pw_len);
-    salted[8 + pw_len] = '\0';
-
-    mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
-               (const unsigned char *)salted, 8 + pw_len, digest);
-
-    for (size_t i = 0; i < sizeof(digest); i++)
-        snprintf(out_hex + i * 2, 3, "%02x", (unsigned)digest[i]);
-    out_hex[RA_PASS_HASH_LEN] = '\0';
-}
 
 static int base64_decode_char(char c)
 {
@@ -303,34 +208,6 @@ static bool np_parse_tunnel_id(const char *id, uint8_t out[12])
     if (stripped == 16 && np_parse_tunnel_id_base64(id, out))
         return true;
     return false;
-}
-
-static bool np_resolve_server_addr(struct sockaddr_in *server_addr)
-{
-    struct addrinfo hints;
-    struct addrinfo *res = NULL;
-    char port_str[8];
-
-    memset(server_addr, 0, sizeof(*server_addr));
-    server_addr->sin_family = AF_INET;
-    server_addr->sin_port = htons(gpsp_netplay_ra_port);
-
-    if (inet_aton(gpsp_netplay_ra_host, &server_addr->sin_addr))
-        return true;
-
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    snprintf(port_str, sizeof(port_str), "%u", gpsp_netplay_ra_port);
-
-    if (getaddrinfo(gpsp_netplay_ra_host, port_str, &hints, &res) != 0 || !res) {
-        ESP_LOGW(TAG, "Failed to resolve host: %s", gpsp_netplay_ra_host);
-        return false;
-    }
-
-    memcpy(server_addr, res->ai_addr, sizeof(*server_addr));
-    freeaddrinfo(res);
-    return true;
 }
 
 static void np_disconnect(void)
@@ -465,10 +342,15 @@ static void np_flush_task(void *param)
                 did_work = true;
         }
 
-        if (!did_work)
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(NETPACKET_FLUSH_TASK_PERIOD_MS));
-        else
+        if (did_work) {
+            /* Yield briefly, then continue draining if more data arrives. */
             taskYIELD();
+            continue;
+        }
+
+        /* Idle: sleep until a producer notifies us (every enqueue does).
+         * Cap wait at 50 ms so we still detect mode toggles promptly. */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
     }
 }
 
@@ -535,8 +417,9 @@ static ssize_t np_recv_more(void)
     return (ssize_t)np_recv_len;
 }
 
-/* Background recv task — runs on SERVICE_CORE (same as WiFi), calls recv()
- * once per tick (~1 ms) and writes data into np_shadow_buf. */
+/* Background recv task — runs on SERVICE_CORE (same as WiFi).
+ * Blocks in select() on the TCP socket so it only wakes when data is
+ * available (or the emulation thread signals a state change). */
 static void np_shadow_recv_task(void *param)
 {
     (void)param;
@@ -548,24 +431,31 @@ static void np_shadow_recv_task(void *param)
             continue;
         }
 
-        /* Wait for notification (from connect/disconnect) or 1ms timeout */
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
-
         int fd = np_socket_fd;
-        if (fd < 0)
+        if (fd < 0) {
+            /* No socket — wait for connect to notify us.  Cap at 100 ms so
+             * we refresh config/mode without spinning. */
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        /* 20 ms cap lets us notice fd/mode changes promptly without busy
+         * polling.  lwIP wakes select() as soon as bytes arrive. */
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 20000 };
+        int sel = select(fd + 1, &rfds, NULL, NULL, &tv);
+
+        /* Re-check fd — it may have been closed while we waited. */
+        if (np_socket_fd != fd)
+            continue;
+        if (sel <= 0)
             continue;
 
         ssize_t n = recv(fd, tmp, sizeof(tmp), MSG_DONTWAIT);
-        if (n <= 0) {
-            if (n == 0) {
-                /* Connection closed — signal emu core via shadow_len=-1 sentinel
-                 * is tricky; just let np_recv_more detect it next drain cycle
-                 * by writing a zero-length record.  The emu core will see
-                 * empty shadow and the socket will already be -1 after
-                 * np_disconnect() is called from np_recv_more → np_process. */
-            }
+        if (n <= 0)
             continue;
-        }
 
         if (xSemaphoreTake(np_shadow_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
             size_t space = NP_SHADOW_BUF_SIZE - np_shadow_len;
@@ -578,36 +468,20 @@ static void np_shadow_recv_task(void *param)
 }
 
 /* Blocking send for control messages (handshake, ping).
- * Used only for protocol control, not for game data. */
+ * Tears down the connection on failure. */
 static bool np_send_all(const void *data, size_t len)
 {
-    const uint8_t *p = (const uint8_t *)data;
-    size_t sent = 0;
-
-    while (sent < len) {
-        ssize_t n = send(np_socket_fd, p + sent, len - sent, 0);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                continue;
-            }
-            ESP_LOGW(TAG, "TCP send failed: errno=%d", errno);
-            np_disconnect();
-            return false;
-        }
-        sent += (size_t)n;
-    }
-    return true;
+    if (ra_send_all(np_socket_fd, data, len))
+        return true;
+    ESP_LOGW(TAG, "TCP send failed: errno=%d", errno);
+    np_disconnect();
+    return false;
 }
 
 /* Consume n bytes from front of np_recv_buf */
 static void np_recv_consume(size_t n)
 {
-    if (n >= np_recv_len) {
-        np_recv_len = 0;
-    } else {
-        memmove(np_recv_buf, np_recv_buf + n, np_recv_len - n);
-        np_recv_len -= n;
-    }
+    ra_buf_consume(np_recv_buf, &np_recv_len, n);
 }
 
 /* Try to read exactly `needed` bytes into `out`. Returns true if available. */
@@ -628,23 +502,9 @@ static bool np_try_read(void *out, size_t needed)
 
 /* ── Receive dispatch ─────────────────────────────────────────────── */
 
-static void np_receive_dispatch(const void *buf, size_t len, uint16_t client_id)
+static inline void np_receive_dispatch(const void *buf, size_t len, uint16_t client_id)
 {
-    switch (serial_mode) {
-    case SERIAL_MODE_RFU:
-        rfu_net_receive(buf, len, client_id);
-        break;
-    case SERIAL_MODE_SERIAL_POKE:
-        serialpoke_net_receive(buf, len, client_id);
-        break;
-    case SERIAL_MODE_SERIAL_AW1:
-    case SERIAL_MODE_SERIAL_AW2:
-        serialaw_net_receive(buf, len, client_id);
-        break;
-    default:
-        ESP_LOGW(TAG, "Dropping NETPACKET: serial_mode=%d not handled", serial_mode);
-        break;
-    }
+    ra_receive_dispatch(buf, len, client_id);
 }
 
 /* ── Handshake phases ─────────────────────────────────────────────── */
@@ -683,7 +543,8 @@ static bool np_start_connect(void)
         return false;
     }
 
-    if (!np_resolve_server_addr(&server_addr)) {
+    if (!ra_resolve_host(gpsp_netplay_ra_host, gpsp_netplay_ra_port, &server_addr)) {
+        ESP_LOGW(TAG, "Failed to resolve host: %s", gpsp_netplay_ra_host);
         return false;
     }
 
@@ -697,15 +558,7 @@ static bool np_start_connect(void)
         return false;
     }
 
-    /* Set non-blocking for connect */
-    int flags = fcntl(sockfd, F_GETFL, 0);
-    if (flags >= 0) {
-        fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
-    }
-
-    /* Disable Nagle for low latency */
-    int one = 1;
-    setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    ra_socket_prepare(sockfd);
 
     ESP_LOGI(TAG, "Connecting to RetroArch host %s:%u ...",
              gpsp_netplay_ra_host, gpsp_netplay_ra_port);
@@ -720,6 +573,9 @@ static bool np_start_connect(void)
     np_socket_fd = sockfd;
     np_recv_len = 0;
     np_state = STATE_CONNECTING;
+    /* Wake recv task so its select() re-arms on the new fd. */
+    if (np_recv_task_handle)
+        xTaskNotifyGive(np_recv_task_handle);
     return true;
 }
 
@@ -760,7 +616,8 @@ static bool np_check_connect(void)
         }
         memcpy(rats_msg, "RATS", 4);
         memcpy(rats_msg + 4, session_bytes, 12);
-        if (!np_send_all(rats_msg, sizeof(rats_msg))) {
+        if (!ra_send_all(np_socket_fd, rats_msg, sizeof(rats_msg))) {
+            np_disconnect();
             return false;
         }
         ESP_LOGI(TAG, "Sent tunnel RATS: session=%s", gpsp_netplay_ra_tunnel_id);
@@ -769,11 +626,11 @@ static bool np_check_connect(void)
     /* Send our header immediately */
     uint32_t header[6];
     header[0] = htonl(RA_NETPLAY_MAGIC);
-    header[1] = htonl(np_platform_magic());
+    header[1] = htonl(ra_platform_magic());
     header[2] = htonl(0);  /* No compression */
     header[3] = htonl(RA_NETPLAY_PROTOCOL_VERSION);  /* Highest supported */
     header[4] = htonl(0);  /* Negotiate */
-    header[5] = htonl(np_impl_magic());
+    header[5] = htonl(ra_impl_magic());
 
     if (!np_send_all(header, sizeof(header))) {
         return false;
@@ -1239,7 +1096,11 @@ void netpacket_poll_receive(void)
         return;
     }
 
-    np_notify_background_tasks();
+    /* Background recv/flush/accept tasks self-tick and are notified by
+     * producers on state changes and enqueues (see np_start_connect,
+     * np_disconnect, np_queue_packet_wait, host_client_queue_packet_wait).
+     * Avoid blanket xTaskNotifyGive() on the emu-core hot path — this
+     * function runs ~hundreds of times per frame from rfu_update(). */
 
     if (!np_client_cfg_valid) {
         np_client_cfg_applied = current_cfg;

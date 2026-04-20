@@ -30,6 +30,7 @@
 
 #include "c6_remote.h"
 #include "gpsp_config.h"
+#include "ra_protocol.h"
 #include "runtime_config.h"
 
 /* Lobby registration disguise — change these to impersonate another platform */
@@ -97,9 +98,6 @@ void netpacket_tunnel_host_notify_io_task(void)
 }
 
 /* Forward declarations for helpers referenced before their definitions */
-static bool set_nonblocking_nodelay(int fd);
-static bool resolve_host_addr(const char *host, uint16_t port,
-                              struct sockaddr_in *out_addr);
 static bool socket_connect_done(int fd);
 static bool socket_connect_wait(int fd, int timeout_ms);
 
@@ -293,7 +291,7 @@ static bool lobby_post_add(void)
     if (!lobby_enabled())
         return false;
 
-    if (!resolve_host_addr(gpsp_netplay_lobby_host, gpsp_netplay_lobby_port, &addr)) {
+    if (!ra_resolve_host(gpsp_netplay_lobby_host, gpsp_netplay_lobby_port, &addr)) {
         ESP_LOGW(TAG, "Invalid lobby address: %s", gpsp_netplay_lobby_host);
         return false;
     }
@@ -304,7 +302,7 @@ static bool lobby_post_add(void)
         return false;
     }
 
-    set_nonblocking_nodelay(fd);
+    ra_socket_prepare(fd);
     int rc = connect(fd, (const struct sockaddr *)&addr, sizeof(addr));
     if (rc < 0 && errno != EINPROGRESS) {
         ESP_LOGW(TAG, "Lobby connect failed immediately: errno=%d", errno);
@@ -449,52 +447,13 @@ static void set_status(const char *status)
     strlcpy(ctrl_status, status ? status : "idle", sizeof(ctrl_status));
 }
 
-static bool set_nonblocking_nodelay(int fd)
-{
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0)
-        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
-    int one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-    return true;
-}
-
-static bool resolve_host_addr(const char *host, uint16_t port,
-                              struct sockaddr_in *out_addr)
-{
-    if (!host || !host[0] || !out_addr)
-        return false;
-
-    memset(out_addr, 0, sizeof(*out_addr));
-    out_addr->sin_family = AF_INET;
-    out_addr->sin_port = htons(port);
-
-    if (inet_aton(host, &out_addr->sin_addr))
-        return true;
-
-    struct addrinfo hints;
-    struct addrinfo *res = NULL;
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
-
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-
-    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res)
-        return false;
-
-    memcpy(out_addr, res->ai_addr, sizeof(*out_addr));
-    freeaddrinfo(res);
-    return true;
-}
 
 static int start_socket_connect(void)
 {
     struct sockaddr_in addr;
 
-    if (!resolve_host_addr(gpsp_netplay_ra_host, gpsp_netplay_ra_port, &addr)) {
+    if (!ra_resolve_host(gpsp_netplay_ra_host, gpsp_netplay_ra_port, &addr)) {
         ESP_LOGW(TAG, "Invalid tunnel relay address: %s", gpsp_netplay_ra_host);
         return -1;
     }
@@ -505,7 +464,7 @@ static int start_socket_connect(void)
         return -1;
     }
 
-    set_nonblocking_nodelay(fd);
+    ra_socket_prepare(fd);
 
     int ret = connect(fd, (const struct sockaddr *)&addr, sizeof(addr));
     if (ret < 0 && errno != EINPROGRESS) {
@@ -557,20 +516,7 @@ static bool socket_connect_wait(int fd, int timeout_ms)
 
 static bool send_all_fd(int fd, const void *data, size_t len)
 {
-    const uint8_t *ptr = (const uint8_t *)data;
-    size_t sent = 0;
-
-    while (sent < len) {
-        ssize_t n = send(fd, ptr + sent, len - sent, 0);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                continue;
-            return false;
-        }
-        sent += (size_t)n;
-    }
-
-    return true;
+    return ra_send_all(fd, data, len);
 }
 
 static void close_pending_link(pending_link_t *link)
@@ -632,6 +578,9 @@ static bool start_control_connect(void)
     set_status("connecting");
     ESP_LOGI(TAG, "Connecting to tunnel relay %s:%u ...",
              gpsp_netplay_ra_host, gpsp_netplay_ra_port);
+    /* Kick the IO task so its select() picks up the new fd immediately. */
+    if (tunnel_io_task_handle)
+        xTaskNotifyGive(tunnel_io_task_handle);
     return true;
 }
 
@@ -730,64 +679,57 @@ esp_err_t netpacket_tunnel_host_background_start(BaseType_t core_id, UBaseType_t
 static void tunnel_ctrl_io_task(void *param)
 {
     (void)param;
-    uint8_t tmp[32];
 
     for (;;) {
-        bool did_work = false;
-
         if (gpsp_netplay_ra_mode != NETPLAY_MODE_TUNNEL_HOST || ctrl_fd < 0) {
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
         }
 
-        {
-            size_t space = 0;
-            size_t want = 0;
-            ssize_t n;
+        int fd = ctrl_fd;
+        fd_set rfds;
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 20000 };
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        int sel = select(fd + 1, &rfds, NULL, NULL, &tv);
 
-            if (ctrl_shadow_mutex && xSemaphoreTake(ctrl_shadow_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
-                space = sizeof(ctrl_shadow_buf) - ctrl_shadow_len;
-                xSemaphoreGive(ctrl_shadow_mutex);
-            }
+        /* Socket may have been torn down while we were blocked. */
+        if (ctrl_fd != fd)
+            continue;
+        if (sel <= 0)
+            continue;
 
-            if (space == 0) {
-                n = -1;
-            } else {
-                want = space < sizeof(tmp) ? space : sizeof(tmp);
-                n = recv(ctrl_fd, tmp, want, MSG_DONTWAIT);
-            }
+        if (!ctrl_shadow_mutex)
+            continue;
+        if (xSemaphoreTake(ctrl_shadow_mutex, pdMS_TO_TICKS(2)) != pdTRUE)
+            continue;
 
-            if (n > 0) {
-                if (ctrl_shadow_mutex && xSemaphoreTake(ctrl_shadow_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
-                    memcpy(ctrl_shadow_buf + ctrl_shadow_len, tmp, (size_t)n);
-                    ctrl_shadow_len += (size_t)n;
-                    did_work = true;
-                    xSemaphoreGive(ctrl_shadow_mutex);
-                }
-            } else if (n == 0) {
-                if (ctrl_shadow_mutex && xSemaphoreTake(ctrl_shadow_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
-                    ctrl_shadow_closed = true;
-                    xSemaphoreGive(ctrl_shadow_mutex);
-                }
-            }
+        size_t space = sizeof(ctrl_shadow_buf) - ctrl_shadow_len;
+        if (space == 0) {
+            xSemaphoreGive(ctrl_shadow_mutex);
+            /* Reader hasn't drained yet; back off briefly. */
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
         }
 
-        if (!did_work)
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
-        else
-            taskYIELD();
+        /* recv() directly into the shadow buffer under the mutex so that
+         * shadow_len / shadow_closed stay consistent with shadow_buf. */
+        ssize_t n = recv(fd, ctrl_shadow_buf + ctrl_shadow_len,
+                         space, MSG_DONTWAIT);
+        if (n > 0) {
+            ctrl_shadow_len += (size_t)n;
+        } else if (n == 0) {
+            ctrl_shadow_closed = true;
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            ctrl_shadow_closed = true;
+        }
+        xSemaphoreGive(ctrl_shadow_mutex);
     }
 }
 
 static void ctrl_consume(size_t n)
 {
-    if (n >= ctrl_recv_len) {
-        ctrl_recv_len = 0;
-        return;
-    }
-
-    memmove(ctrl_recv_buf, ctrl_recv_buf + n, ctrl_recv_len - n);
-    ctrl_recv_len -= n;
+    ra_buf_consume(ctrl_recv_buf, &ctrl_recv_len, n);
 }
 
 static void start_link_connect(const uint8_t peer_id[TUNNEL_UNIQUE_SIZE])

@@ -244,6 +244,42 @@
 #define rv_nop_32()       rv_i_type(0, rv_zero, RV_ADDI, rv_zero, RV_OP_IMM)
 #define rv_mv_32(rd, rs)  rv_i_type(0, rs, RV_ADDI, rd, RV_OP_IMM)
 
+/* ---- Patch-safe forward-branch slot emission ----
+ * These emit an uncompressed 32-bit B-type/J-type placeholder with
+ * offset=0, record the slot address, and return a u32* for later use
+ * with rv_patch_branch / rv_patch_jal.
+ *
+ * They go through rv_b_type / rv_j_type directly, bypassing any
+ * pseudo-instruction overrides (e.g. HAVE_RVC).  This is the contract
+ * that makes patch-slot correctness a property of the emitter, not a
+ * runtime assertion: if these helpers are the ONLY way code obtains a
+ * patch slot, the slot is guaranteed to be a 32-bit instruction.
+ *
+ * Usage:
+ *     u32 *skip = rv_fwd_branch_slot(RV_BEQ, rs1, rs2);
+ *     ... fall-through code ...
+ *     rv_patch_branch(skip, translation_ptr);
+ */
+#define rv_fwd_branch_slot(funct3, rs1, rs2)                                  \
+    ({ u32 *_slot = (u32 *)translation_ptr;                                   \
+       rv_b_type(0, (rs2), (rs1), (funct3), RV_OP_BRANCH);                    \
+       _slot; })
+
+#define rv_fwd_beq_slot(rs1, rs2)  rv_fwd_branch_slot(RV_BEQ,  rs1, rs2)
+#define rv_fwd_bne_slot(rs1, rs2)  rv_fwd_branch_slot(RV_BNE,  rs1, rs2)
+#define rv_fwd_blt_slot(rs1, rs2)  rv_fwd_branch_slot(RV_BLT,  rs1, rs2)
+#define rv_fwd_bge_slot(rs1, rs2)  rv_fwd_branch_slot(RV_BGE,  rs1, rs2)
+#define rv_fwd_bltu_slot(rs1, rs2) rv_fwd_branch_slot(RV_BLTU, rs1, rs2)
+#define rv_fwd_bgeu_slot(rs1, rs2) rv_fwd_branch_slot(RV_BGEU, rs1, rs2)
+#define rv_fwd_beqz_slot(rs)       rv_fwd_branch_slot(RV_BEQ,  rs, rv_zero)
+#define rv_fwd_bnez_slot(rs)       rv_fwd_branch_slot(RV_BNE,  rs, rv_zero)
+
+/* Unconditional forward JAL (J pseudo) slot. */
+#define rv_fwd_j_slot()                                                       \
+    ({ u32 *_slot = (u32 *)translation_ptr;                                   \
+       rv_j_type(0, rv_zero, RV_OP_JAL);                                      \
+       _slot; })
+
 /* System */
 #define rv_ecall()               rv_emit(0x00000073)
 #define rv_ebreak()              rv_emit(0x00100073)
