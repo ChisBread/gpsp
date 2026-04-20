@@ -240,6 +240,7 @@ int main(int argc, char **argv)
     const char *output_path = NULL;
     const char *state_path  = NULL;
     const char *keys_spec   = NULL;
+    u32 custom_idle_loop   = 0xFFFFFFFF;
     int frames    = 18000;   /* ~5 min */
     int use_jit   = 1;
     int show_regs = 0;
@@ -251,7 +252,8 @@ int main(int argc, char **argv)
                "  --regs          print registers every 100 frames\n"
                "  --dump-from N   dump individual frame files from frame N\n"
                "  --state FILE    load savestate before running\n"
-               "  --keys SPEC     key sequence, e.g. \"100:A+B,200:START,300:-A\"\n",
+               "  --keys SPEC     key sequence, e.g. \"100:A+B,200:START,300:-A\"\n"
+               "  --idle-loop PC  set idle_loop_target_pc, e.g. 0x80008ce\n",
                argv[0]);
         return 1;
     }
@@ -269,6 +271,8 @@ int main(int argc, char **argv)
             state_path = argv[argi + 1]; argi += 2;
         } else if (strcmp(argv[argi], "--keys") == 0 && argi + 1 < argc) {
             keys_spec = argv[argi + 1]; argi += 2;
+        } else if (strcmp(argv[argi], "--idle-loop") == 0 && argi + 1 < argc) {
+            custom_idle_loop = (u32)strtoul(argv[argi + 1], NULL, 0); argi += 2;
         } else {
             break;
         }
@@ -376,6 +380,12 @@ int main(int argc, char **argv)
     dynarec_enable = 0;
     (void)use_jit;
 #endif
+
+    /* --- Apply custom idle loop target --- */
+    if (custom_idle_loop != 0xFFFFFFFF) {
+        idle_loop_target_pc = custom_idle_loop;
+        printf("[harness] idle_loop_target_pc = 0x%08x\n", idle_loop_target_pc);
+    }
 
     /* --- Load savestate if requested --- */
     if (state_path) {

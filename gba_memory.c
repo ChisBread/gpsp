@@ -1575,6 +1575,14 @@ typedef struct
 
 #include "gba_over.h"
 
+typedef struct
+{
+   char gamepak_code[5];
+   u32 idle_loop_target_pc;
+} ini_experimental_t;
+
+#include "gba_over_experimental.h"
+
 static void load_game_config_over(const char *gamecode)
 {
   unsigned i = 0;
@@ -1625,6 +1633,24 @@ static void load_game_config_over(const char *gamecode)
      {
         translation_gate_target_pc[translation_gate_targets] = gbaover[i].translation_gate_target_3;
         translation_gate_targets++;
+     }
+  }
+
+  // Apply experimental idle loop overrides if enabled and no idle loop was set
+  if (use_experimental_overrides && idle_loop_target_pc == 0xFFFFFFFF)
+  {
+     for (i = 0; i < sizeof(gbaover_experimental)/sizeof(gbaover_experimental[0]); i++)
+     {
+        if (strcmp(gbaover_experimental[i].gamepak_code, gamecode))
+           continue;
+
+        printf("experimental idle loop match for : %s (0x%08x)\n",
+               gbaover_experimental[i].gamepak_code,
+               gbaover_experimental[i].idle_loop_target_pc);
+
+        if (gbaover_experimental[i].idle_loop_target_pc != 0)
+           idle_loop_target_pc = gbaover_experimental[i].idle_loop_target_pc;
+        break;
      }
   }
 }

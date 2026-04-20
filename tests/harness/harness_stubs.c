@@ -18,6 +18,7 @@ u32 skip_next_frame = 0;
 int sprite_limit = 1;
 boot_mode selected_boot_mode = boot_game;
 u32 idle_loop_target_pc = 0xFFFFFFFF;
+bool use_experimental_overrides = false;
 u32 translation_gate_targets = 0;
 u32 translation_gate_target_pc[MAX_TRANSLATION_GATES];
 int dynarec_enable = 0;

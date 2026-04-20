@@ -21,3 +21,5 @@ tests/harness/*.log
 bios/game*.gba
 bios/gba_bios.bin
 *.mp4
+tools/__pycache__/
+*.json

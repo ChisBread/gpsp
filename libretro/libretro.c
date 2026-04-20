@@ -97,6 +97,7 @@ static int rumble_mode = FEAT_AUTODETECT;
 static int serial_setting = SERIAL_MODE_AUTO;
 
 u32 idle_loop_target_pc = 0xFFFFFFFF;
+bool use_experimental_overrides = false;
 u32 translation_gate_target_pc[MAX_TRANSLATION_GATES];
 u32 translation_gate_targets = 0;
 
