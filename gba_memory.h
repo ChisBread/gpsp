@@ -312,6 +312,10 @@ extern u8 gamepak_backup[1024 * 128];
 extern bool gamepak_backup_dirty;
 
 #if defined(ESP_PLATFORM) && defined(GPSP_ROM_ASYNC_LOAD)
+/* Runtime enable for async ROM loading. When false, load_gamepak_raw
+ * falls back to the synchronous 1 MB block loop. Default: true. */
+extern bool gamepak_async_load_enabled;
+
 /* Load the next pending ROM page into PSRAM in the background. Thread-safe;
  * serializes internally with demand paging via load_gamepak_page(). Returns:
  *    1 = one page was loaded

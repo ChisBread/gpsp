@@ -56,6 +56,11 @@ extern uint32_t gpsp_frameskip_type;
 extern uint32_t gpsp_frameskip_interval;
 extern uint32_t gpsp_frameskip_threshold;
 
+/* Async ROM loading: when true, load_gamepak_raw streams only the
+ * first 1 MB synchronously and the remainder is prefetched in the
+ * background. When false, the synchronous loader is used. */
+extern bool gpsp_rom_async_load;
+
 esp_err_t gpsp_runtime_config_init(void);
 esp_err_t gpsp_runtime_config_save(void);
 

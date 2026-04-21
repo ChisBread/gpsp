@@ -212,6 +212,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         "{\"dynarec_enable\":%d,\"sprite_limit\":%d,\"boot_mode\":\"%s\""
         ",\"serial_mode\":\"%s\",\"rtc_mode\":\"%s\""
         ",\"frameskip_type\":%u,\"frameskip_interval\":%u,\"frameskip_threshold\":%u"
+        ",\"rom_async_load\":%d"
         ",\"netplay_role\":%d,\"netplay_use_tunnel\":%d,\"netplay_use_lobby\":%d"
         ",\"netplay_host\":\"%s\",\"netplay_port\":%u,\"netplay_nick\":\"%s\""
         ",\"netplay_tunnel_id\":\"%s\""
@@ -229,6 +230,7 @@ static esp_err_t settings_get_handler(httpd_req_t *req)
         (unsigned)gpsp_frameskip_type,
         (unsigned)gpsp_frameskip_interval,
         (unsigned)gpsp_frameskip_threshold,
+        gpsp_rom_async_load ? 1 : 0,
         gpsp_netplay_role,
         gpsp_netplay_use_tunnel ? 1 : 0,
         gpsp_netplay_use_lobby ? 1 : 0,
@@ -351,6 +353,17 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
             int v = atoi(p + 1);
             if (v >= 0 && v <= 100)
                 gpsp_frameskip_threshold = (uint32_t)v;
+        }
+    }
+
+    p = strstr(body, "\"rom_async_load\"");
+    if (p) {
+        p = strchr(p + 16, ':');
+        if (p) {
+            gpsp_rom_async_load = atoi(p + 1) ? true : false;
+#if defined(ESP_PLATFORM) && defined(GPSP_ROM_ASYNC_LOAD)
+            gamepak_async_load_enabled = gpsp_rom_async_load;
+#endif
         }
     }
 

@@ -49,6 +49,9 @@ static int s_gamepak_raw_fd = -1;
  * Range is [cursor, end). Protected by s_gamepak_io_lock. */
 static u32 s_prefetch_cursor;
 static u32 s_prefetch_end;
+
+/* Runtime enable; see gba_memory.h. */
+bool gamepak_async_load_enabled = true;
 #endif
 
 static inline void gamepak_io_lock(void)
@@ -2767,7 +2770,7 @@ static s32 load_gamepak_raw(const char *name)
 
     // Proceed to read the whole ROM or as much as possible.
 #if defined(ESP_PLATFORM) && defined(GPSP_ROM_ASYNC_LOAD)
-    {
+    if (gamepak_async_load_enabled) {
       /* Fast path: load only the first 1 MB block synchronously (gives
        * CPU the reset vector + early game code). Remaining blocks are
        * read 1 MB at a time by the background prefetch task so per-call
@@ -2800,8 +2803,9 @@ static s32 load_gamepak_raw(const char *name)
                (long long)(preload1 - preload0),
                (unsigned)(s_prefetch_end > 1 ? s_prefetch_end - 1 : 0),
                (unsigned)ldblks);
-    }
-#else
+    } else
+#endif
+    {
     for (i = 0; i < ldblks; i++)
     {
       // Load 1MB chunk and map it
@@ -2833,7 +2837,7 @@ static s32 load_gamepak_raw(const char *name)
       map_us += t_stage1 - t_stage0;
 #endif
     }
-#endif
+    }
 #ifdef ESP_PLATFORM
     {
       int64_t open_us = t_open1 - t_open0;

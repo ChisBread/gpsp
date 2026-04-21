@@ -46,6 +46,15 @@ uint32_t gpsp_frameskip_type;
 uint32_t gpsp_frameskip_interval;
 uint32_t gpsp_frameskip_threshold;
 
+bool gpsp_rom_async_load;
+
+static void gpsp_apply_rom_async_load(void)
+{
+#if defined(ESP_PLATFORM) && defined(GPSP_ROM_ASYNC_LOAD)
+    gamepak_async_load_enabled = gpsp_rom_async_load;
+#endif
+}
+
 static int parse_bool_value(const char *value, int *out)
 {
     if (!value || !out) {
@@ -143,6 +152,13 @@ static void gpsp_runtime_config_set_defaults(void)
     gpsp_frameskip_type = 0;
     gpsp_frameskip_interval = 0;
     gpsp_frameskip_threshold = 33;
+
+#if defined(ESP_PLATFORM) && defined(GPSP_ROM_ASYNC_LOAD)
+    gpsp_rom_async_load = true;
+#else
+    gpsp_rom_async_load = false;
+#endif
+    gpsp_apply_rom_async_load();
 }
 
 static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
@@ -367,6 +383,15 @@ static void gpsp_runtime_config_apply_pair(const char *key, const char *value)
         return;
     }
 
+    if (strcmp(key, "rom_async_load") == 0) {
+        int enabled;
+        if (parse_bool_value(value, &enabled)) {
+            gpsp_rom_async_load = enabled ? true : false;
+            gpsp_apply_rom_async_load();
+        }
+        return;
+    }
+
     ESP_LOGW(TAG, "Ignoring unknown or invalid config entry: %s=%s", key, value);
 }
 
@@ -423,7 +448,8 @@ esp_err_t gpsp_runtime_config_save(void)
             "netplay_lobby_country=%s\n"
             "frameskip_interval=%u\n"
             "frameskip_type=%u\n"
-            "frameskip_threshold=%u\n",
+            "frameskip_threshold=%u\n"
+            "rom_async_load=%d\n",
             dynarec_enable ? 1 : 0,
             sprite_limit ? 1 : 0,
             selected_boot_mode == boot_bios ? 1 : 0,
@@ -445,7 +471,8 @@ esp_err_t gpsp_runtime_config_save(void)
             gpsp_netplay_lobby_country,
             (unsigned)gpsp_frameskip_interval,
             (unsigned)gpsp_frameskip_type,
-            (unsigned)gpsp_frameskip_threshold);
+            (unsigned)gpsp_frameskip_threshold,
+            gpsp_rom_async_load ? 1 : 0);
     fclose(config_file);
     return ESP_OK;
 }

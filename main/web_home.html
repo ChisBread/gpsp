@@ -244,6 +244,10 @@ btn:hover{background:#3a4a6a}
     </select>
   </div>
   <div class="row">
+    <label data-i18n="rom_async_load">异步加载 ROM</label>
+    <label class="toggle"><input type="checkbox" id="cfg_rom_async"><span class="sl"></span></label>
+  </div>
+  <div class="row">
     <label data-i18n="serial_mode">连接线模式</label>
     <select id="cfg_serial">
       <option value="auto" data-i18n="serial_auto">自动</option>
@@ -454,6 +458,7 @@ zh:{
   free_mem:'空闲内存',frame_sync:'帧同步',audio_prod:'音频产出(GBA侧)',audio_cons:'音频消费(I2S)',
   settings:'设置',dynarec:'动态重编译 (JIT)',sprite_limit:'精灵数量限制',
   boot_mode:'启动模式',boot_game:'直接进入游戏',boot_bios:'BIOS 动画',
+  rom_async_load:'异步加载 ROM',
   serial_mode:'连接线模式',serial_auto:'自动',serial_off:'关闭',serial_rfu:'GBA 无线适配器',
   serial_poke:'连接线 - 宝可梦模式',serial_aw1:'连接线 - 高级战争1',serial_aw2:'连接线 - 高级战争2',
   rtc_mode:'RTC 时钟',rtc_auto:'自动',rtc_on:'开启',rtc_off:'关闭',
@@ -547,6 +552,7 @@ en:{
   free_mem:'Free Mem',frame_sync:'Frame Sync',audio_prod:'Audio Out (GBA)',audio_cons:'Audio In (I2S)',
   settings:'Settings',dynarec:'Dynamic Recompilation (JIT)',sprite_limit:'Sprite Limit',
   boot_mode:'Boot Mode',boot_game:'Start Game Directly',boot_bios:'BIOS Animation',
+  rom_async_load:'Async ROM Load',
   serial_mode:'Link Cable Mode',serial_auto:'Automatic',serial_off:'Disabled',serial_rfu:'GBA Wireless Adapter',
   serial_poke:'Link Cable - Pokemon Gen3',serial_aw1:'Link Cable - Advance Wars 1',serial_aw2:'Link Cable - Advance Wars 2',
   rtc_mode:'RTC Clock',rtc_auto:'Auto',rtc_on:'Enabled',rtc_off:'Disabled',
@@ -1169,6 +1175,7 @@ async function loadSettings(){
     $('cfg_dynarec').checked = !!j.dynarec_enable;
     $('cfg_sprite').checked = !!j.sprite_limit;
     $('cfg_boot').value = j.boot_mode || 'game';
+    $('cfg_rom_async').checked = !!j.rom_async_load;
     $('cfg_serial').value = j.serial_mode || 'auto';
     $('cfg_rtc').value = j.rtc_mode || 'auto';
     $('cfg_frameskip').value = String(j.frameskip_type || 0);
@@ -1221,6 +1228,7 @@ async function saveSettings(){
     dynarec_enable: $('cfg_dynarec').checked ? 1 : 0,
     sprite_limit: $('cfg_sprite').checked ? 1 : 0,
     boot_mode: $('cfg_boot').value,
+    rom_async_load: $('cfg_rom_async').checked ? 1 : 0,
     serial_mode: $('cfg_serial').value,
     rtc_mode: $('cfg_rtc').value,
     frameskip_type: parseInt($('cfg_frameskip').value, 10) || 0,
