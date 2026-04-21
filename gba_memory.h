@@ -311,6 +311,18 @@ extern u32 eeprom_size;
 extern u8 gamepak_backup[1024 * 128];
 extern bool gamepak_backup_dirty;
 
+#if defined(ESP_PLATFORM) && defined(GPSP_ROM_ASYNC_LOAD)
+/* Load the next pending ROM page into PSRAM in the background. Thread-safe;
+ * serializes internally with demand paging via load_gamepak_page(). Returns:
+ *    1 = one page was loaded
+ *    0 = no more pages pending
+ *   <0 = I/O error */
+int gamepak_prefetch_next_page(void);
+
+/* True if background prefetch still has pages to load. */
+bool gamepak_prefetch_pending(void);
+#endif
+
 // Page sticky bit routines
 extern u32 gamepak_sticky_bit[1024/32];
 static inline void touch_gamepak_page(u32 physical_index)

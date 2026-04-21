@@ -35,6 +35,19 @@ menu "gpSP GBA Emulator"
             and the LRU paging mechanism loads remaining pages from SD on demand.
             With 32MB PSRAM, set to 32 to cache most ROMs entirely.
 
+    config GPSP_ROM_ASYNC_LOAD
+        bool "Async ROM loading (fast boot)"
+        default y
+        depends on IDF_TARGET_ESP32P4
+        help
+            Load only the first 32KB ROM page synchronously at boot and fill
+            the rest in the background on the service core. Time-to-first-frame
+            drops from several seconds (32MB ROM) to tens of milliseconds;
+            remaining pages are streamed in concurrently — or pulled in by
+            demand paging if the CPU reaches them first.
+            Uses POSIX pread() on the raw fd to bypass newlib stdio buffering,
+            so no extra DIRAM is allocated.
+
     config GPSP_CPU_PROFILE_STATS
         bool "Enable CPU profile statistics"
         default n

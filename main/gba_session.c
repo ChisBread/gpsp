@@ -459,6 +459,78 @@ static void save_task_await(void)
     xSemaphoreGive(s_save_done);
 }
 
+/* ── Background ROM prefetch ─────────────────────────────────────── */
+
+#ifdef GPSP_ROM_ASYNC_LOAD
+
+#define PREFETCH_TASK_STACK  2560
+#define PREFETCH_TASK_PRIO   (tskIDLE_PRIORITY + 1)
+
+static TaskHandle_t s_prefetch_task;
+static volatile bool s_prefetch_stop;
+
+static void rom_prefetch_task(void *param)
+{
+    (void)param;
+    int64_t t0 = esp_timer_get_time();
+    uint32_t loaded = 0;
+
+    while (!s_prefetch_stop) {
+        int r = gamepak_prefetch_next_page();
+        if (r == 0) break;         /* done */
+        if (r < 0) {
+            ESP_LOGW(TAG, "ROM prefetch I/O error, stopping");
+            break;
+        }
+        loaded++;
+        /* No vTaskDelay here: prio is IDLE+1, so anything at normal
+         * priority (emulator core, IDF tasks) preempts us automatically.
+         * A vTaskDelay(1) would add one tick (~10 ms @ 100 Hz) per page
+         * and dominate the 1.5 ms/page I/O cost. */
+    }
+
+    int64_t t1 = esp_timer_get_time();
+    ESP_LOGI(TAG,
+             "ROM prefetch %s: %u pages in %lld us",
+             s_prefetch_stop ? "stopped" : "done",
+             (unsigned)loaded,
+             (long long)(t1 - t0));
+
+    s_prefetch_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static void rom_prefetch_start(void)
+{
+    if (s_prefetch_task) return;
+    if (!gamepak_prefetch_pending()) return;
+
+    s_prefetch_stop = false;
+    BaseType_t ret = xTaskCreatePinnedToCore(
+        rom_prefetch_task, "rom_prefetch",
+        PREFETCH_TASK_STACK, NULL,
+        PREFETCH_TASK_PRIO, &s_prefetch_task,
+        SAVE_TASK_CORE);
+    if (ret != pdPASS) {
+        ESP_LOGW(TAG, "ROM prefetch task create failed");
+        s_prefetch_task = NULL;
+    }
+}
+
+static void rom_prefetch_stop_and_join(void)
+{
+    if (!s_prefetch_task) return;
+    s_prefetch_stop = true;
+    while (s_prefetch_task != NULL) {
+        vTaskDelay(1);
+    }
+}
+
+#else   /* !GPSP_ROM_ASYNC_LOAD */
+static inline void rom_prefetch_start(void) {}
+static inline void rom_prefetch_stop_and_join(void) {}
+#endif
+
 /* Copy backup → staging and kick the save task.
  * Waits for any prior save to drain before touching the staging buffer. */
 static void save_task_kick(size_t size)
@@ -882,6 +954,7 @@ static esp_err_t execute_command(gba_session_command_t *command)
             return finalize_command(command, ESP_OK);
 
         case GBA_SESSION_CMD_RELOAD:
+            rom_prefetch_stop_and_join();
             return finalize_command(command, execute_reload(command));
 
         case GBA_SESSION_CMD_SAVE_STATE:
@@ -891,6 +964,7 @@ static esp_err_t execute_command(gba_session_command_t *command)
             return finalize_command(command, load_state_file(command->state_slot));
 
         case GBA_SESSION_CMD_SHUTDOWN:
+            rom_prefetch_stop_and_join();
             /* Emu loop exit path will do the final sync flush. */
             s_session.stop_requested = true;
             return finalize_command(command, ESP_OK);
@@ -1015,6 +1089,11 @@ static esp_err_t execute_reload(const gba_session_command_t *command)
 
     /* Update recent game list */
     storage_update_recent_list(s_session.rom_path, 10);
+
+    /* Kick off background ROM prefetch so remaining pages land in PSRAM
+     * while the emu task starts running. Safe when disabled at compile
+     * time (stubs become no-ops). */
+    rom_prefetch_start();
 
     return ESP_OK;
 }

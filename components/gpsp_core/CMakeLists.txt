@@ -65,6 +65,7 @@ idf_component_register(
     INCLUDE_DIRS
         ${GPSP_CORE_INCLUDES}
     REQUIRES
+        freertos
         esp_timer
         esp_mm
 )
@@ -100,6 +101,10 @@ if(CONFIG_GPSP_ROM_BUFFER_SIZE)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC
         ROM_BUFFER_SIZE=${CONFIG_GPSP_ROM_BUFFER_SIZE}
     )
+endif()
+
+if(CONFIG_GPSP_ROM_ASYNC_LOAD)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC GPSP_ROM_ASYNC_LOAD)
 endif()
 
 # Aggressive optimization for hot emulation code

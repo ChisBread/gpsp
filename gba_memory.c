@@ -21,11 +21,72 @@
 #include "streams/file_stream.h"
 
 #ifdef ESP_PLATFORM
+#include <fcntl.h>
+#include <unistd.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 
 static const char *GBA_MEMORY_TAG = "gba_memory";
+
+/* Serializes demand-paging in load_gamepak_page against background
+ * prefetch and ROM reload. Created once in init_gamepak_buffer. */
+static SemaphoreHandle_t s_gamepak_io_lock;
+
+/* POSIX fd to the ROM opened alongside gamepak_file_large. Used by
+ * page-sized reads (32KB) to bypass newlib stdio buffering — fread()
+ * with BUFSIZ=1024 needs ~32 syscalls per 32KB page, whereas pread()
+ * copies straight from the FATFS window cache into the PSRAM swap
+ * buffer with zero extra DIRAM. */
+static int s_gamepak_raw_fd = -1;
+
+#ifdef GPSP_ROM_ASYNC_LOAD
+/* Background prefetch cursor: next physical page to try loading.
+ * Range is [cursor, end). Protected by s_gamepak_io_lock. */
+static u32 s_prefetch_cursor;
+static u32 s_prefetch_end;
+#endif
+
+static inline void gamepak_io_lock(void)
+{
+  if (s_gamepak_io_lock)
+    xSemaphoreTake(s_gamepak_io_lock, portMAX_DELAY);
+}
+
+static inline void gamepak_io_unlock(void)
+{
+  if (s_gamepak_io_lock)
+    xSemaphoreGive(s_gamepak_io_lock);
+}
+
+/* Read one 32KB ROM page at physical index `page` into `dst`.
+ * Prefers pread() on the raw fd; falls back to filestream_read. */
+extern RFILE *gamepak_file_large;
+static int gamepak_read_page_raw(u32 page, u8 *dst)
+{
+  off_t offset = (off_t)page * (32 * 1024);
+  if (s_gamepak_raw_fd >= 0) {
+    ssize_t got = 0;
+    while (got < 32 * 1024) {
+      ssize_t r = pread(s_gamepak_raw_fd, dst + got,
+                        (size_t)(32 * 1024 - got), offset + got);
+      if (r <= 0) break;
+      got += r;
+    }
+    return got == 32 * 1024 ? 0 : -1;
+  }
+  filestream_seek(gamepak_file_large, offset, SEEK_SET);
+  return filestream_read(gamepak_file_large, dst, 32 * 1024) == 32 * 1024 ? 0 : -1;
+}
+
+static inline bool gamepak_page_is_mapped(u32 phy)
+{
+  return memory_map_read[(0x8000000u / (32u * 1024u)) + phy] != NULL;
+}
 #endif
 
 /* Sound */
@@ -2210,6 +2271,42 @@ static u32 evict_gamepak_page(void)
 
 u8 *load_gamepak_page(u32 physical_index)
 {
+#ifdef ESP_PLATFORM
+  u8 *result;
+  gamepak_io_lock();
+
+  if (physical_index < (gamepak_size >> 15)) {
+    u8 *mapped = memory_map_read[(0x8000000u / (32u * 1024u)) + physical_index];
+    if (mapped) {
+      gamepak_io_unlock();
+      return mapped;
+    }
+  } else {
+    gamepak_io_unlock();
+    return &gamepak_buffers[0][0];
+  }
+
+  {
+    u32 entry = evict_gamepak_page();
+    u32 block_idx = entry / 32;
+    u32 block_off = entry % 32;
+    u8 *swap_location = &gamepak_buffers[block_idx][32 * 1024 * block_off];
+
+    gamepak_blk_queue[entry].phy_rom = physical_index;
+
+    gamepak_read_page_raw(physical_index, swap_location);
+
+    map_rom_entry(read, physical_index, swap_location, gamepak_size >> 15);
+
+    if (physical_index == 0)
+      update_gpio_romregs();
+
+    result = swap_location;
+  }
+
+  gamepak_io_unlock();
+  return result;
+#else
   if(physical_index >= (gamepak_size >> 15))
     return &gamepak_buffers[0][0];
 
@@ -2232,11 +2329,72 @@ u8 *load_gamepak_page(u32 physical_index)
     update_gpio_romregs();
 
   return swap_location;
+#endif
 }
+
+#if defined(ESP_PLATFORM) && defined(GPSP_ROM_ASYNC_LOAD)
+/* Batched prefetch: one 1 MB block per invocation.
+ *
+ * We deliberately use filestream_read (libretro VFS buffered path) here
+ * rather than pread(): on ESP the buffered path stages through a 32 KB
+ * DIRAM DMA-capable bounce buffer, which lets the SDMMC driver issue
+ * aligned bulk DMA transfers. pread() straight into PSRAM would force
+ * the SDMMC layer into a slower per-sector path. */
+int gamepak_prefetch_next_page(void)
+{
+  int rc = 0;
+  gamepak_io_lock();
+
+  if (s_prefetch_cursor < s_prefetch_end && gamepak_file_large) {
+    u32 i = s_prefetch_cursor++;
+    u32 rom_blocks = gamepak_size >> 15;
+    off_t offset = (off_t)i * (off_t)gamepak_buffer_blocksize;
+    u8 *dst = gamepak_buffers[i];
+    size_t need = gamepak_buffer_blocksize;
+
+    filestream_seek(gamepak_file_large, offset, SEEK_SET);
+    int64_t got = filestream_read(gamepak_file_large, dst, need);
+    if (got <= 0) {
+      rc = -1;
+      goto out;
+    }
+
+    for (u32 j = 0; j < 32 && i * 32 + j < rom_blocks; j++) {
+      u32 phyn = i * 32 + j;
+      u8 *blkptr = &gamepak_buffers[i][32 * 1024 * j];
+      if (gamepak_page_is_mapped(phyn))
+        continue;
+      u32 entry = evict_gamepak_page();
+      gamepak_blk_queue[entry].phy_rom = phyn;
+      map_rom_entry(read, phyn, blkptr, rom_blocks);
+      if (phyn == 0)
+        update_gpio_romregs();
+    }
+    rc = 1;
+  }
+
+out:
+  gamepak_io_unlock();
+  return rc;
+}
+
+bool gamepak_prefetch_pending(void)
+{
+  bool pending;
+  gamepak_io_lock();
+  pending = s_prefetch_cursor < s_prefetch_end;
+  gamepak_io_unlock();
+  return pending;
+}
+#endif
 
 u32 init_gamepak_buffer(void)
 {
   unsigned i;
+#ifdef ESP_PLATFORM
+  if (!s_gamepak_io_lock)
+    s_gamepak_io_lock = xSemaphoreCreateMutex();
+#endif
   // Try to allocate up to 32 blocks of 1MB each
   gamepak_buffer_count = 0;
   while (gamepak_buffer_count < ROM_BUFFER_SIZE)
@@ -2337,6 +2495,17 @@ void init_memory(void)
 
 void memory_term(void)
 {
+#ifdef ESP_PLATFORM
+  if (s_gamepak_raw_fd >= 0) {
+    close(s_gamepak_raw_fd);
+    s_gamepak_raw_fd = -1;
+  }
+#ifdef GPSP_ROM_ASYNC_LOAD
+  s_prefetch_cursor = 0;
+  s_prefetch_end = 0;
+#endif
+#endif
+
   if (gamepak_file_large)
   {
     filestream_close(gamepak_file_large);
@@ -2551,6 +2720,16 @@ static s32 load_gamepak_raw(const char *name)
   int64_t map_us = 0;
 #endif
   /* Close previous handle to avoid file descriptor leak on ROM switch */
+#ifdef ESP_PLATFORM
+  if (s_gamepak_raw_fd >= 0) {
+    close(s_gamepak_raw_fd);
+    s_gamepak_raw_fd = -1;
+  }
+#ifdef GPSP_ROM_ASYNC_LOAD
+  s_prefetch_cursor = 0;
+  s_prefetch_end = 0;
+#endif
+#endif
   if (gamepak_file_large) {
     filestream_close(gamepak_file_large);
     gamepak_file_large = NULL;
@@ -2559,6 +2738,11 @@ static s32 load_gamepak_raw(const char *name)
                                        RETRO_VFS_FILE_ACCESS_HINT_NONE);
 #ifdef ESP_PLATFORM
   t_open1 = esp_timer_get_time();
+  s_gamepak_raw_fd = open(name, O_RDONLY);
+  if (s_gamepak_raw_fd < 0) {
+    ESP_LOGW(GBA_MEMORY_TAG,
+             "posix open failed (%s); page reads will use stdio", name);
+  }
 #endif
   if(gamepak_file_large)
   {
@@ -2582,6 +2766,42 @@ static s32 load_gamepak_raw(const char *name)
     map_null(read, 0x8000000, 0xD000000);
 
     // Proceed to read the whole ROM or as much as possible.
+#if defined(ESP_PLATFORM) && defined(GPSP_ROM_ASYNC_LOAD)
+    {
+      /* Fast path: load only the first 1 MB block synchronously (gives
+       * CPU the reset vector + early game code). Remaining blocks are
+       * read 1 MB at a time by the background prefetch task so per-call
+       * FATFS/SDMMC overhead is amortised across 32 pages.
+       *
+       * Pages beyond ldblks*32 (ROMs larger than PSRAM residency) are
+       * left unmapped and pulled in by demand paging as before. */
+      int64_t preload0 = esp_timer_get_time();
+      size_t need0 = gamepak_buffer_blocksize;
+      filestream_seek(gamepak_file_large, 0, SEEK_SET);
+      int64_t got0 = filestream_read(gamepak_file_large,
+                                     gamepak_buffers[0], need0);
+      for (j = 0; j < 32 && j < rom_blocks; j++) {
+        u32 phyn = j;
+        u8 *blkptr = &gamepak_buffers[0][32 * 1024 * j];
+        u32 entry = evict_gamepak_page();
+        gamepak_blk_queue[entry].phy_rom = phyn;
+        map_rom_entry(read, phyn, blkptr, rom_blocks);
+        if (phyn == 0)
+          update_gpio_romregs();
+      }
+      int64_t preload1 = esp_timer_get_time();
+      (void)i;
+      bytes_loaded = got0 > 0 ? (size_t)got0 : 0;
+      read_us = preload1 - preload0;
+      s_prefetch_cursor = 1;                  /* next block to load */
+      s_prefetch_end = ldblks;                /* total 1 MB blocks resident */
+      ESP_LOGI(GBA_MEMORY_TAG,
+               "ROM async-load: 1st MB in %lld us, %u MB queued (cap %u MB)",
+               (long long)(preload1 - preload0),
+               (unsigned)(s_prefetch_end > 1 ? s_prefetch_end - 1 : 0),
+               (unsigned)ldblks);
+    }
+#else
     for (i = 0; i < ldblks; i++)
     {
       // Load 1MB chunk and map it
@@ -2613,6 +2833,7 @@ static s32 load_gamepak_raw(const char *name)
       map_us += t_stage1 - t_stage0;
 #endif
     }
+#endif
 #ifdef ESP_PLATFORM
     {
       int64_t open_us = t_open1 - t_open0;
@@ -2653,8 +2874,13 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
    if (load_gamepak_raw(name))
       return -1;
 
-   // Buffer 0 always has the first 1MB chunk of the ROM
-   memcpy(game_code,  &gamepak_buffers[0][0xAC],  4);
+   /* Page 0 is always mapped at this point (either by the sync loader
+    * or the async first-page preload).  Read the game header through
+    * the ROM page mapping so we do not assume buffer 0 holds it. */
+   {
+      u8 *page0 = load_gamepak_page(0);
+      memcpy(game_code, &page0[0xAC], 4);
+   }
 
    idle_loop_target_pc = 0xFFFFFFFF;
    translation_gate_targets = 0;
