@@ -110,6 +110,10 @@ host 应升档到更保守 profile 重试。
 
 host 应在改频前发 `RESET_LINK`、改频后立即发 `SYNC` 验证；若 SYNC 失败则降档。
 
+**重要**：sclk 改变后，每个 profile 的 DUMMY 周期数（[02-protocol.md §2.3](02-protocol.md)）会变。
+host 必须在 `LINK_SPEED` 之后重新发 `TIMING_GET_DUMMY` 拉取新表，否则下一个读类命令会 underrun。
+任何 `TIMING_SET` 也同样要重拉表（仅写入的那个 profile 会变，但 host 拉的是全表，简化协议）。
+
 ## 3.9 测量端口（可选）
 
 `INFO` capability 若公布 `HAS_TIMING_MONITOR`：FPGA 可在每次事务后更新一组只读寄存器，

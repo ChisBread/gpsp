@@ -24,12 +24,74 @@
 - `CMD` 高 1 bit 是 `R/W` 方向位（1 = host READ from FPGA, 0 = host WRITE to FPGA）。剩下 7 bit 是 opcode
 - `ADDR` 长度由 opcode 决定，对齐到字节边界
 - `HDR` 是命令特定的额外参数（length、count 等），变长
-- `DUMMY` 让 FPGA 准备数据（仅 READ 类）。固定为 8 个 sclk 周期（= 1 字节时间，简化解码）
+- `DUMMY` 让 FPGA 完成卡带 strobe、把 IO0..3 切到输出方向（仅 READ 类）。**长度自适应**，详见 §2.3
 - `DATA` 长度由 HDR 中的 length 字段决定，或开放至 CS 抬起为止（流式）
 
 每个事务由 CS 下降沿启动、上升沿结束。CS 抬起即提交（write）/ 终止（stream）。
 
-## 2.3 完整性
+## 2.3 自适应 DUMMY
+
+### 2.3.1 动机
+
+DUMMY 阶段必须覆盖两件事：
+
+1. **链路 turnaround**：IO0..3 从 host driving 切到 FPGA driving。固定 ≥ 8 sclk
+2. **卡带 strobe**：FPGA 收到 ADDR 后启动卡带访问，等到数据被采样回来
+
+只要 DUMMY 时长 ≥ 二者最大值，host 在 DATA 阶段第一字节就能拿到有效数据，不会 underrun。
+
+DUMMY 周期数由 host 与 FPGA 按当前 **timing profile** 与 **sclk 频率** 共同推算，必须保持一致。
+
+### 2.3.2 计算公式
+
+设：
+
+- `f_sclk` = 当前 QSPI sclk (Hz)
+- `T_strobe` = `t_addr_setup_ns + t_strobe_low_first_ns + t_data_hold_ns + t_strobe_recover_ns`（profile 字段，详见 [03-timing.md](03-timing.md)）
+
+则该 profile 下读类命令的 DUMMY sclk 周期数：
+
+```
+N_dummy = max( 8,  ceil( T_strobe × f_sclk / 1e9 ) + 4 )
+```
+
+`+4` 是 FPGA 内部 cross-domain FIFO + 数据对齐的余量（具体值由 gateware 决定，必须 ≥ 2）。
+
+DUMMY 周期数对齐到 4 的倍数（quad mode 下每 2 sclk = 1 nibble，对齐避免半字节边界）：
+
+```
+N_dummy = align_up(N_dummy, 4)
+```
+
+### 2.3.3 当前生效值的查询
+
+host 不需要每次自己算（也不应该，因为 `+4` 余量是 FPGA 实现细节）。改为：
+
+- host 每次 `TIMING_SET` 或 `LINK_SPEED` 之后，必须发一次 `TIMING_GET_DUMMY`（OP=`0x43`）查询每个 profile 当前生效的 `N_dummy`
+- FPGA 缓存这张表；后续读类命令到来时按命令绑定的 region → profile 选用对应 `N_dummy`
+- host 发命令前从本地副本拿对应值，写到 QSPI master 的 dummy 设置寄存器
+
+`TIMING_GET_DUMMY` 响应格式：
+
+```c
+struct dummy_table {           // 16 bytes
+    u8 dummy_sclk[8];          // profile 0..7 各自 N_dummy（单位：sclk 周期）
+    u8 reserved[8];
+};
+```
+
+### 2.3.4 与"非读"命令的关系
+
+- WRITE 命令（含 WR_BURST、WRITE_LIST）**不需要 DUMMY**：DATA 是 host → FPGA，方向不变；FPGA 负责把数据落到卡带 strobe 时序里，慢就慢，与帧无关
+- BUS_CYCLES 的响应（如有 SAMPLE_AD）：因事务长度可变，DUMMY 不再够覆盖 → 改用流控（§2.7），不依赖 DUMMY
+- STREAM 读：**首字节** 仍需要 `N_dummy` 覆盖第一次卡带 strobe；之后由 ping-pong FIFO 喂数据，不再 underrun（除非主机 sclk 一直跑得比卡带快，见 §2.7 流控）
+
+### 2.3.5 失败模式
+
+- host 用了过短的 DUMMY（例如改了 profile 没重新拉表）：FPGA 检测到首字节还没准备好仍被时钟出 → 输出 0xFF 占位 + 置 `FIFO_UNDERRUN` + 在 STATUS 报 `last_err = LINK_DESYNC`
+- host 用了过长的 DUMMY：无害，仅浪费几十 ns
+
+## 2.4 完整性
 
 每个 host → FPGA 帧（不含 stream READ）的 DATA 段末尾追加一字节 **XOR8**（对从 CMD 到 DATA-1 的所有字节按字节异或）。FPGA → host 帧同样附 XOR8。
 
@@ -38,7 +100,7 @@
 - FPGA 收到坏帧：丢弃 + 置 `ERR` flag；不应用任何副作用
 - host 收到坏帧：发 `RESET_LINK` 重同步
 
-## 2.4 命令分组
+## 2.5 命令分组
 
 | 范围 | 类别 |
 |---|---|
@@ -55,7 +117,7 @@
 
 下方 R/W 列：`H←F` = host 从 FPGA 读, `H→F` = host 向 FPGA 写。
 
-### 2.4.1 链路 / 控制
+### 2.5.1 链路 / 控制
 
 | OP | Name | ADDR | HDR | R/W | DATA | 说明 |
 |---|---|---|---|---|---|---|
@@ -64,7 +126,7 @@
 | 0x02 | RESET_BUS | – | – | – | – | 复位卡带侧（拉 cart power 或 strobe high） |
 | 0x03 | SYNC | – | – | H←F 4B | "GBAB" magic | 链路 alive 检测 |
 
-### 2.4.2 状态 / 信息
+### 2.5.2 状态 / 信息
 
 | OP | Name | ADDR | HDR | R/W | DATA | 说明 |
 |---|---|---|---|---|---|---|
@@ -76,13 +138,13 @@ struct cart_status {       // 8 bytes
     u8  link_ok;
     u8  irq_flags;         // HOTPLUG|CART_IRQ|FIFO_HALF|FIFO_UNDERRUN|ERR|OP_DONE
     u16 fifo_level;        // bytes available in stream FIFO
-    u16 last_err;           // 错误码（见 02.10）
+    u16 last_err;           // 错误码（见 §2.6）
     u8  cart_present;
     u8  reserved;
 };
 ```
 
-### 2.4.3 Region 配置（详见 [04-regions.md](04-regions.md)）
+### 2.5.3 Region 配置（详见 [04-regions.md](04-regions.md)）
 
 | OP | Name | ADDR | HDR | R/W | DATA | 说明 |
 |---|---|---|---|---|---|---|
@@ -91,15 +153,16 @@ struct cart_status {       // 8 bytes
 | 0x22 | REGION_GET | idx:8b | – | H←F 16B | `region_desc` | 读回 |
 | 0x23 | REGION_INVALIDATE | idx:8b | – | – | – | 强制丢弃该 region 在 FPGA 内的任何缓存/预取数据 |
 
-### 2.4.4 Timing 配置（详见 [03-timing.md](03-timing.md)）
+### 2.5.4 Timing 配置（详见 [03-timing.md](03-timing.md)）
 
 | OP | Name | ADDR | HDR | R/W | DATA | 说明 |
 |---|---|---|---|---|---|---|
 | 0x40 | TIMING_SET | idx:8b | – | H→F 16B | `timing_profile` | 写入 profile（最多 8 组） |
 | 0x41 | TIMING_GET | idx:8b | – | H←F 16B | `timing_profile` | 读回 |
 | 0x42 | LINK_SPEED | – | – | H→F 1B | freq_code | 协商 QSPI sclk |
+| 0x43 | TIMING_GET_DUMMY | – | – | H←F 16B | `dummy_table` | 查询当前 sclk 下各 profile 的 N_dummy（详见 §2.3.3） |
 
-### 2.4.5 严格透传读写（STRICT）
+### 2.5.5 严格透传读写（STRICT）
 
 **每条命令保证 1:1 对应到一组确定的总线周期，FPGA 禁用一切优化**。
 
@@ -123,7 +186,7 @@ ADDR 长度按通道有效位宽：/CS 用 24-bit，/CS2 用 16-bit（FPGA 内�
 **STRICT 命令对 region 属性免疫** —— 即使 region 标了 BURST_OK，STRICT 也走严格路径。
 host 用这些命令访问烧录卡控制寄存器、有副作用的位置。
 
-### 2.4.6 优化读写（BURST / STREAM）
+### 2.5.6 优化读写（BURST / STREAM）
 
 **仅当目标 region 标了对应属性时才允许；否则 FPGA 返回 ERR**。
 
@@ -140,13 +203,13 @@ host 用这些命令访问烧录卡控制寄存器、有副作用的位置。
 
 `len` 0 视为非法。`RD_STREAM` 越过 region 边界时 FPGA 自动停止并置 ERR 等待 host CS↑。
 
-### 2.4.7 复合 / 脚本
+### 2.5.7 复合 / 脚本
 
 | OP | Name | ADDR | HDR | R/W | DATA | 说明 |
 |---|---|---|---|---|---|---|
 | 0xA0 | WRITE_LIST | – | count:16b | H→F | 见下 | 散列写 |
 | 0xA1 | READ_LIST | – | count:16b | H↔F | 见下 | 散列读 |
-| 0xA8 | BUS_CYCLES | – | count:16b | H↔F | 字节流，见 02.5 | 原始总线周期 |
+| 0xA8 | BUS_CYCLES | – | count:16b | H↔F | 字节流，见 §2.5.8 | 原始总线周期 |
 
 `WRITE_LIST` 每条目 8 字节：`(addr:24b, data:16b, ch:8b, flags:8b, pad:8b)`。
 `data` 字段在 ch=/CS2 时只用低 8b，高 8b 必须为 0。
@@ -160,7 +223,7 @@ ch=/CS 每条目 2B，ch=/CS2 每条目 1B；不同条目可混合通道。
 - bit0: STRICT（即使 region 允许 burst，本条按 strict 走）
 - bit1: BARRIER（执行完此条后 FPGA 等到 cart 真正空闲再继续；用于切 bank 后下一指令必须看到新 bank）
 
-### 2.4.8 BUS_CYCLES 详解（关键）
+### 2.5.8 BUS_CYCLES 详解（关键）
 
 让 host 直接编排任意总线周期。每个周期一字节"操作码" + 可选参数：
 
@@ -187,7 +250,7 @@ ch=/CS 每条目 2B，ch=/CS2 每条目 1B；不同条目可混合通道。
 
 FPGA 内部把 BUS_CYCLES 作为最高优先级原子事务，禁止与其它操作交错。
 
-### 2.4.9 IRQ / 维护
+### 2.5.9 IRQ / 维护
 
 | OP | Name | ADDR | HDR | R/W | DATA | 说明 |
 |---|---|---|---|---|---|---|
@@ -195,14 +258,14 @@ FPGA 内部把 BUS_CYCLES 作为最高优先级原子事务，禁止与其它操
 | 0xC1 | IRQ_MASK | – | – | H→F 1B | enable mask | 哪些 flag 允许置 IRQ pin |
 | 0xC8 | INVALIDATE_ALL | – | – | – | – | 丢弃 FPGA 内所有缓存/预取（必要时 host 切 bank 后用） |
 
-### 2.4.10 调试
+### 2.5.10 调试
 
 | OP | Name | 说明 |
 |---|---|---|
 | 0xE0 | SCOPE_CAPTURE | 启动一次内部逻辑分析仪采集（实现可选） |
 | 0xE1 | SCOPE_READ | 读回 |
 
-## 2.5 错误码
+## 2.6 错误码
 
 `status.last_err`：
 
@@ -219,12 +282,12 @@ FPGA 内部把 BUS_CYCLES 作为最高优先级原子事务，禁止与其它操
 | 0x08 | LINK_DESYNC |
 | 0x09 | NOT_PRESENT（无卡带） |
 
-## 2.6 流控
+## 2.7 流控
 
 - host → FPGA：FPGA RX FIFO 满则在 SCLK 上 stretch（如平台不支持，则 FPGA 拉 IO0 = 0 表示 BUSY，host 必须在每字节起始前检查；具体握手由 LINK_SPEED 协商时锁定）
 - FPGA → host：READ 类如果 FIFO 空，FPGA 在该字节位置输出 0x00 同时置 `FIFO_UNDERRUN`，host 读到 underrun 后丢弃数据并重试
 
-## 2.7 版本
+## 2.8 版本
 
 `INFO` sub=0 返回：
 
@@ -240,7 +303,7 @@ struct info_ver {
 
 `INFO` sub=1 返回 capability bitmap（哪些可选功能已实现，例如 BUS_CYCLES、SCOPE_CAPTURE、自动 hotplug）。
 
-## 2.8 上电默认
+## 2.9 上电默认
 
 - 频率 = 10 MHz
 - Region 表：仅槽位 0 预配置为 /CS 全空间 STRICT（无优化）；其它槽位禁用。/CS2 需 host 显式 REGION_SET
